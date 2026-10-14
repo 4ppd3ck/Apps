@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel · AppDeck</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🚨</text></svg>">
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">🚨</span>
+    <div>
+      <h1>Sentinel</h1>
+      <div class="sub">host-compromise watchdog · <span id="platform">…</span></div>
+    </div>
+  </div>
+  <div class="topstate">
+    <span id="monitorState" class="pill">monitor: …</span>
+    <span id="scanState" class="pill">…</span>
+  </div>
+  <div class="actions">
+    <button id="scanBtn" class="btn">⟳ Scan now</button>
+    <button id="ackAll" class="btn ghost">Ack all</button>
+    <button id="delAcked" class="btn ghost">🗑 Delete acked</button>
+    <button id="exportBtn" class="btn ghost">⇩ Export</button>
+    <button id="themeBtn" class="btn ghost" title="Toggle theme">🌙</button>
+  </div>
+</header>
+
+<main>
+  <section class="tiles" id="tiles"></section>
+
+  <div class="cols">
+    <section class="panel alerts">
+      <div class="panel-head">
+        <h2>Alerts</h2>
+        <div class="filters">
+          <select id="sevFilter">
+            <option value="">all severities</option>
+            <option value="critical">critical+</option>
+            <option value="high">high+</option>
+            <option value="medium">medium+</option>
+            <option value="low">low+</option>
+            <option value="info">info</option>
+          </select>
+          <label class="chk"><input type="checkbox" id="hideAcked" checked> hide acked</label>
+        </div>
+      </div>
+      <div id="alertList" class="alert-list"><p class="muted">loading…</p></div>
+    </section>
+
+    <section class="side">
+      <section class="panel">
+        <h2>Checks</h2>
+        <div id="checkList" class="check-list"><p class="muted">loading…</p></div>
+      </section>
+
+      <section class="panel">
+        <h2>Current findings</h2>
+        <div id="findingList" class="finding-list"><p class="muted">loading…</p></div>
+      </section>
+
+      <section class="panel">
+        <h2>AppScope Monitor</h2>
+        <div id="monitorPanel" class="monitor"><p class="muted">loading…</p></div>
+      </section>
+
+      <section class="panel">
+        <h2>Baseline &amp; rules</h2>
+        <div class="btnrow">
+          <button id="resetBase" class="btn ghost small">Reset baseline (re-learn)</button>
+          <button id="editRules" class="btn ghost small">Edit rules</button>
+        </div>
+        <pre id="baseline" class="baseline mono small" hidden></pre>
+      </section>
+    </section>
+  </div>
+</main>
+
+<dialog id="rulesDlg">
+  <h2>rules.user.json</h2>
+  <p class="muted small">Overlay on defaults — omit fields to keep them. See README for the schema.</p>
+  <textarea id="rulesText" class="mono" rows="22" spellcheck="false"></textarea>
+  <div class="btnrow">
+    <button id="rulesSave" class="btn">Save</button>
+    <button id="rulesClose" class="btn ghost">Close</button>
+  </div>
+</dialog>
+
+<footer>
+  <span class="muted">Sentinel detects &amp; alerts — it does not block. Pair with AppScope Monitor's enforcement for that.</span>
+</footer>
+
+<script src="/web/app.js"></script>
+</body>
+</html>

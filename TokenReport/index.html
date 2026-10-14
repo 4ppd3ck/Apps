@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token Report</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img src="icon.svg" alt="" width="28" height="28">
+    <div>
+      <h1>Token Report</h1>
+      <p class="tagline">Which task burned the most tokens — read locally, zero AI calls</p>
+    </div>
+  </div>
+  <div class="toolbar">
+    <label class="ctl">Agent
+      <select id="agentFilter">
+        <option value="all">All agents</option>
+      </select>
+    </label>
+    <label class="ctl">Project
+      <select id="projectFilter">
+        <option value="all">All projects</option>
+      </select>
+    </label>
+    <label class="ctl">Range
+      <select id="rangeFilter"></select>
+    </label>
+    <div id="customRange" class="ctl custom-range">
+      <input type="datetime-local" id="customFrom" title="From">
+      <span>→</span>
+      <input type="datetime-local" id="customTo" title="To">
+    </div>
+    <span class="spacer"></span>
+    <button class="btn" id="btnExport" title="Download the filtered report as CSV">⬇ CSV</button>
+    <button class="btn" id="btnMd" title="Copy a Markdown summary of the filtered report to the clipboard">⧉ MD</button>
+    <button class="btn primary" id="btnAddSource">+ Add source</button>
+    <button class="btn ghost" id="btnTheme" title="Toggle light / dark theme">🌙</button>
+    <button class="btn ghost" id="btnSettings" title="Sources, pricing, archive">⚙</button>
+  </div>
+</header>
+
+<main>
+  <div id="reconnectBanner" class="reconnect-banner" hidden>
+    <span id="reconnectMsg">Sources lost folder access (browser restart) — the report below is the last cached scan.</span>
+    <button class="btn primary" id="btnReconnectAll">🔑 Restore access</button>
+  </div>
+  <div id="status" class="status">Starting…</div>
+
+  <nav class="tabs">
+    <button class="tab active" id="tabReport">Report</button>
+    <button class="tab" id="tabMix">🧮 Token mix</button>
+    <button class="tab" id="tabPeak">⏰ Peak hours</button>
+    <button class="tab" id="tabGuide">📖 Guide</button>
+  </nav>
+
+  <div id="viewReport">
+    <section id="kpis" class="kpis"></section>
+
+    <section class="card">
+      <h2>🔥 Tasks — what burned the most</h2>
+      <p class="hint">One row per agent session; the task label is the session's first user prompt.</p>
+      <table class="report">
+        <thead>
+          <tr><th>#</th><th>Task</th><th class="num">Tokens</th><th class="num">Est. cost</th><th class="num">Reqs</th><th style="width:26%"></th></tr>
+        </thead>
+        <tbody id="tasksBody"></tbody>
+      </table>
+    </section>
+
+    <div class="two-col">
+      <section class="card">
+        <h2>By model</h2>
+        <table class="report">
+          <thead>
+            <tr><th>Model</th><th class="num">Tokens</th><th class="num">Est. cost</th><th class="num">Reqs</th><th style="width:22%"></th></tr>
+          </thead>
+          <tbody id="modelsBody"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Tokens over time</h2>
+        <div class="peak-controls">
+          <label class="ctl">Metric
+            <select id="trendMetric">
+              <option value="tokens">Total tokens</option>
+              <option value="cost">Est. cost</option>
+              <option value="output">Output tokens</option>
+              <option value="requests">Requests</option>
+            </select>
+          </label>
+          <label class="ctl check" title="Running total instead of per-bucket values">
+            <input type="checkbox" id="trendCumulative"> cumulative
+          </label>
+        </div>
+        <div id="trend" class="trend"></div>
+        <div id="trendLabels" class="trend-labels"></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Recent requests (latest 100 in range)</h2>
+      <table class="report">
+        <thead>
+          <tr><th class="num">Time</th><th>Agent</th><th>Model</th><th class="num">In / cached</th><th class="num">Out</th><th class="num">Est. cost</th></tr>
+        </thead>
+        <tbody id="recentBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>By project</h2>
+      <p class="hint">Grouped by the workspace the agent was working in (log folder for Claude Code,
+        <code>cwd</code>/project fields where the log carries them). Everything without a workspace
+        lands under <code>(no project)</code>.</p>
+      <table class="report">
+        <thead>
+          <tr><th>#</th><th>Project</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Est. cost</th><th class="num">Tokens</th><th style="width:18%"></th></tr>
+        </thead>
+        <tbody id="projectsBody"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div id="viewMix" hidden>
+    <section id="mixKpis" class="kpis"></section>
+
+    <section class="card">
+      <h2>How the tokens split</h2>
+      <p class="hint">Cache reads are roughly 10× cheaper than fresh input and never bill as output —
+        a high cache share means your sessions are reusing context well.</p>
+      <div id="mixSplit" class="mix-split"></div>
+      <div id="mixLegend" class="mix-legend"></div>
+    </section>
+
+    <section class="card">
+      <h2>By task — individual kinds</h2>
+      <p class="hint">One row per agent session; the four token kinds kept separate instead of combined.</p>
+      <table class="report">
+        <thead>
+          <tr><th>#</th><th>Task</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th><th class="num">Total</th><th style="width:16%"></th></tr>
+        </thead>
+        <tbody id="mixTasksBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>By model — individual kinds</h2>
+      <table class="report">
+        <thead>
+          <tr><th>Model</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th><th class="num">Total</th><th style="width:16%"></th></tr>
+        </thead>
+        <tbody id="mixModelsBody"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <div id="viewPeak" hidden>
+    <section class="card">
+      <div class="peak-controls">
+        <h2>Peak hours</h2>
+        <label class="ctl">Metric
+          <select id="peakMetric">
+            <option value="tokens">Total tokens</option>
+            <option value="cost">Est. cost</option>
+            <option value="output">Output tokens</option>
+            <option value="requests">Requests</option>
+          </select>
+        </label>
+        <span id="tzLabel" class="muted small"></span>
+      </div>
+      <div id="peakCallout" class="peak-callout"></div>
+      <div id="hourChart" class="trend"></div>
+      <div id="hourLabels" class="trend-labels hchart-labels"></div>
+    </section>
+
+    <section class="card">
+      <h2>Weekday × hour heatmap</h2>
+      <p class="hint">Darker = more burn. Hover a cell for exact numbers. All times are local.</p>
+      <div id="heatGrid" class="heat"></div>
+    </section>
+
+    <section class="card">
+      <h2>Peak vs off-peak</h2>
+      <p class="hint">Tokens cost the same at any hour — what changes is how much a typical request
+        burns (context size, session buildup). Avg per request is the fair comparison.</p>
+      <div class="peak-controls">
+        <label class="ctl">Peak window
+          <input type="number" id="peakStart" min="0" max="23" style="width:52px"> –
+          <input type="number" id="peakEnd" min="0" max="23" style="width:52px">
+        </label>
+        <label class="ctl check"><input type="checkbox" id="peakWeekdays"> weekdays only</label>
+        <span id="peakDefLabel" class="muted small"></span>
+      </div>
+      <table class="report">
+        <thead>
+          <tr><th>Period</th><th class="num">Reqs</th><th class="num">Tokens</th><th class="num">Est. cost</th><th class="num">Avg tokens/req</th><th class="num">Avg cost/req</th><th class="num">AIU</th></tr>
+        </thead>
+        <tbody id="peakSplitBody"></tbody>
+      </table>
+      <p id="peakDelta" class="hint" style="margin-top:8px"></p>
+    </section>
+
+    <section class="card">
+      <h2>Hourly breakdown — global hours, local time</h2>
+      <div class="peak-controls">
+        <label class="ctl">Sort by
+          <select id="hourSort">
+            <option value="hour">Hour (00–23)</option>
+            <option value="tokens">Tokens</option>
+            <option value="cost">Est. cost</option>
+            <option value="avg">Avg tokens/req</option>
+          </select>
+        </label>
+      </div>
+      <table class="report">
+        <thead>
+          <tr><th>Hour</th><th>Period</th><th class="num">Reqs</th><th class="num">Tokens</th><th class="num">Cached</th><th class="num">Output</th><th class="num">Avg tok/req</th><th class="num">Est. cost</th><th class="num">Avg cost/req</th><th class="num">AIU</th></tr>
+        </thead>
+        <tbody id="hourlyBody"></tbody>
+      </table>
+    </section>
+  </div>
+</main>
+
+
+  <div id="viewGuide" hidden>
+    <section class="card">
+      <h2>What the numbers mean</h2>
+      <p class="hint">Every row in this report comes from the usage block your AI provider returns for each request.
+        Three counters decide what you pay — here is exactly how each one works and how this report treats them.</p>
+
+      <h3>⬆ Input tokens (billed at the input price)</h3>
+      <p>Everything the model <em>reads</em> on a request: your prompt, the whole conversation so far
+        (every earlier message is re-sent each turn), tool definitions, and any pasted documents.
+        Input grows as a session gets longer — request #50 re-reads requests #1–49, which is why long
+        sessions burn far more than the visible typing suggests.</p>
+
+      <h3>⬇ Output tokens (billed at the output price — usually 3–5× input)</h3>
+      <p>Everything the model <em>writes</em>: the visible answer, plus <strong>reasoning/thinking
+        tokens</strong> for reasoning models (GLM, o3, Claude extended thinking). This report counts
+        reasoning inside output because providers bill it that way — a short answer that "thought" for
+        4,000 tokens costs 4,000 output tokens. Tool calls the model emits (the JSON it writes to run a
+        command or edit a file) are output too.</p>
+
+      <h3>📚 Cache read (billed at a fraction of input — typically ~10%)</h3>
+      <p>Providers cache the unchanged prefix of your conversation. On the next request, everything
+        byte-identical to last time is read from cache at the discounted rate instead of full input price.
+        Cache read is <em>not extra</em> tokens — it is your input getting the cheap rate. That's why an
+        ongoing session is much cheaper per turn than re-explaining everything in a fresh chat. The cache
+        breaks when you edit earlier messages, switch models, or idle past the provider TTL (minutes) —
+        the next request then re-pays full input.</p>
+
+      <h3>✍️ Cache write (billed slightly above input, ~1.25×)</h3>
+      <p>The fee for <em>creating</em> cache entries: the first time a prefix is seen (or after a cache
+        break) those tokens bill as cache write instead of plain input. Next request, the same prefix
+        returns as a cheap cache read. Over a multi-turn session: ~1.25× once per prefix, ~0.1× for every
+        reuse after — a large saving when turns share context.</p>
+
+      <h3>How a real request bills</h3>
+      <p>Turn 2 of a session where turn 1 built 10,000 tokens of context and you typed 200 new tokens:
+        10,000 cache read (cheap) + 200 input (fresh text, also written to cache) + the answer as output.
+        Turn 3 re-reads all 10,200 from cache again. The whole economy: keep sessions coherent (cache
+        hits), avoid re-pasting the same content (it becomes fresh input every turn), and remember
+        thinking time bills as output.</p>
+    </section>
+
+    <section class="card">
+      <h2>How this report computes things</h2>
+      <table class="report">
+        <thead><tr><th>Report concept</th><th>How it is computed</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Tokens</strong></td><td>input + output + cache read + cache write — everything the provider billed.</td></tr>
+          <tr><td><strong>Est. cost</strong></td><td>input×price + output×price + cacheRead×input×cacheReadRatio + cacheWrite×input×cacheWriteRatio. Per-model prices live in Settings; <code>default</code> prices unknown model ids.</td></tr>
+          <tr><td><strong>Cache hit rate</strong></td><td>cacheRead ÷ (cacheRead + fresh input). High = sessions reuse context well; low = full input re-paid (fresh chats, TTL expiry, heavy pasting).</td></tr>
+          <tr><td><strong>Requests</strong></td><td>one row per provider usage event — a single user turn can be several requests (each tool call bills separately).</td></tr>
+          <tr><td><strong>Task label</strong></td><td>the session's first authored user prompt; AutoClaw policy wrappers are unwrapped automatically.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>The fine print</h2>
+      <ul class="hint">
+        <li><strong>Counts are provider-reported</strong>, not estimated: the app reads the usage blocks your
+          providers already wrote into the session logs. Tokenizers differ per model, so the same text can
+          tokenize differently — the provider's number is the one you pay for.</li>
+        <li><strong>Costs are estimates</strong>: they use the per-model USD prices in Settings. A new model id
+          not in the table falls back to <code>default</code> — edit that row to match your plan.</li>
+        <li><strong>Retries count</strong>: a provider-retried request can appear as its own usage row — one
+          expensive-looking request may be two attempts.</li>
+        <li><strong>Non-token fees</strong> (per-search charges, subscriptions) are not in the session logs and
+          therefore not in the estimates.</li>
+        <li><strong>Image inputs</strong> bill as tokens and are included when the log reports them; most CLI
+          logs only carry numeric totals.</li>
+        <li><strong>Flat plans</strong>: if your plan is a subscription rather than per-token, treat
+          "Est. cost" as a usage meter, not money.</li>
+      </ul>
+    </section>
+  </div>
+
+<dialog id="settings">
+  <h2>Settings</h2>
+
+  <h3>Sources — agent log folders</h3>
+  <p class="hint">Pick the folder where an agent writes its logs. Change it any time if the
+    location moved, or add any new agent by pointing at its folder — the format is detected
+    automatically. Folder access is remembered by your browser.</p>
+  <div id="sourceList" class="source-list"></div>
+
+  <div class="row">
+    <label class="ctl">New source type
+      <select id="templateSelect"></select>
+    </label>
+    <span id="templateHint" class="hint inline"></span>
+  </div>
+  <div class="row">
+    <label class="ctl">Agent name (optional)
+      <input type="text" id="customAgentName" maxlength="24" placeholder="e.g. MyAgent — shown in the Agent dropdown" spellcheck="false">
+    </label>
+  </div>
+  <div class="row">
+    <button class="btn primary" id="btnPickFolder">📁 Pick folder…</button>
+    <input type="file" id="dirFallback" webkitdirectory multiple hidden>
+    <input type="file" id="archiveFallback" accept=".jsonl,application/jsonl,text/plain" hidden>
+  </div>
+
+  <h3>Est. pricing (USD per 1M tokens)</h3>
+  <p class="hint">Costs are estimates from these numbers. Longest name matching the model id wins;
+    <code>default</code> catches everything else. Cache reads are priced at input × cacheReadRatio.</p>
+  <div id="priceTable"></div>
+  <div class="row">
+    <button class="btn" id="btnAddPrice">+ Add model</button>
+    <button class="btn primary" id="btnSavePrices">Save prices</button>
+    <button class="btn ghost" id="btnResetPrices">Reset to defaults</button>
+  </div>
+
+  <h3>Budget</h3>
+  <div class="row">
+    <label class="ctl">Amount $ (0 = off)
+      <input type="number" id="budgetAmount" min="0" step="1" style="width:90px">
+    </label>
+    <label class="ctl">Period
+      <select id="budgetPeriod">
+        <option value="month">monthly</option>
+        <option value="week">weekly</option>
+        <option value="day">daily</option>
+      </select>
+    </label>
+  </div>
+  <p class="hint">Adds a KPI card with spend vs budget and a pace forecast from your last 7 days of data.</p>
+
+  <h3>Archive — keep history locally</h3>
+  <p class="hint">ZCode prunes ended sessions from its rollout folder, so on-disk history shrinks.
+    Pick an archive file once; the app appends every scanned request to it (deduped) and can fold it
+    back into reports. Plain local file — the dashboard reads it instead of any AI.</p>
+  <div class="row">
+    <button class="btn" id="btnPickArchive">🗄 Choose archive file…</button>
+    <span id="archiveName" class="muted">none</span>
+  </div>
+  <div class="row">
+    <button class="btn" id="btnSaveArchive">💾 Save now</button>
+    <label class="ctl check"><input type="checkbox" id="autoArchive"> auto-archive new records on scan</label>
+    <label class="ctl check"><input type="checkbox" id="includeArchive"> include archive in reports</label>
+  </div>
+
+  <div class="row end">
+    <button class="btn" onclick="document.getElementById('settings').close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="taskDialog">
+  <h2 id="taskDialogTitle">Task</h2>
+  <p class="hint" id="taskDialogMeta"></p>
+  <table class="report">
+    <thead>
+      <tr><th class="num">Time</th><th>Model</th><th class="num">In</th><th class="num">Cache read</th><th class="num">Out</th><th class="num">Est. cost</th></tr>
+    </thead>
+    <tbody id="taskDialogBody"></tbody>
+  </table>
+  <div class="row end">
+    <button class="btn" id="taskDialogClose">Close</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script src="parsers.js"></script>
+<script src="sqlite-reader.js"></script>
+<script src="copilot.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

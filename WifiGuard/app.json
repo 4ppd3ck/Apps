@@ -1,0 +1,13 @@
+{
+  "apiVersion": 1,
+  "id": "wifiguard",
+  "name": "Wi-Fi Guard",
+  "icon": "🛰️",
+  "desc": "What's shared on your Wi-Fi, at a glance",
+  "category": "Tools",
+  "port": 0,
+  "urlPath": "/",
+  "network": true,
+  "servedBy": "launcher",
+  "version": "1.0"
+}

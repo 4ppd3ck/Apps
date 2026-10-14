@@ -1,0 +1,17 @@
+{
+  "apiVersion": 1,
+  "id": "sentinel",
+  "name": "Sentinel",
+  "icon": "🚨",
+  "desc": "Host-compromise watchdog — reads AppScope Monitor and alerts on RATs, MITM, rogue IPs, zombies, keyloggers & exfil",
+  "category": "Security",
+  "port": 0,
+  "urlPath": "/",
+  "network": false,
+  "binary": "sentinel",
+  "args": [
+    "--port",
+    "{port}"
+  ],
+  "version": "1.0"
+}

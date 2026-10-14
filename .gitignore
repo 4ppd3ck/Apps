@@ -1,0 +1,26 @@
+.DS_Store
+Thumbs.db
+
+# Go build outputs (build.sh writes dist/<name>-<os>-<arch>/ …)
+dist/
+
+# Runtime state — apps write stores to their own data/ dirs (SQLite,
+# alert baselines) and APPDECK_DATA at runtime; never ship them
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+logs/
+
+# Caches
+__pycache__/
+*.pyc
+node_modules/
+
+# Secrets
+.env
+.env.*
+
+# Tests stay local (same convention as the other repos)
+*_test.go

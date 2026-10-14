@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AppScope Monitor</title>
+<link rel="icon" type="image/png" href="/web/icon.png">
+<link rel="apple-touch-icon" href="/web/icon.png">
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">&#9678;</span>
+    <div>
+      <h1>AppScope Monitor</h1>
+      <div class="hostline" id="hostline">connecting&hellip;</div>
+    </div>
+  </div>
+  <div class="status-wrap">
+    <div class="status" id="status-chips"></div>
+    <button id="master-toggle" class="master-btn" title="turn all monitoring on or off">
+      &#9724; pause all
+    </button>
+  </div>
+</header>
+
+<div class="toolbar">
+  <label>history
+    <select id="hist-range" class="filter">
+      <option value="5">5 min</option>
+      <option value="15">15 min</option>
+      <option value="30">30 min</option>
+      <option value="60" selected>1 hr</option>
+      <option value="720">12 hrs</option>
+      <option value="1440">24 hrs</option>
+    </select>
+  </label>
+  <span class="toolbar-sep"></span>
+  <label>purge data older than
+    <select id="purge-range" class="filter">
+      <option value="1">1 hour</option>
+      <option value="6">6 hours</option>
+      <option value="24">24 hours</option>
+      <option value="168">7 days</option>
+      <option value="all">everything</option>
+    </select>
+  </label>
+  <button id="purge-btn" class="purge-btn" title="permanently delete stored events">&#128465; delete</button>
+  <span id="purge-msg"></span>
+</div>
+
+<section class="cards">
+  <div class="card">
+    <div class="label">Camera / Mic</div>
+    <div class="value" id="card-privacy">&ndash;</div>
+    <div class="sub" id="card-privacy-sub">no recent access</div>
+  </div>
+  <div class="card">
+    <div class="label">Active connections</div>
+    <div class="value" id="card-conns">&ndash;</div>
+    <div class="sub">current TCP endpoints</div>
+  </div>
+  <div class="card">
+    <div class="label">Download</div>
+    <div class="value" id="card-rx">&ndash;</div>
+    <div class="sub">all interfaces</div>
+  </div>
+  <div class="card">
+    <div class="label">Upload</div>
+    <div class="value" id="card-tx">&ndash;</div>
+    <div class="sub">all interfaces</div>
+  </div>
+  <div class="card">
+    <div class="label" id="card-events-label">Events (last 1 hr)</div>
+    <div class="value" id="card-events">&ndash;</div>
+    <div class="sub" id="card-events-sub">privacy + files + network</div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>Traffic (all interfaces)</h2></div>
+  <canvas id="chart" height="130"></canvas>
+</section>
+
+<div class="grid2">
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Live connections</h2>
+      <div class="head-controls">
+        <select id="app-conns" class="filter" title="filter by app">
+          <option value="">All apps</option>
+        </select>
+        <select id="dir-conns" class="filter" title="filter by direction">
+          <option value="">All directions</option>
+          <option value="in">Inbound only</option>
+          <option value="out">Outbound only</option>
+        </select>
+        <input class="filter" id="filter-conns" placeholder="filter&hellip;">
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table id="tbl-conns">
+        <thead><tr><th>App</th><th>User</th><th>Dir</th><th>Remote</th>
+        <th>Service / Host</th><th>Local</th><th>State</th><th>Block</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>Top apps by traffic</h2></div>
+    <div id="top-apps" class="top-apps"><div class="empty">waiting for data&hellip;</div></div>
+  </section>
+</div>
+
+<section class="panel" id="battery-panel" style="display:none">
+  <div class="panel-head">
+    <h2>Battery &amp; power</h2>
+    <div class="head-controls">
+      <select id="gauge-style" class="filter" title="gauge style">
+        <option value="gauges-solid">Solid</option>
+        <option value="gauges-gradient" selected>Gradient</option>
+        <option value="gauges-segmented">Segmented</option>
+        <option value="gauges-neon">Neon</option>
+      </select>
+      <span id="battery-summary" class="dim"></span>
+    </div>
+  </div>
+  <div class="battery-grid">
+    <div class="battery-side">
+      <div class="vgauges gauges-gradient" id="vgauges">
+        <div class="vgauge" id="vg-batt" title="battery charge">
+          <div class="vbar"><div class="vfill" id="g-batt"></div></div>
+          <span class="vlabel">batt</span><span class="vval" id="g-batt-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-cpu" title="system CPU usage">
+          <div class="vbar"><div class="vfill" id="g-cpu"></div></div>
+          <span class="vlabel">cpu</span><span class="vval" id="g-cpu-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-mem" title="memory (RAM) in use">
+          <div class="vbar"><div class="vfill" id="g-mem"></div></div>
+          <span class="vlabel">mem</span><span class="vval" id="g-mem-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-disk" title="root volume space used">
+          <div class="vbar"><div class="vfill" id="g-disk"></div></div>
+          <span class="vlabel">disk</span><span class="vval" id="g-disk-v">&ndash;</span>
+        </div>
+      </div>
+      <div class="vitals-detail">
+        <div><span>battery</span><b id="vd-batt">&ndash;</b></div>
+        <div><span>ram</span><b id="vd-ram">&ndash;</b></div>
+        <div><span>disk</span><b id="vd-disk">&ndash;</b></div>
+      </div>
+      <div class="volumes-block">
+        <div class="volumes-head">volumes</div>
+        <div id="volumes-list"></div>
+      </div>
+      <div id="battery-assertions" class="assertions"></div>
+    </div>
+    <div class="tbl-wrap">
+      <table id="tbl-power">
+        <thead><tr><th>App</th><th>CPU %</th><th>Runtime</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="dim" style="padding:5px 10px; font-size:11px">CPU% is the
+        available power proxy (no kernel power API needed); runtime = process age.</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Privacy events <span class="tag tag-priv">camera &middot; mic &middot; permissions</span></h2>
+    <div class="head-controls" id="fc-privacy">
+      <input class="filter" id="filter-privacy" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-privacy">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Device</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>File access <span class="tag tag-file">watched dirs</span></h2>
+    <div class="head-controls" id="fc-file">
+      <input class="filter" id="filter-file" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-file">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Path</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Network events <span class="tag tag-net">new connections &middot; per-app traffic</span></h2>
+    <div class="head-controls" id="fc-network">
+      <select id="dir-network" class="filter" title="filter by direction">
+        <option value="">All directions</option>
+        <option value="in">Inbound only</option>
+        <option value="out">Outbound only</option>
+      </select>
+      <input class="filter" id="filter-network" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-network">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Remote</th><th>Direction</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>System &amp; devices <span class="tag tag-sys">usb &middot; mounts &middot; logins &middot; app switches</span></h2>
+    <div class="head-controls" id="fc-system">
+      <input class="filter" id="filter-system" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-system">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Device</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="blocks-panel">
+  <div class="panel-head">
+    <h2>Blocked connections <span class="tag tag-net" id="blocks-status">checking&hellip;</span></h2>
+    <div class="head-controls">
+      <select id="block-type" class="filter" title="what to block">
+        <option value="ip">IP address</option>
+        <option value="connection">IP + port</option>
+        <option value="app">App (path)</option>
+      </select>
+      <input class="filter" id="block-ip" placeholder="IPv4, e.g. 203.0.113.7">
+      <input class="filter" id="block-port" placeholder="port" style="display:none">
+      <input class="filter" id="block-app" placeholder="/path/to/executable" style="display:none">
+      <button id="block-add" class="purge-btn" title="add a firewall block rule">&#9940; block</button>
+      <button id="block-reapply" class="purge-btn" title="retry applying queued blocks">re-apply</button>
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-blocks">
+      <thead><tr><th>Added</th><th>Type</th><th>Target</th><th>Status</th><th>Detail</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <span id="sse-state" class="dot dot-off"></span>
+  <span id="footer-text">starting&hellip;</span>
+  <span class="spacer"></span>
+  <label class="pause"><input type="checkbox" id="pause"> pause live updates</label>
+</footer>
+
+<script src="/web/app.js"></script>
+</body>
+</html>

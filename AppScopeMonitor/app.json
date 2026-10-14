@@ -1,0 +1,17 @@
+{
+  "apiVersion": 1,
+  "id": "monitor",
+  "name": "AppScope Monitor",
+  "icon": "🛡️",
+  "desc": "Privacy & network activity dashboard",
+  "category": "Tools",
+  "port": 8765,
+  "urlPath": "/",
+  "network": false,
+  "binary": "monitor",
+  "args": [
+    "--port",
+    "{port}"
+  ],
+  "version": "1.0"
+}
