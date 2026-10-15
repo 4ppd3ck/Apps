@@ -1,0 +1,394 @@
+{
+ "version": 1,
+ "note": "Descale rules DB. Every rule is evaluated against the running OS, arch and machine (vars, requires, running apps) — a rule that does not apply simply reports 'unavailable'. Safety tiers: 'safe' = pre-selected and regenerable content; 'review' = never pre-checked, the user must opt in. Cleaning moves files to ~/.Trash (action 'trash'); action 'delete' is permanent and used only where files are already trash; action 'command' runs an explicit shell command and is disabled until you set enabled=true.",
+ "vars": [
+  {
+   "name": "brewPrefix",
+   "exec": "brew --prefix",
+   "fallback": {
+    "darwin/arm64": "/opt/homebrew",
+    "darwin/amd64": "/usr/local",
+    "*": "/opt/homebrew"
+   }
+  },
+  { "name": "localappdata", "env": "LOCALAPPDATA" },
+  { "name": "appdata", "env": "APPDATA" },
+  { "name": "userprofile", "env": "USERPROFILE" },
+  {
+   "name": "windir",
+   "env": "WINDIR",
+   "fallback": { "windows": "C:\\Windows" }
+  }
+ ],
+ "rules": [
+  {
+   "id": "app-caches",
+   "title": "Application caches",
+   "description": "Third-party app caches under ~/Library/Caches. Regenerated on demand; apps may be slower on first relaunch. Apple's own caches (com.apple.*) and browser/dev caches are excluded — they have their own guarded rules.",
+   "category": "Caches",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Caches/*"],
+   "exclude": [
+    "~/Library/Caches/com.apple.",
+    "~/Library/Caches/go-build",
+    "~/Library/Caches/pip",
+    "~/Library/Caches/Homebrew",
+    "~/Library/Caches/Yarn",
+    "~/Library/Caches/Google",
+    "~/Library/Caches/com.google.Chrome",
+    "~/Library/Caches/Microsoft Edge",
+    "~/Library/Caches/com.brave.Browser",
+    "~/Library/Caches/Firefox",
+    "~/Library/Caches/Arc",
+    "~/Library/Caches/company.thebrowser.Browser"
+   ]
+  },
+  {
+   "id": "browser-caches",
+   "title": "Browser caches (Chrome, Edge, Brave, Firefox, Arc)",
+   "description": "Cached pages and images only — never cookies, passwords or history. Skipped entirely while any listed browser is running, because live profile databases must not be touched.",
+   "category": "Caches",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": [
+    "~/Library/Caches/Google/Chrome/*",
+    "~/Library/Caches/com.google.Chrome/*",
+    "~/Library/Caches/Microsoft Edge/*",
+    "~/Library/Caches/com.brave.Browser/*",
+    "~/Library/Caches/Firefox/*",
+    "~/Library/Caches/Arc/*",
+    "~/Library/Caches/company.thebrowser.Browser/*"
+   ],
+   "runningApps": ["Google Chrome", "Microsoft Edge", "Brave Browser", "firefox", "Arc"]
+  },
+  {
+   "id": "app-logs",
+   "title": "Application logs",
+   "description": "Log files apps wrote under ~/Library/Logs (excluding crash reports, which have their own rule).",
+   "category": "Logs",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Logs/*"],
+   "exclude": ["~/Library/Logs/DiagnosticReports"]
+  },
+  {
+   "id": "crash-reports",
+   "title": "Crash & diagnostic reports",
+   "description": "Old .ips/.crash/.panic reports in ~/Library/Logs/DiagnosticReports. Nothing on your machine needs them after a bug is reported.",
+   "category": "Logs",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Logs/DiagnosticReports/*"]
+  },
+  {
+   "id": "saved-app-state",
+   "title": "Saved application state",
+   "description": "Window positions and restore snapshots in ~/Library/Saved Application State. Regenerated as you use apps; you may lose 'reopen last windows' once.",
+   "category": "System",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Saved Application State/*"]
+  },
+  {
+   "id": "xcode-derived-data",
+   "title": "Xcode — DerivedData",
+   "description": "Build intermediates and indexes. Fully regenerable, but the first build of each project afterwards is slow. Skipped while Xcode is open.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Developer/Xcode/DerivedData/*"],
+   "requires": { "dirs": ["~/Library/Developer/Xcode"] },
+   "runningApps": ["Xcode"]
+  },
+  {
+   "id": "xcode-simulator-caches",
+   "title": "Xcode — Simulator caches",
+   "description": "CoreSimulator caches (installed simulators and their data are not touched). Skipped while the Simulator app is open.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Developer/CoreSimulator/Caches/*"],
+   "requires": { "dirs": ["~/Library/Developer/CoreSimulator"] },
+   "runningApps": ["Simulator"]
+  },
+  {
+   "id": "go-build-cache",
+   "title": "Go — build cache",
+   "description": "Compiled package cache (~/Library/Caches/go-build). Regenerated from source on the next build; builds get slower once.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Caches/go-build/*"]
+  },
+  {
+   "id": "pip-cache",
+   "title": "pip — download cache",
+   "description": "Downloaded wheels/packages in ~/Library/Caches/pip. Re-downloaded on the next install.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Caches/pip/*"]
+  },
+  {
+   "id": "homebrew-cache",
+   "title": "Homebrew — download cache",
+   "description": "Downloaded bottles and sources. Resolved per architecture: {brewPrefix} is /opt/homebrew on Apple Silicon and /usr/local on Intel Macs.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/Library/Caches/Homebrew/*", "{brewPrefix}/cache/*"],
+   "requires": { "binary": "brew" }
+  },
+  {
+   "id": "npm-cache",
+   "title": "npm — package cache",
+   "description": "The content-addressed package store (~/.npm/_cacache) and npm logs. Re-fetched on the next install.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/.npm/_cacache/*", "~/.npm/_logs/*"]
+  },
+  {
+   "id": "cargo-cache",
+   "title": "Rust — cargo registry cache",
+   "description": "Downloaded crate archives and extracted sources (~/.cargo/registry). Re-downloaded by the next build.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/.cargo/registry/cache/*", "~/.cargo/registry/src/*"]
+  },
+  {
+   "id": "gradle-cache",
+   "title": "Gradle — caches",
+   "description": "Dependency and build caches in ~/.gradle/caches. Re-downloaded/rebuilt on the next Gradle run.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/.gradle/caches/*"]
+  },
+  {
+   "id": "maven-cache",
+   "title": "Maven — repository cache",
+   "description": "Downloaded artifacts in ~/.m2/repository. Re-downloaded on the next build.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "safe",
+   "paths": ["~/.m2/repository/*"]
+  },
+  {
+   "id": "trash-empty",
+   "title": "Empty the Trash",
+   "description": "Permanently deletes everything currently in ~/.Trash — including items you trashed yourself before this scan, and files other rules moved there earlier in the same session. For that reason it can only be run alone, is never pre-selected, and cannot be undone.",
+   "category": "Trash",
+   "os": ["darwin"],
+   "safety": "review",
+   "action": "delete",
+   "paths": ["~/.Trash/*"]
+  },
+  {
+   "id": "xcode-archives",
+   "title": "Xcode — Archives",
+   "description": "App archives from 'Product → Archive'. Needed to upload a past build to App Store Connect or attach to a crash — delete only builds you will never ship or symbolicate again.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "review",
+   "paths": ["~/Library/Developer/Xcode/Archives/*"],
+   "requires": { "dirs": ["~/Library/Developer/Xcode"] }
+  },
+  {
+   "id": "xcode-device-support",
+   "title": "Xcode — iOS DeviceSupport",
+   "description": "Symbol files pulled from each iOS device version you ever connected. Old versions can go; the next connect of that device re-creates them slowly.",
+   "category": "Development",
+   "os": ["darwin"],
+   "safety": "review",
+   "paths": ["~/Library/Developer/Xcode/iOS DeviceSupport/*"],
+   "requires": { "dirs": ["~/Library/Developer/Xcode"] }
+  },
+  {
+   "id": "ios-backups",
+   "title": "iPhone/iPad backups",
+   "description": "Full device backups in Application Support/MobileSync. These may contain the only copy of photos and messages — delete only backups you are certain you do not need.",
+   "category": "System",
+   "os": ["darwin"],
+   "safety": "review",
+   "paths": ["~/Library/Application Support/MobileSync/Backup/*"]
+  },
+  {
+   "id": "downloads-installers",
+   "title": "Old installers in Downloads",
+   "description": ".dmg/.pkg/.zip files in Downloads older than 30 days — typically installers already applied. Files newer than 30 days are never listed.",
+   "category": "Downloads",
+   "os": ["darwin"],
+   "safety": "review",
+   "minAgeDays": 30,
+   "paths": ["~/Downloads/*.dmg", "~/Downloads/*.pkg", "~/Downloads/*.zip"]
+  },
+  {
+   "id": "docker-prune",
+   "title": "Docker — prune unused images/containers",
+   "description": "Runs 'docker system prune -f' (dangling images, stopped containers, unused networks). Disabled by default: set \"enabled\": true on this rule after reading what the command removes. Requires the Docker daemon to be running.",
+   "category": "Development",
+   "os": ["darwin", "windows", "linux"],
+   "safety": "review",
+   "action": "command",
+   "command": "docker system prune -f",
+   "requires": { "binary": "docker" }
+  },
+  {
+   "id": "win-user-temp",
+   "title": "User temp files",
+   "description": "%LOCALAPPDATA%\\Temp — leftover installers, log tails and crash scraps. Files locked by running programs simply fail to move and are reported, never forced.",
+   "category": "Caches",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\Temp\\*"]
+  },
+  {
+   "id": "win-crash-dumps",
+   "title": "Crash dumps",
+   "description": "Application crash minidumps in %LOCALAPPDATA%\\CrashDumps. Useful only while a bug is being debugged.",
+   "category": "Logs",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\CrashDumps\\*"]
+  },
+  {
+   "id": "win-error-reports",
+   "title": "Windows Error Reporting queue",
+   "description": "Queued and archived WER reports (%LOCALAPPDATA%\\Microsoft\\Windows\\WER). Already-submitted reports are safe to clear.",
+   "category": "Logs",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": [
+    "{localappdata}\\Microsoft\\Windows\\WER\\ReportArchive\\*",
+    "{localappdata}\\Microsoft\\Windows\\WER\\ReportQueue\\*"
+   ]
+  },
+  {
+   "id": "win-shader-cache",
+   "title": "DirectX shader cache",
+   "description": "Compiled shader cache (%LOCALAPPDATA%\\D3DSCache). Rebuilt automatically; games may stutter for a few seconds on first launch afterwards.",
+   "category": "Caches",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\D3DSCache\\*"]
+  },
+  {
+   "id": "win-npm-cache",
+   "title": "npm — package cache",
+   "description": "npm's content-addressed store (%LOCALAPPDATA%\\npm-cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\npm-cache\\*"]
+  },
+  {
+   "id": "win-pip-cache",
+   "title": "pip — download cache",
+   "description": "Downloaded wheels in %LOCALAPPDATA%\\pip\\Cache. Re-downloaded on the next install.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\pip\\Cache\\*"]
+  },
+  {
+   "id": "win-go-build-cache",
+   "title": "Go — build cache",
+   "description": "Compiled package cache (%LOCALAPPDATA%\\go-build). Regenerated from source on the next build.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\go-build\\*"]
+  },
+  {
+   "id": "win-gradle-cache",
+   "title": "Gradle — caches",
+   "description": "Dependency and build caches in %USERPROFILE%\\.gradle\\caches. Re-downloaded on the next Gradle run.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{userprofile}\\.gradle\\caches\\*"]
+  },
+  {
+   "id": "win-maven-cache",
+   "title": "Maven — repository cache",
+   "description": "Downloaded artifacts in %USERPROFILE%\\.m2\\repository. Re-downloaded on the next build.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{userprofile}\\.m2\\repository\\*"]
+  },
+  {
+   "id": "win-cargo-cache",
+   "title": "Rust — cargo registry cache",
+   "description": "Downloaded crates and extracted sources (%USERPROFILE%\\.cargo\\registry). Re-downloaded by the next build.",
+   "category": "Development",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{userprofile}\\.cargo\\registry\\cache\\*", "{userprofile}\\.cargo\\registry\\src\\*"]
+  },
+  {
+   "id": "win-thumbnail-cache",
+   "title": "Explorer thumbnail cache",
+   "description": "thumbcache_*.db files Explorer builds for folder previews. They regenerate as you browse; files locked by Explorer are skipped automatically.",
+   "category": "Caches",
+   "os": ["windows"],
+   "safety": "safe",
+   "paths": ["{localappdata}\\Microsoft\\Windows\\Explorer\\thumbcache_*.db"]
+  },
+  {
+   "id": "win-downloads-installers",
+   "title": "Old installers in Downloads",
+   "description": ".exe/.msi/.zip files in Downloads older than 30 days — typically installers already applied. Newer files are never listed.",
+   "category": "Downloads",
+   "os": ["windows"],
+   "safety": "review",
+   "minAgeDays": 30,
+   "paths": ["{userprofile}\\Downloads\\*.exe", "{userprofile}\\Downloads\\*.msi", "{userprofile}\\Downloads\\*.zip"]
+  },
+  {
+   "id": "win-update-cache",
+   "title": "Windows Update download cache",
+   "description": "%WINDIR%\\SoftwareDistribution\\Download — already-installed update packages. Needs an elevated Descale; stop the wuauserv service first if files are locked.",
+   "category": "System",
+   "os": ["windows"],
+   "safety": "review",
+   "requiresAdmin": true,
+   "paths": ["{windir}\\SoftwareDistribution\\Download\\*"]
+  },
+  {
+   "id": "win-prefetch",
+   "title": "Windows Prefetch",
+   "description": "%WINDIR%\\Prefetch traces. Windows rebuilds them; clearing gives a short-term 'faster first boot' and slightly slower launches until rebuilt. Needs an elevated Descale.",
+   "category": "System",
+   "os": ["windows"],
+   "safety": "review",
+   "requiresAdmin": true,
+   "paths": ["{windir}\\Prefetch\\*"]
+  },
+  {
+   "id": "win-delivery-optimization",
+   "title": "Delivery Optimization cache",
+   "description": "Runs the PowerShell cmdlet that clears Windows' peer-to-peer update distribution cache. Disabled by default — set \"enabled\": true after reviewing.",
+   "category": "System",
+   "os": ["windows"],
+   "safety": "review",
+   "action": "command",
+   "command": "powershell -NoProfile -Command \"Delete-DeliveryOptimizationCache -Force\"",
+   "requiresAdmin": true
+  },
+  {
+   "id": "win-recycle-bin",
+   "title": "Empty the Recycle Bin",
+   "description": "Runs Clear-RecycleBin -Force — permanent, cannot be undone, and (like on macOS) it must be run alone. Disabled by default.",
+   "category": "Trash",
+   "os": ["windows"],
+   "safety": "review",
+   "action": "command",
+   "command": "powershell -NoProfile -Command \"Clear-RecycleBin -Force\"",
+   "permanent": true
+  }
+ ]
+}

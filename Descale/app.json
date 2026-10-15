@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "descale",
+  "name": "Descale",
+  "icon": "💧",
+  "desc": "Buildup cleaner, app uninstaller and startup manager — OS/arch-aware, Trash-based (macOS first)",
+  "category": "Tools",
+  "port": 8212,
+  "urlPath": "/",
+  "network": true,
+  "binary": "descale",
+  "args": [
+    "{port}"
+  ],
+  "version": "0.4.0"
+}

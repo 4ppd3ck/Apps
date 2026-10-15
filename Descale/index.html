@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>💧 Descale</title>
+<link rel="stylesheet" href="css/app.css">
+<script>
+  // Apply the saved theme before first paint to avoid a flash.
+  try {
+    const t = localStorage.getItem('descale.theme') ||
+      (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+</head>
+<body>
+<header>
+  <div class="head-row">
+    <div class="brand">
+      <span class="logo">💧</span>
+      <div>
+        <h1>Descale</h1>
+        <p class="sub">Buildup report · app uninstaller · startup manager. Nothing is touched without your confirmation.</p>
+      </div>
+    </div>
+    <div class="machine" id="machine"></div>
+    <button id="themeBtn" class="btn ghost theme-btn" title="Toggle light/dark" aria-label="Toggle light or dark theme">🌙</button>
+  </div>
+  <nav class="tabs">
+    <button data-tab="buildup" class="on">💧 Buildup</button>
+    <button data-tab="uninstall">🗑️ Uninstall</button>
+    <button data-tab="startup">🚀 Startup</button>
+  </nav>
+</header>
+
+<main>
+  <div id="error" class="error" hidden></div>
+
+  <div id="onboard" class="note onboarding" hidden>
+    <b>Welcome to Descale.</b> It separates buildup from your data — like descaling a kettle.
+    <b>safe</b> items (regenerable caches) are pre-selected; <b class="amber">review</b> items are never
+    pre-checked; everything cleaned goes to the Trash first, and every session can be undone from the journal.
+    <button class="btn small primary" id="onboardOk">Got it</button>
+  </div>
+
+  <!-- ============ Buildup tab ============ -->
+  <section id="tab-buildup">
+    <section class="stats" id="stats" hidden></section>
+    <div class="toolbar">
+      <button id="scanBtn" class="btn primary">🔍 Scan this machine</button>
+      <div class="progress" id="scanProgress" hidden><div class="bar" id="scanBar"></div></div>
+      <span id="scanMeta" class="muted"></span>
+    </div>
+    <div id="results" hidden></div>
+    <details class="journal" id="journalBox">
+      <summary>🧾 Cleaning journal <span class="muted" id="journalCount"></span></summary>
+      <div id="journal"></div>
+    </details>
+  </section>
+
+  <!-- ============ Uninstall tab ============ -->
+  <section id="tab-uninstall" hidden>
+    <div class="toolbar">
+      <input id="appSearch" class="search" type="search" placeholder="Filter applications…">
+      <button id="appsReload" class="btn ghost small">↻ Reload list</button>
+      <span id="appsMeta" class="muted"></span>
+    </div>
+    <div id="appsList" class="grid"></div>
+    <div id="appDetail" hidden></div>
+  </section>
+
+  <!-- ============ Startup tab ============ -->
+  <section id="tab-startup" hidden>
+    <p class="muted note" id="startupNote">These are <b>Launch Agents</b> — programs macOS starts when you log in. Deactivating renames their plist (reversible, no admin needed); activating restores and starts them. The Login Items shown in System Settings are managed by macOS itself and are not listed here. System-wide agents and daemons are read-only: they need an administrator.</p>
+    <div class="rowline card-row" id="nudgeRow" hidden>
+      <span class="grow"><b>Weekly buildup reminder</b><br>
+        <span class="muted small">A local notification every Monday at 10:00 when safe-tier buildup crosses the threshold. Runs entirely on this machine.</span></span>
+      <button class="btn small primary" id="nudgeBtn">Install</button>
+    </div>
+    <h2>Your launch agents</h2>
+    <div id="uaList"></div>
+    <h2>System-wide (read-only)</h2>
+    <div id="saList"></div>
+  </section>
+
+  <footer>
+    <p>Descale separates buildup from your data. <b>safe</b> items are regenerable caches and are pre-selected; <b class="amber">review</b> items are never pre-checked. Cleaning moves files to the Trash — except Empty-the-Trash, which is permanent, review-only, and must run alone. Every session is journalled and restorable.</p>
+    <p class="muted">🔒 Localhost-only, zero telemetry — nothing about your machine leaves it. Rules live in <code>rules/descale-rules.json</code> — edit and rescan, no rebuild needed. <button class="btn small ghost" id="trustBtn">What Descale knows</button></p>
+  </footer>
+</main>
+
+<div class="cleanbar" id="cleanbar" hidden>
+  <span id="cleanSummary"></span>
+  <button class="btn small ghost" id="deselectAll">Deselect all</button>
+  <button id="cleanBtn" class="btn primary">🧼 Clean selected…</button>
+</div>
+
+<dialog id="confirmDialog">
+  <h3>Confirm cleaning</h3>
+  <p class="muted">Files are moved to the Trash (restorable from the journal). Permanent rules are called out.</p>
+  <div id="planList"></div>
+  <div class="dialog-actions">
+    <button class="btn ghost" id="cancelClean">Cancel</button>
+    <button class="btn danger" id="confirmClean">Clean now</button>
+  </div>
+</dialog>
+
+<dialog id="uninstallDialog">
+  <h3 id="udTitle">Confirm uninstall</h3>
+  <p class="muted">The app bundle and its checked leftovers are moved to the Trash — restorable from the journal.</p>
+  <div id="udList"></div>
+  <div class="dialog-actions">
+    <button class="btn ghost" id="udCancel">Cancel</button>
+    <button class="btn danger" id="udGo">Uninstall</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<dialog id="trustDialog" aria-labelledby="trustTitle">
+  <h3 id="trustTitle">🔒 What Descale knows</h3>
+  <ul class="trust-list">
+    <li>The server binds to <b>127.0.0.1 only</b> — unreachable from your network.</li>
+    <li><b>Zero telemetry</b>: no analytics, no crash reporting, no file inventories — nothing about your machine leaves it.</li>
+    <li>Cleaning moves files to the <b>Trash</b> first and every session is journalled and restorable. The one permanent action (Empty the Trash / Recycle Bin) is review-only and always requires a separate confirmation.</li>
+    <li>The rules database is a local file: <code>rules/descale-rules.json</code>. <span id="trustSigned"></span></li>
+    <li>The journal lives at <code id="trustJournal"></code>.</li>
+    <li>Scans never send anything anywhere; every endpoint listed in the README runs on this machine, for this machine.</li>
+  </ul>
+  <div class="dialog-actions"><button class="btn primary" id="trustClose">Close</button></div>
+</dialog>
+
+<script src="js/app.js"></script>
+</body>
+</html>
