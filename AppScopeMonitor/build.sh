@@ -1,63 +1,75 @@
 #!/bin/sh
-# Build release binaries for every supported OS/arch into dist/.
-# Each dist/monitor-<os>-<arch>/ folder holds the binary plus the web/
-# dashboard assets it serves; SHA256SUMS lists all binaries.
+# build.sh — build monitor.
 #
-# Requires only the Go toolchain: all targets cross-compile (pure Go,
-# no cgo). Run from anywhere: ./build.sh
-set -e
-cd "$(dirname "$0")"
+#   ./build.sh                    host binary only — monitor-<os>-<arch>[.exe]
+#                                 beside go.mod, the name AppDeck launches and
+#                                 imports (this is the dev/import loop)
+#   ./build.sh --all              full cross-compile matrix into ./ and dist/
+#                                 + SHA256SUMS (release artefacts)
+#   ./build.sh darwin/arm64 …     build one or more specific os/arch targets
+#   ./build.sh --host-only        legacy alias for the default
+#
+# Pure-Go stdlib, no cgo: every target builds with `go build` alone.
+# Output layout mirrors AppScope Monitor:
+#   ./monitor-<os>-<arch>[.exe]     in-folder binaries (launcher's pick order)
+#   ./dist/<os>-<arch>/monitor[.exe]
+#   ./dist/SHA256SUMS
+set -eu
 
-if ! command -v go >/dev/null 2>&1; then
-    echo "error: Go toolchain (go 1.27+) is required" >&2
-    exit 1
-fi
+OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  arm64|aarch64) ARCH=arm64 ;;
+  x86_64) ARCH=amd64 ;;
+  *) : ;;
+esac
+HOST="${OS_NAME}-${ARCH}"
+HOST_T="${OS_NAME}/${ARCH}"
 
-echo "== host tests =="
-go test ./...
+TARGETS="
+darwin/amd64 darwin/arm64
+windows/amd64 windows/arm64 windows/386
+linux/amd64 linux/arm64 linux/386 linux/arm
+freebsd/amd64 openbsd/amd64 netbsd/amd64
+"
 
-rm -rf dist
-mkdir -p dist
+ALL=0
+DIST=0
+ASKED=""
+for arg in "$@"; do
+  case "$arg" in
+    --all) ALL=1; DIST=1 ;;
+    --host-only) ;; # legacy alias — the default already builds host-only
+    */*) ASKED="$ASKED $arg"; DIST=1 ;;
+    *) echo "error: unknown option '$arg' (supported: --all, --host-only, <os>/<arch>…)" >&2; exit 1 ;;
+  esac
+done
 
-# build <os> <arch> [goarm]
-build() {
-    os=$1
-    arch=$2
-    dir="dist/monitor-$os-$arch"
-    mkdir -p "$dir"
-    if [ "$os" = "windows" ]; then
-        bin="$dir/monitor.exe"
-    else
-        bin="$dir/monitor"
-    fi
-    if [ "$#" -ge 3 ]; then
-        GOARM=$3 GOOS=$os GOARCH=$arch go build -o "$bin" ./cmd/monitor
-    else
-        GOOS=$os GOARCH=$arch go build -o "$bin" ./cmd/monitor
-    fi
-    cp -r web "$dir/web"
-    echo "built $bin"
+build_one() {
+  goos=${1%/*}; goarch=${1#*/}
+  out="monitor-${goos}-${goarch}"
+  [ "$goos" = "windows" ] && out="${out}.exe"
+  echo "== ${goos}/${goarch}"
+  env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+    sh -c "if [ '$goarch' = 'arm' ]; then export GOARM=7; fi; \
+           go build -trimpath -ldflags '-s -w' -o '$out' ."
+  if [ "$DIST" = "1" ]; then
+    mkdir -p "dist/${goos}-${goarch}"
+    cp "$out" "dist/${goos}-${goarch}/"
+  fi
 }
 
-#              OS        ARCH   (GOARM)
-build          windows   amd64
-build          windows   arm64
-build          windows   386
-build          linux     amd64
-build          linux     arm64
-build          linux     386
-build          linux     arm    7   # 32-bit ARM: modernc.org/libc needs ARMv7
-build          darwin    amd64
-build          darwin    arm64
-build          freebsd   amd64
-build          openbsd   amd64
-build          netbsd    amd64
-
-echo "== checksums =="
-if command -v sha256sum >/dev/null 2>&1; then
-    ( cd dist && find . -type f -exec sha256sum {} + ) > dist/SHA256SUMS
+if [ "$ALL" = "1" ]; then
+  for t in $TARGETS; do build_one "$t"; done
+elif [ -n "$ASKED" ]; then
+  for t in $ASKED; do build_one "$t"; done
 else
-    ( cd dist && find . -type f -exec shasum -a 256 {} + ) > dist/SHA256SUMS
+  build_one "$HOST_T"
 fi
 
-echo "done: dist/ (binaries + web assets + SHA256SUMS)"
+# SHA256SUMS always reflects the current contents of dist/.
+if [ "$DIST" = "1" ] && [ -n "$(find dist -type f -name 'monitor*' -print -quit 2>/dev/null)" ]; then
+  ( cd dist && find . -type f -name 'monitor*' | sort | xargs shasum -a 256 ) > dist/SHA256SUMS
+  echo "dist/ + SHA256SUMS written"
+fi
+echo "done."
