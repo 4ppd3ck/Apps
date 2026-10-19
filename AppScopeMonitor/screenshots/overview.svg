@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">AppScope Monitor example dashboard</title>
+  <desc id="desc">A fictional monitoring dashboard with synthetic connection and collector information.</desc>
+  <rect width="1200" height="720" fill="#10131b"/><rect width="1200" height="72" fill="#171b27"/>
+  <text x="36" y="47" fill="#f4f6ff" font-family="Arial,sans-serif" font-size="25" font-weight="700">AppScope Monitor</text>
+  <text x="1000" y="44" fill="#8ea0b7" font-family="Arial,sans-serif" font-size="14">SAMPLE DEVICE</text>
+  <g font-family="Arial,sans-serif">
+    <rect x="32" y="94" width="1136" height="94" rx="14" fill="#1b2230"/>
+    <text x="54" y="128" fill="#aab6cb" font-size="14">COLLECTORS</text>
+    <text x="54" y="163" fill="#75d7a2" font-size="22" font-weight="700">5 active</text>
+    <text x="280" y="163" fill="#e8c97b" font-size="22" font-weight="700">2 limited</text>
+    <text x="519" y="163" fill="#93a1b9" font-size="22" font-weight="700">3 unavailable</text>
+    <text x="852" y="163" fill="#93a1b9" font-size="14">No firewall rules applied</text>
+    <rect x="32" y="208" width="1136" height="462" rx="14" fill="#171b27"/>
+    <text x="56" y="249" fill="#f1f3fb" font-size="20" font-weight="700">Recent connections</text>
+    <text x="56" y="286" fill="#8290aa" font-size="13">APP</text><text x="340" y="286" fill="#8290aa" font-size="13">REMOTE ENDPOINT</text><text x="750" y="286" fill="#8290aa" font-size="13">STATUS</text><text x="984" y="286" fill="#8290aa" font-size="13">COLLECTOR</text>
+    <path d="M55 301H1145M55 368H1145M55 435H1145M55 502H1145M55 569H1145" stroke="#2d3548"/>
+    <text x="56" y="342" fill="#e2e6f0" font-size="16">sample-browser</text><text x="340" y="342" fill="#9dc8f2" font-size="16">example.test:443</text><text x="750" y="342" fill="#75d7a2" font-size="15">Established</text><text x="984" y="342" fill="#b0bacd" font-size="15">Network</text>
+    <text x="56" y="409" fill="#e2e6f0" font-size="16">sample-sync</text><text x="340" y="409" fill="#9dc8f2" font-size="16">198.51.100.24:443</text><text x="750" y="409" fill="#75d7a2" font-size="15">Established</text><text x="984" y="409" fill="#b0bacd" font-size="15">Network</text>
+    <text x="56" y="476" fill="#e2e6f0" font-size="16">sample-editor</text><text x="340" y="476" fill="#9dc8f2" font-size="16">203.0.113.8:443</text><text x="750" y="476" fill="#75d7a2" font-size="15">Established</text><text x="984" y="476" fill="#b0bacd" font-size="15">Network</text>
+    <text x="56" y="543" fill="#e2e6f0" font-size="16">sample-service</text><text x="340" y="543" fill="#9dc8f2" font-size="16">example.test:443</text><text x="750" y="543" fill="#75d7a2" font-size="15">Established</text><text x="984" y="543" fill="#b0bacd" font-size="15">Network</text>
+    <text x="58" y="625" fill="#7f8ba2" font-size="13">Fictional rows and documentation-only addresses</text>
+    <text x="35" y="700" fill="#8290aa" font-size="13">SYNTHETIC EXAMPLE UI · No real process, file, or network data</text>
+  </g>
+</svg>

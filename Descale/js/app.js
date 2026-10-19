@@ -68,11 +68,12 @@ function showTab(t) {
   tab = t;
   localStorage.setItem('descale.tab', t);
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-  for (const name of ['buildup', 'uninstall', 'startup']) {
+  for (const name of ['buildup', 'uninstall', 'traces', 'startup']) {
     document.getElementById('tab-' + name).hidden = name !== t;
   }
   $('#cleanbar').hidden = t !== 'buildup' || selected.size === 0;
   if (t === 'uninstall') loadApps();
+  if (t === 'traces') loadTraces();
   if (t === 'startup') loadStartup();
 }
 
@@ -339,7 +340,7 @@ let appsCache = null;
 
 async function loadApps(force) {
   if (appsCache && !force) { renderApps(); return; }
-  $('#appsMeta').textContent = 'listing /Applications…';
+  $('#appsMeta').textContent = 'listing installed applications…';
   try {
     const d = await api('/api/apps');
     if (d.note && (!d.apps || !d.apps.length)) {
@@ -376,7 +377,6 @@ function renderApps() {
 
 async function openApp(path) {
   const a = (appsCache || []).find(x => x.path === path);
-  if (a && a.kind === 'winapp') { renderWinDetail(a); return; }
   $('#appDetail').hidden = false;
   $('#appDetail').innerHTML = '<p class="muted">Hunting leftovers…</p>';
   $('#appDetail').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -385,6 +385,8 @@ async function openApp(path) {
     renderAppDetail(d);
   } catch (e) {
     $('#appDetail').innerHTML = '';
+    // registry apps on an older backend still get their uninstaller card
+    if (a && a.kind === 'winapp') { renderWinDetail(a); return; }
     toast(e.message, true);
   }
 }
@@ -424,6 +426,16 @@ function renderAppDetail(d) {
       <span class="chip">${esc(l.kind)}</span>
       <span class="chip size">${fmtBytes(l.sizeBytes)}</span>
     </label>`).join('');
+  const isWin = d.app.kind === 'winapp';
+  const uninstallBtn = isWin
+    ? `<button class="btn danger" id="winUninstall" ${d.app.uninstallString ? '' : 'disabled'}>Run uninstaller</button>`
+    : `<button class="btn danger" id="uninstallBtn" ${d.app.running ? 'disabled' : ''}>
+         ${d.app.running ? 'Quit the app first' : `🗑️ Uninstall ${esc(d.app.name)} (${fmtBytes(d.totalBytes)})`}
+       </button>`;
+  const delBtn = d.leftovers.length
+    ? `<button class="btn" id="deleteLeftoversBtn" title="move the checked folders to the Trash — the application itself stays installed">
+         🧹 Delete checked leftovers (${fmtBytes(d.leftoverBytes)})</button>`
+    : '';
   $('#appDetail').innerHTML = `
     <div class="panel">
       <div class="detail-head">
@@ -432,16 +444,59 @@ function renderAppDetail(d) {
           ${d.app.running ? '<span class="chip review">running</span>' : ''}</h3>
         <button class="btn small ghost" id="detailBack" style="margin-left:auto">← All applications</button>
       </div>
-      <p class="muted small mono">${esc(d.app.id || 'no bundle id')} — ${d.leftovers.length} leftover location(s) · total ${fmtBytes(d.totalBytes)}</p>
+      <p class="muted small mono">${esc(d.app.id || (isWin ? 'registry entry' : 'no bundle id'))} — ${d.leftovers.length} leftover location(s) · total ${fmtBytes(d.totalBytes)}</p>
       <div id="leftoverList">${rows}</div>
+      ${isWin ? `<p class="muted small">Registered uninstaller: <span class="mono">${esc(d.app.uninstallString || '(none)')}</span></p>` : ''}
       <div class="dialog-actions">
-        <button class="btn danger" id="uninstallBtn" ${d.app.running ? 'disabled' : ''}>
-          ${d.app.running ? 'Quit the app first' : `🗑️ Uninstall ${esc(d.app.name)} (${fmtBytes(d.totalBytes)})`}
-        </button>
+        ${uninstallBtn}
+        ${delBtn}
       </div>
     </div>`;
   $('#detailBack').addEventListener('click', () => { $('#appDetail').hidden = true; });
-  $('#uninstallBtn').addEventListener('click', () => uninstallFlow(d));
+  if (isWin) {
+    const wu = $('#winUninstall');
+    if (wu) wu.addEventListener('click', async () => {
+      try {
+        const res = await api('/api/app/uninstall', { path: d.app.path, confirm: true });
+        toast(res.note || ('Uninstaller launched: ' + (res.app || d.app.name)));
+        loadJournalCount();
+      } catch (e) { toast(e.message, true); }
+    });
+  } else {
+    $('#uninstallBtn').addEventListener('click', () => uninstallFlow(d));
+  }
+  const del = $('#deleteLeftoversBtn');
+  if (del) del.addEventListener('click', () => deleteLeftoversFlow(d));
+}
+
+// delete checked leftover folders without uninstalling anything — the
+// "the uninstaller already ran / the app was dragged away, its folders
+// remain" case, on every OS
+function deleteLeftoversFlow(d) {
+  const checked = [...document.querySelectorAll('#leftoverList input:checked')]
+    .map(cb => cb.dataset.leftover)
+    .filter(p => p !== d.app.path);
+  if (!checked.length) { toast('No leftover folders checked.', true); return; }
+  const chosen = d.leftovers.filter(l => checked.includes(l.path));
+  $('#udTitle').textContent = `Delete ${chosen.length} leftover location(s) of ${d.app.name}?`;
+  $('#udList').innerHTML = chosen.map(l => `
+    <div class="p"><span>${esc(l.path)}</span><span>${fmtBytes(l.sizeBytes)}</span></div>`).join('');
+  const dlg = $('#uninstallDialog');
+  dlg.returnValue = '';
+  dlg.showModal();
+  $('#udGo').onclick = async () => {
+    dlg.close('yes');
+    try {
+      const res = await api('/api/app/leftovers/delete', { path: d.app.path, paths: checked });
+      const failed = (res.failed || []).length;
+      const skipped = (res.skipped || []).length;
+      toast(`Deleted ${res.removed} location(s) · ${fmtBytes(res.bytes)} → Trash` +
+        `${failed ? ' · ' + failed + ' failed' : ''}${skipped ? ' · ' + skipped + ' skipped' : ''}`,
+        failed > 0);
+      loadJournalCount();
+      openApp(d.app.path);
+    } catch (e) { toast('Delete failed: ' + e.message, true); }
+  };
 }
 
 function uninstallFlow(d) {
@@ -469,6 +524,87 @@ function uninstallFlow(d) {
   };
 }
 
+/* ---------- Traces tab ---------- */
+
+let tracesCache = null;
+
+async function loadTraces() {
+  $('#tracesMeta').textContent = 'scanning…';
+  try {
+    const d = await api('/api/traces');
+    tracesCache = d;
+    renderTraces(d);
+  } catch (e) {
+    $('#tracesMeta').textContent = '';
+    toast('Trace scan failed: ' + e.message, true);
+  }
+}
+
+function renderTraces(d) {
+  $('#tracesNote').textContent = d.note || $('#tracesNote').textContent;
+  $('#tracesMeta').textContent = d.traces.length
+    ? `${d.traces.length} trace(s) · ${fmtBytes(d.bytes)} total`
+    : 'no traces — every leftover location belongs to an installed app';
+  const tb = $('#tbl-traces').tBodies[0];
+  tb.innerHTML = d.traces.map((t) => `
+    <tr>
+      <td><input type="checkbox" class="trace-check" data-trace="${esc(t.path)}" data-size="${t.sizeBytes}"></td>
+      <td class="mono">${esc(t.path)}</td>
+      <td><span class="chip">${esc(t.kind)}</span></td>
+      <td><span class="chip size">${fmtBytes(t.sizeBytes)}</span></td>
+    </tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">nothing to clean</td></tr>';
+  $('#tracesDelete').disabled = true;
+  document.querySelectorAll('.trace-check').forEach(cb =>
+    cb.addEventListener('change', updateTracesSelection));
+}
+
+function updateTracesSelection() {
+  const checked = [...document.querySelectorAll('.trace-check:checked')];
+  $('#tracesDelete').disabled = !checked.length;
+  $('#tracesAll').checked = checked.length > 0 &&
+    checked.length === document.querySelectorAll('.trace-check').length;
+  const bytes = checked.reduce((n, cb) => n + (parseInt(cb.dataset.size, 10) || 0), 0);
+  $('#tracesMeta').textContent = checked.length
+    ? `${checked.length} selected · ${fmtBytes(bytes)}`
+    : `${tracesCache ? tracesCache.traces.length : 0} trace(s) · ${fmtBytes(tracesCache ? tracesCache.bytes : 0)} total`;
+}
+
+$('#tracesAll').addEventListener('change', (e) => {
+  document.querySelectorAll('.trace-check').forEach(cb => { cb.checked = e.target.checked; });
+  updateTracesSelection();
+});
+
+$('#tracesReload').addEventListener('click', loadTraces);
+
+$('#tracesDelete').addEventListener('click', () => {
+  const checked = [...document.querySelectorAll('.trace-check:checked')]
+    .map(cb => cb.dataset.trace);
+  if (!checked.length) return;
+  const chosen = (tracesCache.traces || []).filter(t => checked.includes(t.path));
+  $('#udTitle').textContent = `Delete ${checked.length} trace(s)?`;
+  $('#udList').innerHTML = chosen.map(t => `
+    <div class="p"><span>${esc(t.path)}</span><span>${fmtBytes(t.sizeBytes)}</span></div>`).join('');
+  const dlg = $('#uninstallDialog');
+  dlg.returnValue = '';
+  dlg.showModal();
+  $('#udGo').onclick = async () => {
+    dlg.close('yes');
+    try {
+      const res = await api('/api/traces/delete', { paths: checked });
+      const failures = res.failed || [];
+      const failed = failures.length;
+      const skipped = (res.skipped || []).length;
+      const failureDetails = failures.map(f => `${f.path}: ${f.error}`).join(' · ');
+      toast(`Deleted ${res.removed} trace(s) · ${fmtBytes(res.bytes)} → Trash` +
+        `${failed ? ' · ' + failed + ' failed: ' + failureDetails : ''}${skipped ? ' · ' + skipped + ' skipped' : ''}`,
+        failed > 0);
+      loadJournalCount();
+      loadTraces();
+    } catch (e) { toast('Delete failed: ' + e.message, true); }
+  };
+});
+
 /* ---------- Startup tab ---------- */
 
 async function loadStartup() {
@@ -479,7 +615,7 @@ async function loadStartup() {
     const row = i => `
       <div class="rowline card-row">
         <span class="grow"><b>${esc(i.label)}</b>
-          ${i.active ? '<span class="chip safe">active</span>' : '<span class="chip review">deactivated</span>'}
+          ${i.active ? '<span class="chip safe">enabled at startup</span>' : '<span class="chip review">disabled at startup</span>'}
           ${i.runAtLoad ? '<span class="chip">RunAtLoad</span>' : ''}
           ${i.keepAlive ? '<span class="chip">KeepAlive</span>' : ''}
           <span class="muted small mono">${esc(i.program || '')}</span></span>

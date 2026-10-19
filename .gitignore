@@ -1,3 +1,4 @@
+# Operating-system and editor noise
 .DS_Store
 Thumbs.db
 
@@ -16,6 +17,7 @@ logs/
 # Caches
 __pycache__/
 *.pyc
+.cache/
 node_modules/
 
 # Secrets
@@ -24,3 +26,16 @@ node_modules/
 
 # Tests stay local (same convention as the other repos)
 *_test.go
+
+# App binaries built into their folders by build.sh / folder mode
+# (apps.json points at ../Apps/<App>/<binary>; rebuildable, never ship)
+Descale/descale
+AppScopeMonitor/monitor
+Sentinel/sentinel
+RepoLens/repolens
+
+# Platform-specific Go binaries from local builds
+AppScopeMonitor/monitor-*
+Sentinel/sentinel-*
+Descale/descale-*
+RepoLens/repolens-*

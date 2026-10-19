@@ -12,11 +12,13 @@
 package collectors
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"monitor"
@@ -70,28 +72,63 @@ func (c *FilesMacOS) Available() (bool, string) {
 		c.Mode = "direct"
 		return true, ""
 	}
-	if c.sudoProbe() {
+	ok, why := c.sudoProbe()
+	if ok {
 		c.Mode = "sudo"
 		return true, ""
 	}
-	return false, "needs root: run `sudo python3 -m monitor`, or grant one-time " +
-		"passwordless access with `scripts/grant_files_macos.sh`, then " +
-		"click this chip to retry"
+	if why == "password" {
+		return false, "needs root: click Grant on this chip (installs a " +
+			"read-only fs_usage sudoers entry), or run `sudo monitor` once"
+	}
+	// fs_usage started (the grant exists) but died immediately: it is a
+	// singleton kernel tracer, so something else holds the trace -- most
+	// often a stale fs_usage orphaned by a crashed session
+	return false, "fs_usage exits immediately — another fs_usage tracer " +
+		"holds the kernel trace; kill stale ones (sudo pkill -9 -x fs_usage), " +
+		"then click this chip to retry"
 }
 
-// sudoProbe is true if `sudo -n fs_usage` starts without a password prompt.
-func (c *FilesMacOS) sudoProbe() bool {
+// sudoProbe starts `sudo -n fs_usage` to prove the grant actually works
+// without a password -- the one check that cannot lie, because NOPASSWD
+// execution never needs a timestamp or a tty (unlike `sudo -l`, which
+// auth-gates its listing whenever no valid timestamp exists).
+//
+// Outcomes:
+//   - still alive after the grace period -> the grant works. TERM both
+//     down: sudo relays the signal to its root-owned fs_usage child and
+//     both exit, so the probe leaves nothing behind (a SIGKILL'd sudo
+//     cannot relay and would leak a root tracer the monitor can never
+//     kill).
+//   - died with "a password is required" on stderr -> no grant.
+//   - died otherwise -> fs_usage refused the kernel trace (ktrace busy: a
+//     stale tracer holds it); run() surfaces that with remediation.
+func (c *FilesMacOS) sudoProbe() (ok bool, why string) {
 	cmd := exec.Command("sudo", "-n", fsUsagePath, "-w", "-f", "filesys")
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group
 	if cmd.Start() != nil {
-		return false
+		return false, "password"
 	}
-	time.Sleep(800 * time.Millisecond)
-	running := cmd.ProcessState == nil
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+		if strings.Contains(errBuf.String(), "password is required") {
+			return false, "password"
+		}
+		return false, "died"
+	case <-time.After(800 * time.Millisecond):
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) // relayed to child
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second): // ignored the relay: escalate
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-done
+		}
+		return true, ""
 	}
-	_ = cmd.Wait()
-	return running
 }
 
 func (c *FilesMacOS) run() {
@@ -131,6 +168,13 @@ func (c *FilesMacOS) run() {
 	reason := "fs_usage stream ended"
 	if waitErr != nil {
 		reason = "fs_usage stream lost (" + waitErr.Error() + ")"
+		if strings.Contains(waitErr.Error(), "exit status 1") {
+			// fs_usage is a singleton kernel tracer: exit 1 right after
+			// start almost always means another fs_usage holds the trace
+			// (a stale one from before a crashed session, for example).
+			reason += " — another fs_usage tracer may already hold the " +
+				"kernel trace (kill stale fs_usage processes), then click to retry"
+		}
 	}
 	c.SetStatus("unavailable", reason+" — click to retry")
 }
@@ -139,8 +183,7 @@ func (c *FilesMacOS) parse(line string, watched []string) {
 	if len(line) < 10 || !strings.ContainsRune("0123456789", rune(line[0])) {
 		return
 	}
-	if strings.Contains(line, "fs_usage") ||
-		(strings.Contains(line, "monitor") && strings.Contains(line, "python")) {
+	if strings.Contains(line, "fs_usage") {
 		return
 	}
 	tokens := strings.Fields(line)
@@ -152,12 +195,22 @@ func (c *FilesMacOS) parse(line string, watched []string) {
 	if !ok {
 		return
 	}
-	procName := tokens[len(tokens)-1]
-	m := pidToken.FindStringSubmatch(tokens[len(tokens)-2])
-	if m == nil || procName == "" {
-		return
+	// fs_usage ends every line with "name.pid" dot-joined in ONE token
+	// ("touch.47970", the comm name truncated to 15 chars); very old
+	// layouts separated them as "pid.stamp name" — try both.
+	last := tokens[len(tokens)-1]
+	procName := last
+	pid := 0
+	if idx := strings.LastIndexByte(last, '.'); idx > 0 && isAllDigits(last[idx+1:]) {
+		procName = last[:idx]
+		pid, _ = strconv.Atoi(last[idx+1:])
+	} else if m := pidToken.FindStringSubmatch(last); m != nil {
+		pid, _ = strconv.Atoi(m[1])
+	} else if len(tokens) >= 2 {
+		if m := pidToken.FindStringSubmatch(tokens[len(tokens)-2]); m != nil {
+			pid, _ = strconv.Atoi(m[1])
+		}
 	}
-	pid, _ := strconv.Atoi(m[1])
 	if pid == os.Getpid() {
 		return
 	}

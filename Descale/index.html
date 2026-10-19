@@ -30,6 +30,7 @@
   <nav class="tabs">
     <button data-tab="buildup" class="on">💧 Buildup</button>
     <button data-tab="uninstall">🗑️ Uninstall</button>
+    <button data-tab="traces">🧹 Traces</button>
     <button data-tab="startup">🚀 Startup</button>
   </nav>
 </header>
@@ -70,9 +71,26 @@
     <div id="appDetail" hidden></div>
   </section>
 
+  <!-- ============ Traces tab ============ -->
+  <section id="tab-traces" hidden>
+    <p class="muted note" id="tracesNote">Folders and files left by applications that are <b>no longer installed</b> — data, caches, preferences, saved states, launch agents. Nothing is checked by default: review, select, delete. Everything moves to the Trash and stays restorable from the journal. A folder shared by an installed vendor (e.g. <span class="mono">Google</span> holding Chrome) is never proposed.</p>
+    <div class="toolbar">
+      <button id="tracesReload" class="btn ghost small">↻ Rescan</button>
+      <label class="rowline-inline"><input type="checkbox" id="tracesAll"> select all</label>
+      <span id="tracesMeta" class="muted"></span>
+      <button id="tracesDelete" class="btn danger small" disabled style="margin-left:auto">🗑️ Delete selected</button>
+    </div>
+    <div class="tbl-wrap tall">
+      <table id="tbl-traces">
+        <thead><tr><th style="width:2em"></th><th>Path</th><th>Kind</th><th>Size</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- ============ Startup tab ============ -->
   <section id="tab-startup" hidden>
-    <p class="muted note" id="startupNote">These are <b>Launch Agents</b> — programs macOS starts when you log in. Deactivating renames their plist (reversible, no admin needed); activating restores and starts them. The Login Items shown in System Settings are managed by macOS itself and are not listed here. System-wide agents and daemons are read-only: they need an administrator.</p>
+    <p class="muted note" id="startupNote">These are <b>Launch Agents</b> — programs macOS may start when you log in. “Enabled at startup” describes the launch configuration, not whether a process is running now. Deactivating renames your user plist (reversible, no admin needed); activating restores and starts it. The Login Items shown in System Settings are managed by macOS itself and are not listed here. System-wide agents and daemons are read-only: they need an administrator.</p>
     <div class="rowline card-row" id="nudgeRow" hidden>
       <span class="grow"><b>Weekly buildup reminder</b><br>
         <span class="muted small">A local notification every Monday at 10:00 when safe-tier buildup crosses the threshold. Runs entirely on this machine.</span></span>

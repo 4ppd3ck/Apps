@@ -68,3 +68,22 @@ func ProcUser(pid int) string {
 	procUserCache.store(pid, user)
 	return user
 }
+
+// streamProcAttr puts every streamed child in its own process group so
+// KillCmdGroup can signal wrappers AND their children.
+func streamProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+// KillCmdGroup signals the process and (unix) its whole process group.
+// The caller decides the signal and the escalation order: for sudo-wrapped
+// children only SIGTERM is safe -- sudo relays it to the privileged command
+// and both exit cleanly, while a SIGKILL'd sudo cannot relay and the
+// root-owned child (fs_usage!) lingers beyond the monitor's reach.
+func KillCmdGroup(p *os.Process, sig syscall.Signal) error {
+	if p == nil {
+		return nil
+	}
+	_ = syscall.Kill(-p.Pid, sig) // group: children too
+	return p.Signal(sig)
+}

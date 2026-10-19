@@ -35,9 +35,11 @@ type NetworkMacOS struct {
 }
 
 type seenKeyDarwin struct {
-	pid string
-	rip string
-	rp  int
+	pid   string
+	proto string
+	lp    int
+	rip   string
+	rp    int
 }
 
 type darwinConn struct {
@@ -82,15 +84,6 @@ func (c *NetworkMacOS) run() {
 				}
 			}()
 			conns := c.lsofConns()
-			if c.Ctx.Cfg.GetBool("hide_loopback_connections", true) {
-				filtered := conns[:0]
-				for _, conn := range conns {
-					if !c.isLoopback(conn) {
-						filtered = append(filtered, conn)
-					}
-				}
-				conns = filtered
-			}
 			c.Ctx.Net.UpdateConnections(c.connRows(conns))
 			c.emitNewConns(conns, interval)
 			rates, ifaces, tin, tout := c.traffic(t0)
@@ -129,10 +122,15 @@ func (c *NetworkMacOS) lsofConns() []darwinConn {
 	var file *lsofFile
 
 	flush := func() {
-		if file != nil && file.proto == "tcp" && file.remoteIP != "" {
+		if file != nil && (file.proto == "tcp" || file.proto == "udp") &&
+			file.localPort != nil {
+			state := file.state
+			if file.proto == "udp" && state == "" {
+				state = "BOUND"
+			}
 			conns = append(conns, darwinConn{
 				pid: proc.pid, app: proc.app, user: proc.user,
-				proto: file.proto, state: file.state,
+				proto: file.proto, state: state,
 				localIP: file.localIP, localPort: file.localPort,
 				remoteIP: file.remoteIP, remotePort: file.remotePort,
 			})
@@ -195,11 +193,6 @@ type lsofFile struct {
 	remotePort any
 }
 
-func (c *NetworkMacOS) isLoopback(conn darwinConn) bool {
-	rip := strings.Trim(conn.remoteIP, "[]")
-	return strings.HasPrefix(rip, "127.") || rip == "::1"
-}
-
 func parseLsofAddr(row *lsofFile, val string) {
 	local, remote := val, ""
 	if idx := strings.Index(val, "->"); idx >= 0 {
@@ -227,25 +220,24 @@ func (c *NetworkMacOS) emitNewConns(conns []darwinConn, interval float64) {
 	}
 	for _, conn := range conns {
 		key := seenKeyDarwin{
-			pid: pyStr(conn.pid),
-			rip: conn.remoteIP,
-			rp:  monitor.IntOr(conn.remotePort, 0),
+			pid: pyStr(conn.pid), proto: conn.proto,
+			lp:  monitor.IntOr(conn.localPort, 0),
+			rip: conn.remoteIP, rp: monitor.IntOr(conn.remotePort, 0),
 		}
 		if c.seen[key] {
 			continue
 		}
 		c.seen[key] = true
 		c.Emit(&monitor.Event{
-			Category:  "network",
-			Kind:      "connection",
-			App:       conn.app,
-			Pid:       conn.pid,
-			User:      conn.user,
-			Remote:    pyJoinAddr(conn.remoteIP, conn.remotePort),
-			Local:     pyJoinAddr(conn.localIP, conn.localPort),
-			Proto:     conn.proto,
-			Direction: monitor.DirectionOf(conn.localPort, conn.remotePort),
-			Detail:    fmt.Sprintf("%s (new in last %.0fs)", pyStr(conn.state), interval),
+			Category: "network",
+			Kind:     "connection",
+			App:      conn.app,
+			Pid:      conn.pid,
+			User:     conn.user,
+			Remote:   connEventAddr(conn.remoteIP, conn.remotePort),
+			Local:    pyJoinAddr(conn.localIP, conn.localPort),
+			Proto:    conn.proto,
+			Detail:   fmt.Sprintf("%s (new in last %.0fs)", pyStr(conn.state), interval),
 		})
 	}
 }

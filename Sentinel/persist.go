@@ -2,7 +2,9 @@ package main
 
 // Persistence scan: launch agents/daemons, cron, autostart, systemd user
 // units, Windows Run keys & startup folders. New entries vs baseline alert.
-// (Detection only — removal is manual by design.)
+// (Persistence stays detection-only; the one sanctioned remediation path is
+// remediation.go — user-initiated TCC grant removal and firewall rule
+// changes from the App access tab.)
 
 import (
 	"bufio"

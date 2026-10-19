@@ -51,11 +51,13 @@ type Ctx struct {
 
 // NewCtx creates the application context.
 func NewCtx(cfg *Config, store *Store, bus *EventBus) *Ctx {
+	netState := NewNetState(240)
+	netState.SetStore(store)
 	return &Ctx{
 		Cfg:            cfg,
 		Store:          store,
 		Bus:            bus,
-		Net:            NewNetState(240),
+		Net:            netState,
 		androidDevices: []string{},
 	}
 }

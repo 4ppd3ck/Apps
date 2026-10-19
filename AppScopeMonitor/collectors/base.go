@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"monitor"
@@ -118,6 +119,16 @@ func (b *BaseCollector) Start() {
 	done := b.done
 	b.mu.Unlock()
 	go func() {
+		// A run loop that exits on its own (dead stream, finished scan)
+		// must clear running, or every later Start() early-returns and a
+		// dashboard re-enable paints "active" over a dead collector.
+		// LIFO: this runs before close(done), so Stop() never observes a
+		// closed done with running still set.
+		defer func() {
+			b.mu.Lock()
+			b.running = false
+			b.mu.Unlock()
+		}()
 		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
@@ -216,7 +227,14 @@ func (b *BaseCollector) killProcs() {
 	b.procsMu.Unlock()
 	for _, p := range procs {
 		if p.Process != nil {
-			_ = p.Process.Kill()
+			// TERM first: a wrapper like `sudo fs_usage` relays the signal
+			// to its privileged child and both exit -- a SIGKILL'd sudo
+			// cannot relay, leaving the root child orphaned (a lone root
+			// fs_usage blocks every future trace and the monitor cannot
+			// kill it). KILL is only the escalation after a grace period.
+			_ = monitor.KillCmdGroup(p.Process, syscall.SIGTERM)
+			time.Sleep(300 * time.Millisecond)
+			_ = monitor.KillCmdGroup(p.Process, syscall.SIGKILL)
 			// Kill without Wait leaves a zombie until the process object is
 			// finalized — reap immediately so nothing lingers for Sentinel
 			// to flag. Wait returns at once for already-dead children.

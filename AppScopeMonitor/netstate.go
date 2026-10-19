@@ -3,6 +3,7 @@
 package monitor
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -42,25 +43,42 @@ type HistoryPoint struct {
 	Out float64 `json:"out"`
 }
 
+// TrafficSample is one cumulative interface-counter observation.
+type TrafficSample struct {
+	Ts      float64
+	RxBytes int64
+	TxBytes int64
+}
+
 // NetState holds the latest connection table + per-app traffic rates +
 // interface totals history.
 type NetState struct {
-	mu          sync.Mutex
-	connections []map[string]any
-	appRates    map[string]Rate
-	ifaces      map[string]Rate
-	history     []HistoryPoint
-	historyLen  int
-	updatedAt   float64
+	mu           sync.Mutex
+	connections  []map[string]any
+	appRates     map[string]Rate
+	ifaces       map[string]Rate
+	history      []HistoryPoint
+	historyLen   int
+	updatedAt    float64
+	store        *Store
+	sessionStart float64
 }
 
 // NewNetState creates the shared network state.
 func NewNetState(historyLen int) *NetState {
 	return &NetState{
-		appRates:   map[string]Rate{},
-		ifaces:     map[string]Rate{},
-		historyLen: historyLen,
+		appRates:     map[string]Rate{},
+		ifaces:       map[string]Rate{},
+		historyLen:   historyLen,
+		sessionStart: Now(),
 	}
+}
+
+// SetStore attaches persistent traffic history storage.
+func (n *NetState) SetStore(store *Store) {
+	n.mu.Lock()
+	n.store = store
+	n.mu.Unlock()
 }
 
 // connStateAliases maps every platform's spelling of a connection state to
@@ -112,14 +130,28 @@ func (n *NetState) UpdateConnections(conns []map[string]any) {
 	}
 	n.mu.Lock()
 	n.connections = conns
-	n.updatedAt = Now()
+	ts := Now()
+	n.updatedAt = ts
+	store := n.store
 	n.mu.Unlock()
+	if store != nil {
+		if err := store.RecordConnectionSnapshot(ts, conns); err != nil {
+			fmt.Printf("[network] connection history error: %v\n", err)
+		}
+	}
 }
 
-// UpdateTraffic stores per-app rates / per-interface rates; when either
-// total is non-zero a history sample is appended (mirrors Python's
-// "if total_in is not None or total_out is not None").
+// UpdateTraffic stores per-app/per-interface rates and appends a rate-history
+// point; available cumulative interface counters are also persisted.
 func (n *NetState) UpdateTraffic(appRates, ifaces map[string]Rate, totalIn, totalOut float64) {
+	ts := Now()
+	var rxBytes, txBytes int64
+	hasTotals := false
+	for _, rate := range ifaces {
+		rxBytes += rate.TotalIn
+		txBytes += rate.TotalOut
+		hasTotals = true
+	}
 	n.mu.Lock()
 	if appRates != nil {
 		n.appRates = appRates
@@ -128,14 +160,95 @@ func (n *NetState) UpdateTraffic(appRates, ifaces map[string]Rate, totalIn, tota
 		n.ifaces = ifaces
 	}
 	n.history = append(n.history, HistoryPoint{
-		Ts:  Now(),
+		Ts:  ts,
 		In:  totalIn,
 		Out: totalOut,
 	})
 	if len(n.history) > n.historyLen {
 		n.history = n.history[len(n.history)-n.historyLen:]
 	}
+	store := n.store
 	n.mu.Unlock()
+	if store != nil && hasTotals {
+		if err := store.InsertTrafficSample(ts, rxBytes, txBytes); err != nil {
+			fmt.Printf("[network] traffic history error: %v\n", err)
+		}
+	}
+}
+
+// TrafficSummary returns cumulative totals for dashboard-selected periods.
+func (n *NetState) TrafficSummary(store *Store) (map[string]any, error) {
+	n.mu.Lock()
+	ifaces := make(map[string]Rate, len(n.ifaces))
+	for name, rate := range n.ifaces {
+		ifaces[name] = rate
+	}
+	sessionStart := n.sessionStart
+	n.mu.Unlock()
+	var rx, tx int64
+	for _, rate := range ifaces {
+		rx += rate.TotalIn
+		tx += rate.TotalOut
+	}
+	available := len(ifaces) > 0
+	result := map[string]any{
+		"available":  available,
+		"source":     "network interface counters",
+		"since_boot": map[string]any{"available": available, "rx": rx, "tx": tx},
+		"session":    map[string]any{"available": false, "rx": int64(0), "tx": int64(0)},
+		"hour":       map[string]any{"available": false, "rx": int64(0), "tx": int64(0)},
+		"six_hours":  map[string]any{"available": false, "rx": int64(0), "tx": int64(0)},
+		"day":        map[string]any{"available": false, "rx": int64(0), "tx": int64(0)},
+		"retained":   map[string]any{"available": false, "rx": int64(0), "tx": int64(0)},
+	}
+	if !available {
+		return result, nil
+	}
+	if store == nil {
+		return nil, fmt.Errorf("traffic history store is unavailable")
+	}
+	now := Now()
+	if base, ok, err := store.FirstTrafficSampleAfter(sessionStart); err != nil {
+		return nil, err
+	} else if ok {
+		result["session"] = counterDelta(base, rx, tx, base.Ts)
+	}
+	for key, duration := range map[string]float64{
+		"hour": 3600, "six_hours": 6 * 3600, "day": 24 * 3600,
+	} {
+		base, ok, err := store.TrafficSampleBefore(now - duration)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			base, ok, err = store.FirstTrafficSample()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if ok {
+			result[key] = counterDelta(base, rx, tx, base.Ts)
+		}
+	}
+	if base, ok, err := store.FirstTrafficSample(); err != nil {
+		return nil, err
+	} else if ok {
+		result["retained"] = counterDelta(base, rx, tx, base.Ts)
+	}
+	return result, nil
+}
+
+func counterDelta(base TrafficSample, rx, tx int64, since float64) map[string]any {
+	deltaRX, deltaTX := rx-base.RxBytes, tx-base.TxBytes
+	if deltaRX < 0 {
+		deltaRX = 0
+	}
+	if deltaTX < 0 {
+		deltaTX = 0
+	}
+	return map[string]any{
+		"available": true, "rx": deltaRX, "tx": deltaTX, "since": since,
+	}
 }
 
 // UpdatedAt returns the timestamp of the last connection update.
@@ -193,7 +306,6 @@ func (n *NetState) Snapshot() map[string]any {
 		if row["service"] == "" {
 			row["service"] = ServiceName(IntOr(c["local_port"], 0))
 		}
-		row["direction"] = DirectionOf(c["local_port"], c["remote_port"])
 		if host != "" {
 			row["host"] = host
 		}

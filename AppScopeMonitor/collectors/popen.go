@@ -56,6 +56,13 @@ func pyJoinAddr(ip, port any) string {
 	return monitor.StrOf(ip) + ":" + pyStr(port)
 }
 
+func connEventAddr(ip, port any) string {
+	if ip == nil || monitor.StrOf(ip) == "" || monitor.StrOf(ip) == "None" {
+		return ""
+	}
+	return pyJoinAddr(ip, port)
+}
+
 // rpartition mirrors Python str.rpartition.
 func rpartition(s, sep string) (string, string) {
 	if idx := strings.LastIndex(s, sep); idx >= 0 {

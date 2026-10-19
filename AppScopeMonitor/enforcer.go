@@ -1,12 +1,19 @@
 // Connection/IP/app blocking enforcement.
 //
-// Blocking is enforced through the OS firewall, which needs privileges:
+// Blocking is enforced through the OS firewall, which needs privileges the
+// monitor deliberately does not run with. One elevated install (the
+// dashboard's Grant button, or the script by hand) fixes that for good:
 //
-//   - macOS   -- pf (IP/connection) + the application firewall (app), applied
-//     via a validating root helper. Either run the monitor with sudo, or
-//     install the one-time grant: scripts/grant_block_macos.sh
-//   - Linux   -- iptables via the same helper pattern: scripts/grant_block_linux.sh
-//   - Windows -- netsh advfirewall directly when the monitor runs elevated.
+//   - macOS   -- pf (IP/connection) + the application firewall (app) via a
+//     validating root helper: POST /api/block/grant runs
+//     scripts/grant_block_macos.sh through osascript's administrator dialog
+//     (installs /usr/local/libexec/appscope-block + a NOPASSWD sudoers entry
+//     for that helper only).
+//   - Linux   -- iptables via the same helper pattern
+//     (scripts/grant_block_linux.sh, elevated through pkexec).
+//   - Windows -- netsh advfirewall: elevated monitors apply rules directly;
+//     otherwise the grant registers the "AppScopeBlock" scheduled task
+//     (SYSTEM) and rules flow through its queue (helper mode).
 //
 // Rules that cannot be applied right away are marked "queued" (kept in the
 // store, shown on the dashboard) and retried on the next reconcile, so
@@ -29,6 +36,11 @@ import (
 const (
 	HelperMac   = "/usr/local/libexec/appscope-block"
 	HelperLinux = "/usr/local/bin/appscope-block"
+
+	// Windows broker: the "AppScopeBlock" scheduled task (SYSTEM, installed
+	// by the one-time grant) consumes rule commands from a queue folder, so
+	// the unelevated monitor never has to elevate itself.
+	BrokerTask = "AppScopeBlock"
 )
 
 var ipv4Re = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
@@ -85,8 +97,9 @@ func (e *Enforcer) Probe() string {
 		if isElevated() {
 			e.Mode, e.Reason = "direct", "running as root"
 		} else {
-			e.Reason = "needs privilege: run the Go monitor with sudo, " +
-				"or install scripts/grant_block_macos.sh"
+			e.Reason = "needs privilege — click Grant on the Blocked panel " +
+				"(installs a drop-only helper via the macOS password sheet), " +
+				"or run scripts/grant_block_macos.sh"
 		}
 	case "linux":
 		if _, err := os.Stat(HelperLinux); err == nil {
@@ -99,15 +112,20 @@ func (e *Enforcer) Probe() string {
 		if isElevated() {
 			e.Mode, e.Reason = "direct", "running as root"
 		} else {
-			e.Reason = "needs privilege: run with sudo, or install " +
-				"scripts/grant_block_linux.sh"
+			e.Reason = "needs privilege — click Grant on the Blocked panel " +
+				"(installs a drop-only helper via the polkit dialog), " +
+				"or run scripts/grant_block_linux.sh"
 		}
 	case "windows":
 		if isElevated() {
 			e.Mode, e.Reason = "direct", "running elevated"
+		} else if brokerReady() {
+			e.Mode, e.Reason = "helper", BrokerTask+" task (SYSTEM) applies "+
+				"rules from the queue"
 		} else {
-			e.Reason = "needs elevation: run the monitor as " +
-				"Administrator to enforce blocks"
+			e.Reason = "needs elevation — click Grant on the Blocked panel " +
+				"(one UAC prompt installs a broker task), or run " +
+				"scripts/grant_block_windows.ps1 as Administrator"
 		}
 	}
 	return e.Mode
@@ -319,7 +337,35 @@ func wName(rule *Block, direction string) string {
 	return fmt.Sprintf("AppScope block %s %s %s", rule.Type, rule.Value, direction)
 }
 
+// brokerApply hands one rule to the AppScopeBlock task via its queue folder
+// (helper mode: the monitor is unelevated, the task applies the netsh rules).
+// Same-line format the PowerShell helper parses: action|type|value|extra.
+func (e *Enforcer) brokerApply(rule *Block, add bool) (string, string) {
+	action := "del"
+	if add {
+		action = "add"
+	}
+	extra := ""
+	if rule.Type == "app" {
+		extra = rule.Value
+		if rule.AppPath != nil && *rule.AppPath != "" {
+			extra = *rule.AppPath
+		}
+	}
+	if err := brokerEnqueue(
+		fmt.Sprintf("%s|%s|%s|%s", action, rule.Type, rule.Value, extra)); err != nil {
+		return "error", err.Error()
+	}
+	if add {
+		return "enforced", "applied by the " + BrokerTask + " task"
+	}
+	return "removed", "removed by the " + BrokerTask + " task"
+}
+
 func (e *Enforcer) applyWindows(rule *Block) (string, string) {
+	if e.Mode == "helper" {
+		return e.brokerApply(rule, true)
+	}
 	var rc1, rc2 int
 	var out1, out2 string
 	if rule.Type == "app" {
@@ -354,6 +400,9 @@ func (e *Enforcer) applyWindows(rule *Block) (string, string) {
 }
 
 func (e *Enforcer) unapplyWindows(rule *Block) (string, string) {
+	if e.Mode == "helper" {
+		return e.brokerApply(rule, false)
+	}
 	e.netsh("delete", "rule", "name="+wName(rule, "out"))
 	e.netsh("delete", "rule", "name="+wName(rule, "in"))
 	return "removed", "netsh rules deleted"

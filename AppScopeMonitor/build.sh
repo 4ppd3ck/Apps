@@ -1,17 +1,16 @@
 #!/bin/sh
 # build.sh — build monitor.
 #
-#   ./build.sh                    host binary only — monitor-<os>-<arch>[.exe]
-#                                 beside go.mod, the name AppDeck launches and
-#                                 imports (this is the dev/import loop)
+#   ./build.sh                    host binary only — monitor[.exe] beside
+#                                 go.mod, the name AppDeck launches/imports
 #   ./build.sh --all              full cross-compile matrix into ./ and dist/
 #                                 + SHA256SUMS (release artefacts)
 #   ./build.sh darwin/arm64 …     build one or more specific os/arch targets
 #   ./build.sh --host-only        legacy alias for the default
 #
 # Pure-Go stdlib, no cgo: every target builds with `go build` alone.
-# Output layout mirrors AppScope Monitor:
-#   ./monitor-<os>-<arch>[.exe]     in-folder binaries (launcher's pick order)
+# Cross-platform build output:
+#   ./monitor-<os>-<arch>[.exe]     in-folder per-platform binaries
 #   ./dist/<os>-<arch>/monitor[.exe]
 #   ./dist/SHA256SUMS
 set -eu
@@ -47,7 +46,11 @@ done
 
 build_one() {
   goos=${1%/*}; goarch=${1#*/}
-  out="monitor-${goos}-${goarch}"
+  if [ "$DIST" = "1" ]; then
+    out="monitor-${goos}-${goarch}"
+  else
+    out="monitor"
+  fi
   [ "$goos" = "windows" ] && out="${out}.exe"
   echo "== ${goos}/${goarch}"
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \

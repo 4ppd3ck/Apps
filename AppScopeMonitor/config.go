@@ -64,15 +64,14 @@ func deepCopyMap(src map[string]any) map[string]any {
 func NewConfig(path string) *Config {
 	c := &Config{Path: path}
 	c.Data = map[string]any{
-		"host":                      "127.0.0.1",
-		"port":                      8765,
-		"data_dir":                  "data", // resolved relative to the config file
-		"retention_days":            7,
-		"watched_dirs":              []any{}, // empty -> platform defaults
-		"poll":                      deepCopyMap(defaultPoll),
-		"collectors":                deepCopyMap(DefaultCollectors),
-		"open_browser":              false,
-		"hide_loopback_connections": true,
+		"host":           "127.0.0.1",
+		"port":           8765,
+		"data_dir":       "data", // resolved relative to the config file
+		"retention_days": 7,
+		"watched_dirs":   []any{}, // empty -> platform defaults
+		"poll":           deepCopyMap(defaultPoll),
+		"collectors":     deepCopyMap(DefaultCollectors),
+		"open_browser":   false,
 	}
 	c.load()
 	return c

@@ -20,6 +20,11 @@
     <span id="monitorState" class="pill">monitor: …</span>
     <span id="scanState" class="pill">…</span>
   </div>
+  <nav class="tabs" aria-label="Dashboard views">
+    <button id="dashboardTab" class="btn tab selected" aria-selected="true">Watchdog</button>
+    <button id="permissionsTab" class="btn tab" aria-selected="false">App Access</button>
+    <button id="firewallTab" class="btn tab" aria-selected="false">Firewall Rules</button>
+  </nav>
   <div class="actions">
     <button id="scanBtn" class="btn">⟳ Scan now</button>
     <button id="ackAll" class="btn ghost">Ack all</button>
@@ -30,53 +35,132 @@
 </header>
 
 <main>
-  <section class="tiles" id="tiles"></section>
+  <div id="dashboardView">
+    <section class="tiles" id="tiles"></section>
 
-  <div class="cols">
-    <section class="panel alerts">
-      <div class="panel-head">
-        <h2>Alerts</h2>
-        <div class="filters">
-          <select id="sevFilter">
-            <option value="">all severities</option>
-            <option value="critical">critical+</option>
-            <option value="high">high+</option>
-            <option value="medium">medium+</option>
-            <option value="low">low+</option>
-            <option value="info">info</option>
-          </select>
-          <label class="chk"><input type="checkbox" id="hideAcked" checked> hide acked</label>
+    <div class="cols">
+      <section class="panel alerts">
+        <div class="panel-head">
+          <h2>Alerts</h2>
+          <div class="filters">
+            <select id="sevFilter">
+              <option value="">all severities</option>
+              <option value="critical">critical+</option>
+              <option value="high">high+</option>
+              <option value="medium">medium+</option>
+              <option value="low">low+</option>
+              <option value="info">info</option>
+            </select>
+            <label class="chk"><input type="checkbox" id="hideAcked" checked> hide acked</label>
+          </div>
         </div>
-      </div>
-      <div id="alertList" class="alert-list"><p class="muted">loading…</p></div>
-    </section>
-
-    <section class="side">
-      <section class="panel">
-        <h2>Checks</h2>
-        <div id="checkList" class="check-list"><p class="muted">loading…</p></div>
+        <div id="alertList" class="alert-list"><p class="muted">loading…</p></div>
       </section>
 
-      <section class="panel">
-        <h2>Current findings</h2>
-        <div id="findingList" class="finding-list"><p class="muted">loading…</p></div>
-      </section>
+      <section class="side">
+        <section class="panel">
+          <h2>Checks</h2>
+          <div id="checkList" class="check-list"><p class="muted">loading…</p></div>
+        </section>
 
-      <section class="panel">
-        <h2>AppScope Monitor</h2>
-        <div id="monitorPanel" class="monitor"><p class="muted">loading…</p></div>
-      </section>
+        <section class="panel">
+          <h2>Current findings</h2>
+          <div id="findingList" class="finding-list"><p class="muted">loading…</p></div>
+        </section>
 
-      <section class="panel">
-        <h2>Baseline &amp; rules</h2>
-        <div class="btnrow">
-          <button id="resetBase" class="btn ghost small">Reset baseline (re-learn)</button>
-          <button id="editRules" class="btn ghost small">Edit rules</button>
-        </div>
-        <pre id="baseline" class="baseline mono small" hidden></pre>
+        <section class="panel">
+          <h2>AppScope Monitor</h2>
+          <div id="monitorPanel" class="monitor"><p class="muted">loading…</p></div>
+        </section>
+
+        <section class="panel">
+          <h2>Baseline &amp; rules</h2>
+          <div class="btnrow">
+            <button id="resetBase" class="btn ghost small">Reset baseline (re-learn)</button>
+            <button id="editRules" class="btn ghost small">Edit rules</button>
+          </div>
+          <pre id="baseline" class="baseline mono small" hidden></pre>
+        </section>
       </section>
-    </section>
+    </div>
   </div>
+
+  <section id="permissionsView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>App Access</h2>
+        <p class="muted small">Reported grants and sandbox capabilities for installed apps. An unknown or missing entry is not the same as denied.</p>
+      </div>
+      <button id="refreshPermissions" class="btn ghost small">⟳ Refresh</button>
+    </div>
+    <div id="permissionSummary" class="permission-summary"></div>
+    <div class="permission-toolbar">
+      <input id="permissionSearch" type="search" placeholder="Search apps, permissions, or paths" aria-label="Search app permissions">
+      <select id="permissionCategory" aria-label="Filter by permission category">
+        <option value="">All categories</option>
+      </select>
+      <select id="permissionStatus" aria-label="Filter by access status">
+        <option value="">All access states</option>
+        <option value="granted">Granted</option>
+        <option value="limited">Limited / restricted</option>
+        <option value="denied">Denied</option>
+        <option value="declared">Declared capability</option>
+        <option value="leftover">Leftover</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <select id="permissionSource" aria-label="Filter by permission source">
+        <option value="">All sources</option>
+      </select>
+      <button id="clearPermissionFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="permissionWarnings" class="permission-warnings"></div>
+    <div id="permissionList" class="permission-list"><p class="muted">Select App Access to load inventory.</p></div>
+    <p class="removal-note muted small">
+      <strong>Unload &amp; delete</strong> (orange) is for launchd jobs — LaunchDaemons and
+      LaunchAgents: it first unloads the job from launchd (stopping the running process so it
+      does not just respawn) and then deletes the plist file.
+      <strong>Delete</strong> (orange) is for bare helper binaries in
+      /Library/PrivilegedHelperTools: those are plain executables, not launchd jobs, so there is
+      nothing to unload — the file is removed directly. If a daemon still points at a deleted
+      helper, remove the daemon too, or launchd will simply fail to start it.
+      <strong>Remove</strong> (red) deletes a user TCC grant row after saving a backup. Sentinel
+      must have Full Disk Access to enable it; system-database grants remain read-only here.
+      Sentinel is configured for AppDeck's Elevated launch so its own app identity can receive
+      that access. Every action here also exists as a terminal command — see Firewall Rules for
+      firewall-specific commands.
+    </p>
+  </section>
+
+  <section id="firewallView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>Firewall Rules</h2>
+        <p class="muted small">Firewall profiles, app rules, and their current status. Available actions depend on the platform.</p>
+      </div>
+      <button id="refreshFirewall" class="btn ghost small">⟳ Refresh</button>
+    </div>
+    <div id="firewallWarnings" class="permission-warnings"></div>
+    <div class="permission-toolbar">
+      <input id="firewallSearch" type="search" placeholder="Search apps, rules, or paths" aria-label="Search firewall rules">
+      <select id="firewallStatus" aria-label="Filter by firewall status">
+        <option value="">All statuses</option>
+      </select>
+      <select id="firewallSource" aria-label="Filter by firewall source">
+        <option value="">All sources</option>
+      </select>
+      <select id="firewallDirection" aria-label="Filter by direction">
+        <option value="">All directions</option>
+        <option value="in">Incoming</option>
+        <option value="out">Outgoing</option>
+      </select>
+      <button id="clearFirewallFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="firewallList" class="permission-list"><p class="muted">Select Firewall Rules to load inventory.</p></div>
+    <details id="removalHelp" class="removal-help">
+      <summary>Can't manage from here, or prefer the terminal? Manual commands</summary>
+      <pre id="removalHelpBody" class="mono"></pre>
+    </details>
+  </section>
 </main>
 
 <dialog id="rulesDlg">

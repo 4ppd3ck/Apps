@@ -12,6 +12,7 @@ package main
  */
 
 import (
+	"bufio"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -163,7 +164,21 @@ func appRoots() []string {
 	return []string{"/Applications", filepath.Join(homeDir(), "Applications")}
 }
 
+// listApps enumerates installed applications per OS: .app bundles on macOS,
+// .desktop entries (system + user scope, user wins) on Linux. Windows apps
+// come from the registry instead (appsList -> listInstalledWindows).
 func listApps() []AppInfo {
+	switch runtime.GOOS {
+	case "windows":
+		return listInstalledWindows()
+	case "linux":
+		return listAppsLinux()
+	default:
+		return listAppsMac()
+	}
+}
+
+func listAppsMac() []AppInfo {
 	var bundles []string
 	for _, root := range appRoots() {
 		matches, _ := filepath.Glob(filepath.Join(root, "*.app"))
@@ -184,6 +199,99 @@ func listApps() []AppInfo {
 	}
 	wg.Wait()
 	return out
+}
+
+// listAppsLinux reads .desktop entries as the app inventory. A desktop file
+// is the launcher identity: its id drives leftover hunting, its Exec names
+// the running process. Package-managed binaries are not the desktop file's
+// to remove — uninstalling here trashes the entry + leftovers.
+func listAppsLinux() []AppInfo {
+	home := homeDir()
+	scopes := []struct {
+		dir, scope string
+	}{
+		{filepath.Join(home, ".local", "share", "applications"), "user"},
+		{"/usr/share/applications", "system"},
+		{"/usr/local/share/applications", "system"},
+	}
+	byID := map[string]AppInfo{}
+	var order []string
+	for _, sc := range scopes {
+		matches, _ := filepath.Glob(filepath.Join(sc.dir, "*.desktop"))
+		sort.Strings(matches)
+		for _, p := range matches {
+			id := strings.TrimSuffix(filepath.Base(p), ".desktop")
+			if _, dup := byID[id]; dup && sc.scope != "user" {
+				continue // user entry wins over the system one
+			}
+			info := desktopAppInfo(p, id)
+			if info.Name == "" {
+				continue // not a displayable entry (e.g. action-only file)
+			}
+			if _, dup := byID[id]; !dup {
+				order = append(order, id)
+			}
+			byID[id] = info
+		}
+	}
+	out := make([]AppInfo, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+// desktopAppInfo parses the small subset of a .desktop file Descale needs.
+func desktopAppInfo(path, id string) AppInfo {
+	info := AppInfo{Path: path, ID: id, Kind: "app"}
+	noDisplay := false
+	f, err := os.Open(path)
+	if err != nil {
+		return info
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "[Desktop Action" { // an actions-only section
+			break
+		}
+		if !strings.HasPrefix(line, "[") && strings.Contains(line, "=") {
+			key, val, _ := strings.Cut(line, "=")
+			val = strings.TrimSpace(val)
+			switch strings.TrimSpace(key) {
+			case "Name":
+				if info.Name == "" {
+					info.Name = val // localized Name[xx]= keys never match here
+				}
+			case "NoDisplay":
+				noDisplay = val == "true"
+			case "Version":
+				info.Version = val
+			case "Exec":
+				if info.Exe == "" {
+					// first token, field codes (%f %u …) stripped
+					if fields := strings.Fields(val); len(fields) > 0 {
+						exe := fields[0]
+						if i := strings.LastIndexByte(exe, '/'); i >= 0 {
+							exe = exe[i+1:]
+						}
+						info.Exe = exe
+					}
+				}
+			}
+		}
+	}
+	if noDisplay || info.Name == "" {
+		return AppInfo{Path: path, ID: id, Kind: "app"} // hidden entry
+	}
+	if info.Exe != "" && len(runningApps([]string{info.Exe})) > 0 {
+		info.Running = true
+	}
+	return info
 }
 
 func appInfoFor(bundle string) AppInfo {
@@ -233,16 +341,74 @@ func dirSize(p string, fi os.FileInfo) int64 {
 	return n
 }
 
-// appLeftovers hunts the files an app scatters outside its bundle, keyed by
-// bundle id (and, secondarily, the display name). Only exact-name matches
-// are proposed — no fuzzy "looks related" guessing.
+// appSearchNames returns the exact folder names an app's leftovers may use:
+// its bundle/desktop id when known, the display name, and the lowercased
+// display name (Linux and Windows apps conventionally use lowercase dirs).
+func appSearchNames(app AppInfo) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, n := range []string{app.ID, app.Name, strings.ToLower(app.Name)} {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// appLeftovers hunts the files an app scatters outside its install, keyed by
+// its id (and, secondarily, the display name). Only exact-name matches are
+// proposed — no fuzzy "looks related" guessing. Same contract on every OS;
+// the candidate locations differ.
 func appLeftovers(app AppInfo) []Leftover {
+	switch runtime.GOOS {
+	case "windows":
+		return leftoversFrom(appLeftoverCandidatesWindows(app))
+	case "linux":
+		return leftoversFrom(appLeftoverCandidatesLinux(app))
+	default:
+		return leftoversFrom(appLeftoverCandidatesMac(app))
+	}
+}
+
+type leftoverCand struct {
+	path, kind string
+}
+
+// leftoversFrom materializes candidates: existing paths only, sized, deduped,
+// biggest first. Dedup is identity-based, not just string-based: on a
+// case-insensitive volume the id-derived path ("app") and the name-derived
+// one ("App") are the same directory, and os.SameFile sees that.
+func leftoversFrom(cands []leftoverCand) []Leftover {
+	home := homeDir()
+	seen := map[string]bool{}
+	caseSeen := map[string]string{} // lower(path) -> first path with it
+	var out []Leftover
+	for _, c := range cands {
+		if c.path == "" || seen[c.path] || c.path == home {
+			continue
+		}
+		fi, err := os.Lstat(c.path)
+		if err != nil {
+			continue
+		}
+		if first, dup := caseSeen[strings.ToLower(c.path)]; dup {
+			if fi2, err2 := os.Lstat(first); err2 == nil && os.SameFile(fi, fi2) {
+				continue // same file, different spelling
+			}
+		}
+		seen[c.path] = true
+		caseSeen[strings.ToLower(c.path)] = c.path
+		out = append(out, Leftover{Path: c.path, Kind: c.kind, SizeBytes: dirSize(c.path, fi)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SizeBytes > out[j].SizeBytes })
+	return out
+}
+
+func appLeftoverCandidatesMac(app AppInfo) []leftoverCand {
 	home := homeDir()
 	id, name := app.ID, app.Name
-	type cand struct {
-		p, kind string
-	}
-	cands := []cand{
+	cands := []leftoverCand{
 		{filepath.Join(home, "Library", "Caches", id), "caches"},
 		{filepath.Join(home, "Library", "Caches", name), "caches"},
 		{filepath.Join(home, "Library", "Application Support", id), "data"},
@@ -256,35 +422,77 @@ func appLeftovers(app AppInfo) []Leftover {
 		{filepath.Join(home, "Library", "Logs", name), "logs"},
 		{filepath.Join(home, "Library", "Application Scripts", id), "scripts"},
 	}
-	seen := map[string]bool{}
-	var out []Leftover
-	add := func(p, kind string) {
-		if p == "" || seen[p] || p == home {
-			return
-		}
-		fi, err := os.Lstat(p)
-		if err != nil {
-			return
-		}
-		seen[p] = true
-		out = append(out, Leftover{Path: p, Kind: kind, SizeBytes: dirSize(p, fi)})
-	}
-	for _, c := range cands {
-		add(c.p, c.kind)
-	}
 	if id != "" {
 		agents, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "*.plist"))
 		for _, a := range agents {
 			if d, err := readPlist(a); err == nil {
 				blob := fmt.Sprint(d["Label"], "|", d["Program"], "|", d["ProgramArguments"])
 				if strings.Contains(blob, id) {
-					add(a, "launch agent")
+					cands = append(cands, leftoverCand{a, "launch agent"})
 				}
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SizeBytes > out[j].SizeBytes })
-	return out
+	return cands
+}
+
+func appLeftoverCandidatesWindows(app AppInfo) []leftoverCand {
+	local := os.Getenv("LOCALAPPDATA")
+	roaming := os.Getenv("APPDATA")
+	programData := os.Getenv("ProgramData")
+	if local == "" || roaming == "" {
+		return nil // env shape unexpected; propose nothing rather than guess
+	}
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	var cands []leftoverCand
+	for _, n := range appSearchNames(app) {
+		cands = append(cands,
+			leftoverCand{filepath.Join(local, n), "data"},
+			leftoverCand{filepath.Join(roaming, n), "data"},
+			leftoverCand{filepath.Join(programData, n), "data"},
+			leftoverCand{filepath.Join(local, "Programs", n), "programs"},
+		)
+		// vendor-nested layout: "Google Chrome" -> ...\Google\Chrome (the
+		// dominant Windows convention; still derived from the exact name)
+		if vendor, rest, cut := strings.Cut(n, " "); cut && vendor != "" && rest != "" {
+			cands = append(cands,
+				leftoverCand{filepath.Join(local, vendor, rest), "data"},
+				leftoverCand{filepath.Join(roaming, vendor, rest), "data"},
+			)
+		}
+		// Start Menu folders and .lnk shortcuts, user and all-users scope
+		for _, root := range []string{roaming, programData} {
+			matches, _ := filepath.Glob(filepath.Join(root, "Microsoft",
+				"Windows", "Start Menu", "Programs", n+"*"))
+			for _, m := range matches {
+				cands = append(cands, leftoverCand{m, "shortcuts"})
+			}
+		}
+	}
+	return cands
+}
+
+func appLeftoverCandidatesLinux(app AppInfo) []leftoverCand {
+	home := homeDir()
+	var cands []leftoverCand
+	for _, n := range appSearchNames(app) {
+		cands = append(cands,
+			leftoverCand{filepath.Join(home, ".config", n), "data"},
+			leftoverCand{filepath.Join(home, ".cache", n), "caches"},
+			leftoverCand{filepath.Join(home, ".local", "share", n), "data"},
+			leftoverCand{filepath.Join(home, ".local", "state", n), "state"},
+			leftoverCand{filepath.Join(home, "."+n), "data"},
+			leftoverCand{filepath.Join(home, "snap", n), "snap"},
+		)
+	}
+	if app.ID != "" {
+		// flatpak per-app data lives under the desktop id, not the name
+		cands = append(cands,
+			leftoverCand{filepath.Join(home, ".var", "app", app.ID), "flatpak"})
+	}
+	return cands
 }
 
 type appsListResult struct {
@@ -294,24 +502,34 @@ type appsListResult struct {
 
 // appsList is the shared source for /api/apps and `descale apps`.
 func (s *server) appsList() appsListResult {
+	apps := listApps()
 	if runtime.GOOS == "windows" {
 		return appsListResult{
-			Apps: listInstalledWindows(),
-			Note: "Uninstall runs each application's own uninstaller (interactive). After it finishes, rescan for leftovers.",
+			Apps: apps,
+			Note: "Uninstall runs each application's own uninstaller (interactive). After it finishes, open the app again and delete the leftovers it left behind.",
 		}
 	}
-	return appsListResult{Apps: listApps()}
+	if runtime.GOOS == "linux" {
+		return appsListResult{
+			Apps: apps,
+			Note: "Applications are the .desktop launcher entries; deleting leftovers removes their config/cache/data folders. Package-managed binaries stay — use your package manager to remove those.",
+		}
+	}
+	return appsListResult{Apps: apps}
 }
 
 func (s *server) handleApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.appsList())
 }
 
+// findApp looks the path up in the same list the dashboard showed — the
+// per-OS inventory, not just macOS bundles, so Windows registry entries and
+// Linux desktop entries validate too.
 func (s *server) findApp(path string) *AppInfo {
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
-	apps := listApps()
+	apps := s.appsList().Apps
 	for i := range apps {
 		if apps[i].Path == path {
 			return &apps[i]
@@ -415,8 +633,81 @@ func (s *server) handleAppUninstall(w http.ResponseWriter, r *http.Request) {
 	if entry.Files > 0 || len(entry.Commands) > 0 {
 		s.saveJournal(entry)
 	}
+	note := ""
+	if runtime.GOOS == "linux" {
+		note = "menu entry and leftovers trashed; package-managed binaries " +
+			"remain — remove them with your package manager"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "app": app.Name, "bytes": entry.Bytes, "files": entry.Files, "failed": failures,
+		"ok": true, "app": app.Name, "bytes": entry.Bytes, "files": entry.Files,
+		"failed": failures, "note": note,
+	})
+}
+
+// handleAppLeftoversDelete trashes checked leftover locations WITHOUT
+// uninstalling the app — the "app is gone but its folders are still here"
+// case on every OS (Windows after an uninstaller ran, Linux after a package
+// removal, macOS after a manual drag-to-Trash). Requested paths are
+// validated against a fresh scan of the app's leftovers: only locations the
+// scan itself proposes can be trashed, so the endpoint cannot be talked
+// into moving arbitrary directories.
+func (s *server) handleAppLeftoversDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path  string   `json:"path"`
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "bad request body")
+		return
+	}
+	app := s.findApp(req.Path)
+	if app == nil {
+		fail(w, http.StatusBadRequest, "application is not in the scanned install list")
+		return
+	}
+	if app.Running {
+		fail(w, http.StatusConflict, app.Name+" is running — quit it first (its folders may be in use)")
+		return
+	}
+	allowed := map[string]int64{}
+	for _, l := range appLeftovers(*app) {
+		allowed[l.Path] = l.SizeBytes
+	}
+	trashDir := trashDirPath()
+	_ = os.MkdirAll(trashDir, 0o755)
+	entry := JournalEntry{
+		ID:     fmt.Sprintf("e%d", time.Now().UnixNano()),
+		At:     time.Now().UTC().Format(time.RFC3339),
+		Action: "leftovers",
+		Name:   app.Name,
+	}
+	var failures, skipped []map[string]string
+	removed := 0
+	var bytes int64
+	for _, p := range req.Paths {
+		size, ok := allowed[p]
+		if !ok {
+			skipped = append(skipped, map[string]string{"path": p,
+				"reason": "not in the app's leftover scan"})
+			continue
+		}
+		dst, err := trashTo(trashDir, p)
+		if err != nil {
+			failures = append(failures, map[string]string{"path": p, "error": err.Error()})
+			continue
+		}
+		entry.Items = append(entry.Items, JournalItem{Path: p, Trash: filepath.Base(dst)})
+		entry.Bytes += size
+		entry.Files++
+		removed++
+		bytes += size
+	}
+	if entry.Files > 0 {
+		s.saveJournal(entry)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "app": app.Name, "removed": removed, "bytes": bytes,
+		"files": entry.Files, "failed": failures, "skipped": skipped,
 	})
 }
 

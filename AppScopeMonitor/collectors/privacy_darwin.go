@@ -258,17 +258,36 @@ func psName(pid int) string {
 	return out
 }
 
+// actionLabel turns what a raw TCC log line can honestly state into a
+// short label. TCC's user-side log usually records the REQUEST, not the
+// verdict -- the grant/deny reply goes back to the caller without being
+// logged -- so anything without an explicit verdict word is labeled a
+// request or a generic access event, never a grant.
 func actionLabel(line string) string {
+	l := strings.ToLower(line)
 	if strings.Contains(line, "Prompting policy") {
 		return "access attempt (TCC entitlement check)"
 	}
-	if strings.Contains(line, "AUTHRESULTS") || strings.Contains(strings.ToLower(line), "auth") {
+	if strings.Contains(line, "AUTHRESULTS") || strings.Contains(l, "authresults") {
+		if strings.Contains(l, "granted") || strings.Contains(l, "allowed") {
+			return "access granted (TCC)"
+		}
+		if strings.Contains(l, "denied") || strings.Contains(l, "refused") {
+			return "access denied (TCC)"
+		}
 		return "access result (TCC)"
 	}
-	if strings.Contains(line, "FORWARD") {
+	if strings.Contains(line, "FORWARD") || strings.Contains(l, "forwarding") ||
+		strings.Contains(l, "accessrequest") {
 		return "access request (TCC)"
 	}
-	return "access request/grant (TCC)"
+	if strings.Contains(l, "granted") || strings.Contains(l, "allowed") {
+		return "access granted (TCC)"
+	}
+	if strings.Contains(l, "denied") || strings.Contains(l, "refused") {
+		return "access denied (TCC)"
+	}
+	return "access event (TCC)"
 }
 
 // -- permission inventory ---------------------------------------------------

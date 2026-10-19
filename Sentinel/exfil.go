@@ -8,7 +8,9 @@ package main
 //     sensitive-file events paired with live outbound connections
 
 import (
+	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,39 +20,85 @@ import (
 
 // macOS TCC services worth watching, with plain-language labels.
 var tccWatch = map[string]string{
-	"kTCCServiceAccessibility":        "Accessibility (key injection/reading)",
-	"kTCCServiceListenEvent":          "Input Monitoring (global keystrokes)",
-	"kTCCServicePostEvent":            "Send keystrokes (synthetic input)",
-	"kTCCServiceScreenCapture":        "Screen recording",
-	"kTCCServiceAppleEvents":          "Control other apps (AppleEvents)",
-	"kTCCServiceSystemPolicyAllFiles": "Full Disk Access",
+	"kTCCServiceAccessibility":                "Accessibility (key injection/reading)",
+	"kTCCServiceListenEvent":                  "Input Monitoring (global keystrokes)",
+	"kTCCServicePostEvent":                    "Send keystrokes (synthetic input)",
+	"kTCCServiceScreenCapture":                "Screen recording",
+	"kTCCServiceCamera":                       "Camera",
+	"kTCCServiceMicrophone":                   "Microphone",
+	"kTCCServiceAppleEvents":                  "Control other apps (AppleEvents)",
+	"kTCCServiceSystemPolicyAllFiles":         "Full Disk Access",
+	"kTCCServiceSystemPolicyDesktopFolder":    "Desktop folder",
+	"kTCCServiceSystemPolicyDocumentsFolder":  "Documents folder",
+	"kTCCServiceSystemPolicyDownloadsFolder":  "Downloads folder",
+	"kTCCServiceSystemPolicyNetworkVolumes":   "Network volumes",
+	"kTCCServiceSystemPolicyRemovableVolumes": "Removable volumes",
+	"kTCCServiceSystemPolicyAppData":          "Other app data",
+	"kTCCServiceSystemPolicySysAdminFiles":    "System administration files",
+	"kTCCServiceSystemPolicyDeveloperFiles":   "Developer files",
+	"kTCCServiceBluetoothAlways":              "Bluetooth",
+	"kTCCServiceSpeechRecognition":            "Speech recognition",
+	"kTCCServiceLocalNetwork":                 "Local network devices",
 }
 
-func tccEntries() ([][3]string, error) {
+// tccRow is one access row from a TCC database. DB records which database
+// the row came from ("user" or "system") — system rows need root to remove.
+type tccRow struct {
+	Service, Client, Auth, LastUsed string
+	DB                              string
+}
+
+func tccEntries() ([]tccRow, error) {
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("TCC is macOS-only")
 	}
 	home, _ := os.UserHomeDir()
-	dbs := []string{
-		filepath.Join(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"),
-		"/Library/Application Support/com.apple.TCC/TCC.db",
+	dbs := []struct {
+		path, label string
+	}{
+		{filepath.Join(home, "Library", "Application Support", "com.apple.TCC", "TCC.db"), "user"},
+		{"/Library/Application Support/com.apple.TCC/TCC.db", "system"},
 	}
+	rows := []tccRow{}
+	var lastErr error
 	for _, db := range dbs {
-		out, err := RunOut(8*time.Second, "sqlite3", "-csv", db,
-			"select service, client, auth_value from access;")
+		out, err := RunOut(8*time.Second, "sqlite3", "-csv", db.path,
+			"select service, client, auth_value, last_used_time from access;")
 		if err != nil {
-			continue // unreadable (needs Full Disk Access) — try the next db
-		}
-		rows := [][3]string{}
-		for _, line := range strings.Split(out, "\n") {
-			f := strings.Split(strings.TrimSpace(line), ",")
-			if len(f) >= 3 {
-				rows = append(rows, [3]string{f[0], f[1], f[2]})
+			// Older TCC schemas do not expose last_used_time.
+			out, err = RunOut(8*time.Second, "sqlite3", "-csv", db.path,
+				"select service, client, auth_value from access;")
+			if err != nil {
+				lastErr = err
+				continue // unreadable (needs Full Disk Access) — try the next db
 			}
 		}
+		reader := csv.NewReader(strings.NewReader(out))
+		reader.FieldsPerRecord = -1
+		for {
+			fields, readErr := reader.Read()
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
+			if len(fields) >= 3 {
+				row := tccRow{Service: fields[0], Client: fields[1], Auth: fields[2], DB: db.label}
+				if len(fields) >= 4 {
+					row.LastUsed = fields[3]
+				}
+				rows = append(rows, row)
+			}
+		}
+	}
+	if len(rows) > 0 {
 		return rows, nil
 	}
-	return nil, fmt.Errorf("TCC.db unreadable — grant Sentinel's terminal Full Disk Access for permission-change tracking")
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no TCC database returned permission rows")
+	}
+	return nil, fmt.Errorf("TCC.db unreadable — grant Sentinel's terminal Full Disk Access for permission-change tracking: %w", lastErr)
 }
 
 func exfilFindings(store *Store, rules *Rules, procs []Proc,
@@ -70,19 +118,20 @@ func exfilFindings(store *Store, rules *Rules, procs []Proc,
 		} else {
 			cur := map[string]string{} // "service|client" -> auth
 			for _, r := range rows {
-				cur[r[0]+"|"+r[1]] = r[2]
+				cur[r.Service+"|"+r.Client] = r.Auth
 			}
 			prevVal, existed := store.BaselineKey("tcc", mapToAny(cur))
 			if existed {
 				prev, _ := prevVal.(map[string]any)
 				for key, auth := range cur {
-					if _, known := prev[key]; known {
+					prevAuth, known := prev[key]
+					if known && fmt.Sprint(prevAuth) == auth {
 						continue
 					}
 					parts := strings.SplitN(key, "|", 2)
 					svc, client := parts[0], parts[1]
 					label, watched := tccWatch[svc]
-					if !watched || auth == "0" || auth == "2" { // denied/absent
+					if !watched || auth == "0" || auth == "1" { // denied/undetermined
 						continue
 					}
 					lc := strings.ToLower(client)

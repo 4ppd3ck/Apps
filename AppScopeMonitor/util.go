@@ -85,6 +85,7 @@ func PopenStream(cmd []string) (*exec.Cmd, *bufio.Reader, error) {
 	c := exec.Command(cmd[0], cmd[1:]...)
 	c.Stderr = nil // child stderr -> /dev/null
 	c.WaitDelay = time.Second
+	c.SysProcAttr = streamProcAttr() // own process group (see KillCmdTree)
 	stdout, err := c.StdoutPipe()
 	if err != nil {
 		return nil, nil, err

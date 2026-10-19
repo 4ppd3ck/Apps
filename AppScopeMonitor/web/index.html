@@ -188,6 +188,8 @@
   <div class="panel-head">
     <h2>File access <span class="tag tag-file">watched dirs</span></h2>
     <div class="head-controls" id="fc-file">
+      <button id="file-lock-btn" class="purge-btn" style="display:none" data-installed="0"
+              title="file tracing privilege">&#128275;</button>
       <input class="filter" id="filter-file" placeholder="filter&hellip;">
     </div>
   </div>
@@ -241,6 +243,8 @@
   <div class="panel-head">
     <h2>Blocked connections <span class="tag tag-net" id="blocks-status">checking&hellip;</span></h2>
     <div class="head-controls">
+      <button id="block-lock-btn" class="purge-btn" style="display:none" data-enforcing="0"
+              title="blocking state">&#128275;</button>
       <select id="block-type" class="filter" title="what to block">
         <option value="ip">IP address</option>
         <option value="connection">IP + port</option>

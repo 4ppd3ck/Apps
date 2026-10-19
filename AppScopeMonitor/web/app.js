@@ -255,8 +255,13 @@ async function loadStatus() {
         : st === "idle" ? "dot-deg" : st === "error" ? "dot-err" : "dot-off";
       const title = `${c.description}\n${c.status.detail || ""}` +
         (c.enabled ? "\n\nclick to turn OFF" : "\n\nclick to turn ON");
+      // a privilege-blocked files chip offers the one-time grant instead of
+      // a plain toggle (clicking it again would just fail the same way)
+      const unpriv = s.platform === "darwin" && c.name === "files-macos" &&
+        st === "unavailable" && /fs_usage|needs root/.test(c.status.detail || "");
       return `<span class="chip ${c.enabled ? "" : "chip-off"}" role="button" ` +
         `data-category="${esc(c.category)}" data-enabled="${c.enabled}" ` +
+        (unpriv ? `data-files-grant="1" ` : "") +
         `title="${esc(title)}">` +
         `<span class="dot ${dot}"></span><b>${esc(c.name)}</b> ${esc(st)}</span>`;
     });
@@ -265,10 +270,32 @@ async function loadStatus() {
     }
     $("status-chips").innerHTML = chips.join("");
     for (const el of document.querySelectorAll("#status-chips .chip[data-category]")) {
-      el.addEventListener("click", () => toggleCollector(
-        el.dataset.category, el.dataset.enabled !== "true"));
+      el.addEventListener("click", () => {
+        if (el.dataset.filesGrant === "1") {
+          grantFileTracing(el.dataset.category);
+          return;
+        }
+        toggleCollector(el.dataset.category, el.dataset.enabled !== "true");
+      });
     }
     const allOn = s.collectors.every((c) => c.enabled);
+    // on-demand file tracing padlock (File access panel head)
+    const fl = $("file-lock-btn");
+    if (fl) {
+      const g = s.files_grant;
+      if (g && g.supported) {
+        fl.style.display = "";
+        fl.dataset.installed = g.installed ? "1" : "0";
+        fl.textContent = g.installed ? "\u{1F512}" : "\u{1F513}";
+        fl.title = g.installed
+          ? "file tracing is ON (fs_usage via a passwordless grant)\n" +
+            "click to make it on-demand — tracing stops and the grant is removed"
+          : "file tracing is OFF (no fs_usage grant)\n" +
+            "click to grant — macOS asks for your password once, tracing starts";
+      } else {
+        fl.style.display = "none";
+      }
+    }
     const master = $("master-toggle");
     master.textContent = allOn ? "\u25A4 pause all" : "\u25B6 resume all";
     master.classList.toggle("master-off", !allOn);
@@ -286,6 +313,58 @@ async function toggleCollector(target, enabled) {
   } catch (e) { console.warn("toggle", e); }
   loadStatus();
 }
+
+// one-time grant for file tracing on macOS: installs the read-only
+// fs_usage sudoers entry via the OS password dialog, then enables the chip
+async function grantFileTracing(category) {
+  if (!confirm("File tracing needs one narrow grant: permission to run " +
+      "/usr/bin/fs_usage as root (read-only tracing, nothing else).\n\n" +
+      "Grant it now? macOS will ask for your password once.")) {
+    toggleCollector(category, false);
+    return;
+  }
+  try {
+    const r = await fetch("/api/files/grant", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "grant" }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      if (!d.canceled) alert("Grant failed: " + (d.error || "unknown"));
+    }
+  } catch (e) {
+    alert("Grant failed: " + e);
+  }
+  toggleCollector(category, true);
+}
+
+// the File access panel's padlock: grant = start tracing (password once),
+// revoke = stop tracing and remove the grant (on-demand)
+$("file-lock-btn").addEventListener("click", async () => {
+  const btn = $("file-lock-btn");
+  const installed = btn.dataset.installed === "1";
+  const action = installed ? "revoke" : "grant";
+  if (installed && !confirm("Make file tracing on-demand?\n\nTracing stops " +
+      "now and the passwordless fs_usage grant is removed. The padlock " +
+      "grants it again any time (one password prompt).")) {
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/files/grant", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const d = await r.json();
+    if (!d.ok && !d.canceled) {
+      alert((installed ? "Revoke" : "Grant") + " failed: " + (d.error || "unknown"));
+    }
+  } catch (e) {
+    alert((installed ? "Revoke" : "Grant") + " failed: " + e);
+  }
+  btn.disabled = false;
+  loadStatus();
+});
 
 async function loadConnections() {
   try {
@@ -622,15 +701,31 @@ async function loadBlocks() {
     const d = await getJSON("/api/blocks");
     const st = $("blocks-status");
     const mode = d.enforcement?.mode;
+    const lockBtn = $("block-lock-btn");
+    lockBtn.dataset.enforcing = mode ? "1" : "0";
     if (mode) {
       st.textContent = "enforcing";
       st.style.color = "var(--green)";
       st.title = d.enforcement.reason || "";
+      // closed padlock: the firewall is actually dropping traffic; click
+      // to revoke the grant and stop enforcing
+      lockBtn.textContent = "\u{1F512}";
+      lockBtn.title = "blocking is ENFORCED (" + (d.enforcement.reason || "") +
+        ")\n\nclick to remove the grant \u2014 applied rules are lifted and " +
+        "stored rules go back to queued";
+      lockBtn.style.display = "";
     } else {
-      st.textContent = "queued only — " + (d.enforcement?.reason || "no privilege");
+      const reason = d.enforcement?.reason || "no privilege";
+      st.textContent = "queued only";
       st.style.color = "var(--amber)";
-      st.title = "rules are stored and applied automatically once privilege " +
-        "is granted (scripts/grant_block_*.sh or an elevated monitor)";
+      st.title = reason;
+      // open padlock: rules are stored but nothing is dropped yet; click
+      // to run the one-time grant (password once)
+      lockBtn.textContent = "\u{1F513}";
+      lockBtn.title = reason + "\n\nclick to enforce \u2014 one-time privileged " +
+        "install, the OS asks for your password once";
+      lockBtn.style.display =
+        d.enforcement?.grant_supported === false ? "none" : "";
     }
     const tb = $("tbl-blocks").tBodies[0];
     tb.innerHTML = (d.rules || []).map((r) => `
@@ -707,6 +802,40 @@ $("block-reapply").addEventListener("click", async () => {
     body: JSON.stringify({ action: "reconcile" }),
   });
   loadBlocks();
+});
+// the lock icon is both the state display and the enforce/remove control
+$("block-lock-btn").addEventListener("click", async () => {
+  const btn = $("block-lock-btn");
+  const enforcing = btn.dataset.enforcing === "1";
+  const action = enforcing ? "revoke" : "grant";
+  if (enforcing && !confirm("Remove the blocking grant?\n\nThe installed " +
+      "helper, its passwordless entry and every applied firewall rule are " +
+      "removed; stored rules go back to queued until you enforce again.")) {
+    return;
+  }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "\u2026";
+  try {
+    const r = await fetch("/api/block/grant", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      if (d.canceled) { /* password sheet dismissed -- nothing to say */ }
+      else alert((enforcing ? "Revoke" : "Grant") + " failed: " +
+        (d.error || "unknown"));
+    } else if (!enforcing && !d.mode) {
+      alert("Privilege was granted but blocking is still not active:\n" +
+        (d.reason || d.warning || "unknown"));
+    }
+    loadBlocks();
+  } catch (e) {
+    alert((enforcing ? "Revoke" : "Grant") + " failed: " + e);
+  }
+  btn.disabled = false;
+  btn.textContent = label;
 });
 $("tbl-blocks").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-unblock]");

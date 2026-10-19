@@ -83,6 +83,8 @@ func (e *Engine) defineChecks() {
 			func() []Finding { return mitmFindings(e.store, e.rules) }},
 		{Check{Name: "persistence", Description: "New launch agents/daemons, cron, autostart, systemd units, Run keys, startup folders", Interval: "slow"},
 			func() []Finding { return persistFindings(e.store) }},
+		{Check{Name: "firewall", Description: "Firewall state, default policies and per-app allow rules (socketfilterfw / Windows firewall / firewalld / pf)", Interval: "slow"},
+			func() []Finding { return firewallFindings(e.store) }},
 		{Check{Name: "exfil", Description: "TCC permission grants (macOS), keylogger names, camera/mic/file + outbound correlation", Interval: "slow"},
 			func() []Finding {
 				procs, err := listProcs()
@@ -209,7 +211,7 @@ func (e *Engine) runOnce(interval string) {
 		for _, f := range findings {
 			if f.Title == "Process scan unavailable" || f.Title == "Socket scan unavailable" ||
 				f.Title == "Network baseline unavailable" || f.Title == "Persistence scan unavailable" ||
-				f.Title == "Permission database not readable" {
+				f.Title == "Permission database not readable" || f.Title == "Firewall scan unavailable" {
 				unavailable = true
 				st.Reason = f.Detail
 			}

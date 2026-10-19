@@ -65,7 +65,12 @@ func main() {
 	ctx := monitor.NewCtx(cfg, store, bus)
 	ctx.SetCollectors(collectors.BuildCollectors(ctx))
 
-	// blocking enforcement: probe privilege level, then re-apply stored rules
+	// blocking enforcement: materialize the packaged helper/grant scripts
+	// beside the config, probe privilege level, then re-apply stored rules
+	if err := monitor.MaterializeScripts(
+		filepath.Join(filepath.Dir(cfg.Path), "scripts")); err != nil {
+		fmt.Printf("[blocks] scripts: %v\n", err)
+	}
 	enf := monitor.NewEnforcer(ctx)
 	ctx.Enforcer = enf
 	enf.Probe()

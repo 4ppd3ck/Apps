@@ -61,6 +61,65 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/api/status":
 		s.json(w, s.apiStatus())
+	case "/api/permissions":
+		s.json(w, permissionInventory())
+	case "/api/permissions/remove":
+		if r.Method != http.MethodPost {
+			s.json(w, map[string]any{"error": "POST required"}, 405)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct{ Client, Service string }
+		_ = json.Unmarshal(body, &req)
+		if req.Client == "" || req.Service == "" {
+			s.json(w, map[string]any{"error": "client and service are required"}, 400)
+			return
+		}
+		msg, err := tccRemove(s.dataDir, req.Client, req.Service)
+		if err != nil {
+			s.json(w, map[string]any{"error": FmtErr(err)}, 500)
+			return
+		}
+		s.json(w, map[string]any{"ok": true, "message": msg})
+	case "/api/daemon/remove":
+		if r.Method != http.MethodPost {
+			s.json(w, map[string]any{"error": "POST required"}, 405)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct{ Path string }
+		_ = json.Unmarshal(body, &req)
+		if req.Path == "" {
+			s.json(w, map[string]any{"error": "path is required"}, 400)
+			return
+		}
+		msg, err := daemonRemove(req.Path)
+		if err != nil {
+			s.json(w, map[string]any{"error": FmtErr(err)}, 500)
+			return
+		}
+		s.json(w, map[string]any{"ok": true, "message": msg})
+	case "/api/firewall/rule":
+		if r.Method != http.MethodPost {
+			s.json(w, map[string]any{"error": "POST required"}, 405)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct{ Action, Dir, Path string }
+		_ = json.Unmarshal(body, &req)
+		if req.Action == "" || req.Path == "" {
+			s.json(w, map[string]any{"error": "action and path are required"}, 400)
+			return
+		}
+		if req.Dir == "" {
+			req.Dir = "in"
+		}
+		msg, err := firewallSetRule(req.Action, req.Dir, req.Path)
+		if err != nil {
+			s.json(w, map[string]any{"error": FmtErr(err)}, 500)
+			return
+		}
+		s.json(w, map[string]any{"ok": true, "message": msg})
 	case "/api/alerts":
 		if r.Method == http.MethodDelete {
 			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,29 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts);
 CREATE INDEX IF NOT EXISTS idx_events_cat ON events (category, ts DESC);
+CREATE TABLE IF NOT EXISTS traffic_samples (
+    ts REAL PRIMARY KEY,
+    rx_bytes INTEGER NOT NULL,
+    tx_bytes INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples (ts);
+CREATE TABLE IF NOT EXISTS connection_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    ended_at REAL,
+    missed_snapshots INTEGER NOT NULL DEFAULT 0,
+    app TEXT,
+    pid TEXT,
+    proto TEXT,
+    local TEXT,
+    remote TEXT,
+    scope TEXT,
+    state TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_connection_history_last_seen
+    ON connection_history (last_seen DESC);
 CREATE TABLE IF NOT EXISTS blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -307,7 +331,7 @@ func (s *Store) Counts(since float64) (map[string]map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// DeleteBefore removes events older than the cutoff epoch; returns row count.
+// DeleteBefore removes retained events and network-history samples before cutoff.
 func (s *Store) DeleteBefore(cutoff float64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -315,7 +339,254 @@ func (s *Store) DeleteBefore(cutoff float64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec("DELETE FROM traffic_samples WHERE ts < ?", cutoff); err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec(
+		"DELETE FROM connection_history WHERE COALESCE(ended_at, last_seen) < ?", cutoff); err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// ConnectionRecord describes one observed connection lifecycle.
+type ConnectionRecord struct {
+	StartedAt float64  `json:"started_at"`
+	LastSeen  float64  `json:"last_seen"`
+	EndedAt   *float64 `json:"ended_at"`
+	App       string   `json:"app"`
+	PID       string   `json:"pid"`
+	Protocol  string   `json:"protocol"`
+	Local     string   `json:"local"`
+	Remote    string   `json:"remote"`
+	Scope     string   `json:"scope"`
+	State     string   `json:"state"`
+}
+
+type connectionIdentity struct {
+	PID      string `json:"pid"`
+	App      string `json:"app"`
+	Protocol string `json:"protocol"`
+	Local    string `json:"local"`
+	Remote   string `json:"remote"`
+}
+
+// RecordConnectionSnapshot tracks endpoint lifetimes without retaining every
+// polling snapshot. Two consecutive missing snapshots mark an endpoint closed.
+func (s *Store) RecordConnectionSnapshot(ts float64, connections []map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	active := make(map[string]int64)
+	rows, err := tx.Query("SELECT id, identity FROM connection_history WHERE ended_at IS NULL")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var identity string
+		if err := rows.Scan(&id, &identity); err != nil {
+			rows.Close()
+			return err
+		}
+		active[identity] = id
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	seen := make(map[string]bool, len(connections))
+	for _, connection := range connections {
+		app := nullableText(connection["app"])
+		pid := nullableText(connection["pid"])
+		protocol := strings.ToUpper(nullableText(connection["proto"]))
+		local := formatConnectionEndpoint(connection["local_ip"], connection["local_port"])
+		remote := formatConnectionEndpoint(connection["remote_ip"], connection["remote_port"])
+		identityBytes, err := json.Marshal(connectionIdentity{
+			PID: pid, App: app, Protocol: protocol, Local: local, Remote: remote,
+		})
+		if err != nil {
+			return fmt.Errorf("encode connection identity: %w", err)
+		}
+		identity := string(identityBytes)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
+		state := NormalizeConnState(nullableText(connection["state"]))
+		if state == "" && protocol == "UDP" {
+			state = "BOUND"
+		}
+		scope := "other"
+		switch ClassifyIP(nullableText(connection["remote_ip"])) {
+		case "external":
+			scope = "external"
+		case "lan", "loopback":
+			scope = "internal"
+		}
+		if id, exists := active[identity]; exists {
+			_, err = tx.Exec(
+				`UPDATE connection_history SET last_seen=?, missed_snapshots=0,
+				 app=?, pid=?, proto=?, local=?, remote=?, scope=?, state=? WHERE id=?`,
+				ts, app, pid, protocol, local, remote, scope, state, id)
+		} else {
+			_, err = tx.Exec(
+				`INSERT INTO connection_history
+				 (identity, started_at, last_seen, app, pid, proto, local, remote, scope, state)
+				 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+				identity, ts, ts, app, pid, protocol, local, remote, scope, state)
+		}
+		if err != nil {
+			return fmt.Errorf("record connection snapshot: %w", err)
+		}
+	}
+
+	for identity, id := range active {
+		if seen[identity] {
+			continue
+		}
+		if _, err := tx.Exec(
+			`UPDATE connection_history SET missed_snapshots=missed_snapshots+1,
+			 ended_at=CASE WHEN missed_snapshots+1 >= 2 THEN ? ELSE ended_at END,
+			 state=CASE WHEN missed_snapshots+1 >= 2 THEN 'CLOSED' ELSE state END
+			 WHERE id=? AND ended_at IS NULL`, ts, id); err != nil {
+			return fmt.Errorf("close missing connection: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) QueryConnectionHistory(since float64, limit int) ([]*ConnectionRecord, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT started_at, last_seen, ended_at, app, pid, proto, local, remote, scope, state
+		 FROM connection_history WHERE last_seen >= ? ORDER BY last_seen DESC LIMIT ?`,
+		since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []*ConnectionRecord
+	for rows.Next() {
+		var record ConnectionRecord
+		var ended sql.NullFloat64
+		var app, pid, protocol, local, remote, scope sql.NullString
+		if err := rows.Scan(
+			&record.StartedAt, &record.LastSeen, &ended, &app, &pid,
+			&protocol, &local, &remote, &scope, &record.State); err != nil {
+			return nil, err
+		}
+		if ended.Valid {
+			record.EndedAt = &ended.Float64
+		}
+		record.App, record.PID = app.String, pid.String
+		record.Protocol, record.Local, record.Remote = protocol.String, local.String, remote.String
+		record.Scope = scope.String
+		records = append(records, &record)
+	}
+	return records, rows.Err()
+}
+
+func nullableText(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := StrOf(value)
+	if text == "None" {
+		return ""
+	}
+	return text
+}
+
+func formatConnectionEndpoint(address, port any) string {
+	host := nullableText(address)
+	if host == "" {
+		return ""
+	}
+	portText := nullableText(port)
+	if portText == "" {
+		return host
+	}
+	return host + ":" + portText
+}
+
+// InsertTrafficSample stores one aggregate interface-counter snapshot.
+func (s *Store) InsertTrafficSample(ts float64, rxBytes, txBytes int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		"INSERT OR REPLACE INTO traffic_samples (ts, rx_bytes, tx_bytes) VALUES (?,?,?)",
+		ts, rxBytes, txBytes)
+	return err
+}
+
+// TrafficSampleBefore returns the latest counter sample at or before ts.
+func (s *Store) TrafficSampleBefore(ts float64) (sample TrafficSample, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(
+		"SELECT ts, rx_bytes, tx_bytes FROM traffic_samples WHERE ts <= ? ORDER BY ts DESC LIMIT 1",
+		ts)
+	err = row.Scan(&sample.Ts, &sample.RxBytes, &sample.TxBytes)
+	if err == sql.ErrNoRows {
+		return TrafficSample{}, false, nil
+	}
+	if err != nil {
+		return TrafficSample{}, false, err
+	}
+	return sample, true, nil
+}
+
+// FirstTrafficSample returns the oldest retained counter sample.
+func (s *Store) FirstTrafficSample() (sample TrafficSample, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow("SELECT ts, rx_bytes, tx_bytes FROM traffic_samples ORDER BY ts LIMIT 1")
+	err = row.Scan(&sample.Ts, &sample.RxBytes, &sample.TxBytes)
+	if err == sql.ErrNoRows {
+		return TrafficSample{}, false, nil
+	}
+	if err != nil {
+		return TrafficSample{}, false, err
+	}
+	return sample, true, nil
+}
+
+// FirstTrafficSampleAfter returns the first sample at or after ts.
+func (s *Store) FirstTrafficSampleAfter(ts float64) (sample TrafficSample, ok bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(
+		"SELECT ts, rx_bytes, tx_bytes FROM traffic_samples WHERE ts >= ? ORDER BY ts LIMIT 1",
+		ts)
+	err = row.Scan(&sample.Ts, &sample.RxBytes, &sample.TxBytes)
+	if err == sql.ErrNoRows {
+		return TrafficSample{}, false, nil
+	}
+	if err != nil {
+		return TrafficSample{}, false, err
+	}
+	return sample, true, nil
 }
 
 // ------------------------------------------------------------- blocks ----

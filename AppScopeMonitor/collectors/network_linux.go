@@ -38,9 +38,11 @@ type NetworkLinux struct {
 }
 
 type seenKey struct {
-	pid string
-	rip string
-	rp  int
+	pid   string
+	proto string
+	lp    int
+	rip   string
+	rp    int
 }
 
 // NewNetworkLinux creates the collector.
@@ -79,17 +81,6 @@ func (c *NetworkLinux) run() {
 				}
 			}()
 			conns := c.ssConns()
-			if c.Ctx.Cfg.GetBool("hide_loopback_connections", true) {
-				filtered := conns[:0]
-				for _, conn := range conns {
-					rip, _ := conn["remote_ip"].(string)
-					if strings.HasPrefix(rip, "127.") || strings.HasPrefix(rip, "::1") {
-						continue
-					}
-					filtered = append(filtered, conn)
-				}
-				conns = filtered
-			}
 			c.Ctx.Net.UpdateConnections(conns)
 			c.emitNew(conns)
 			c.traffic(t0)
@@ -111,22 +102,20 @@ func (c *NetworkLinux) ssConns() []map[string]any {
 		}
 		proto, state := toks[0], toks[1]
 		local, peer := toks[4], toks[5]
-		if state == "LISTEN" || strings.HasPrefix(peer, "*") ||
-			strings.HasPrefix(peer, "0.0.0.0") ||
-			strings.HasPrefix(peer, "[::]") {
-			continue
-		}
 		row := map[string]any{
 			"proto": proto, "state": state, "app": nil, "pid": nil,
 			"user": nil, "local_ip": nil, "local_port": nil,
 			"remote_ip": nil, "remote_port": nil,
 		}
 		lip, lport := rpartition(local, ":")
-		rip, rport := rpartition(peer, ":")
 		row["local_ip"] = strings.Trim(lip, "[]")
 		row["local_port"] = intOrNilSS(lport)
-		row["remote_ip"] = strings.Trim(rip, "[]")
-		row["remote_port"] = intOrNilSS(rport)
+		if peer != "" && !strings.HasPrefix(peer, "*") &&
+			!strings.HasPrefix(peer, "0.0.0.0") && !strings.HasPrefix(peer, "[::]") {
+			rip, rport := rpartition(peer, ":")
+			row["remote_ip"] = strings.Trim(rip, "[]")
+			row["remote_port"] = intOrNilSS(rport)
+		}
 		if mu := reUsers.FindStringSubmatch(line); mu != nil {
 			row["app"] = mu[1]
 			if pid, err := strconv.Atoi(mu[2]); err == nil {
@@ -145,7 +134,7 @@ func (c *NetworkLinux) ssConns() []map[string]any {
 				}
 			}
 		}
-		if rip, ok := row["remote_ip"].(string); ok && rip != "" {
+		if row["local_port"] != nil {
 			conns = append(conns, row)
 		}
 	}
@@ -158,25 +147,24 @@ func (c *NetworkLinux) emitNew(conns []map[string]any) {
 	}
 	for _, conn := range conns {
 		key := seenKey{
-			pid: pyStr(conn["pid"]),
-			rip: pyStr(conn["remote_ip"]),
-			rp:  monitor.IntOr(conn["remote_port"], 0),
+			pid: pyStr(conn["pid"]), proto: pyStr(conn["proto"]),
+			lp:  monitor.IntOr(conn["local_port"], 0),
+			rip: pyStr(conn["remote_ip"]), rp: monitor.IntOr(conn["remote_port"], 0),
 		}
 		if c.seen[key] {
 			continue
 		}
 		c.seen[key] = true
 		c.Emit(&monitor.Event{
-			Category:  "network",
-			Kind:      "connection",
-			App:       conn["app"],
-			Pid:       conn["pid"],
-			User:      conn["user"],
-			Remote:    pyJoinAddr(conn["remote_ip"], conn["remote_port"]),
-			Local:     pyJoinAddr(conn["local_ip"], conn["local_port"]),
-			Proto:     conn["proto"],
-			Direction: monitor.DirectionOf(conn["local_port"], conn["remote_port"]),
-			Detail:    conn["state"],
+			Category: "network",
+			Kind:     "connection",
+			App:      conn["app"],
+			Pid:      conn["pid"],
+			User:     conn["user"],
+			Remote:   connEventAddr(conn["remote_ip"], conn["remote_port"]),
+			Local:    pyJoinAddr(conn["local_ip"], conn["local_port"]),
+			Proto:    conn["proto"],
+			Detail:   conn["state"],
 		})
 	}
 }

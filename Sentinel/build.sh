@@ -1,17 +1,16 @@
 #!/bin/sh
 # build.sh — build Sentinel.
 #
-#   ./build.sh                    host binary only — sentinel-<os>-<arch>[.exe]
-#                                 beside go.mod, the name AppDeck launches and
-#                                 imports (this is the dev/import loop)
+#   ./build.sh                    host binary only — sentinel[.exe] beside
+#                                 go.mod, the name AppDeck launches/imports
 #   ./build.sh --all              full cross-compile matrix into ./ and dist/
 #                                 + SHA256SUMS (release artefacts)
 #   ./build.sh darwin/arm64 …     build one or more specific os/arch targets
 #   ./build.sh --host-only        legacy alias for the default
 #
 # Pure-Go stdlib, no cgo: every target builds with `go build` alone.
-# Output layout mirrors AppScope Monitor:
-#   ./sentinel-<os>-<arch>[.exe]     in-folder binaries (launcher's pick order)
+# Cross-platform build output:
+#   ./sentinel-<os>-<arch>[.exe]     in-folder per-platform binaries
 #   ./dist/<os>-<arch>/sentinel[.exe]
 #   ./dist/SHA256SUMS
 set -eu
@@ -47,7 +46,11 @@ done
 
 build_one() {
   goos=${1%/*}; goarch=${1#*/}
-  out="sentinel-${goos}-${goarch}"
+  if [ "$DIST" = "1" ]; then
+    out="sentinel-${goos}-${goarch}"
+  else
+    out="sentinel"
+  fi
   [ "$goos" = "windows" ] && out="${out}.exe"
   echo "== ${goos}/${goarch}"
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \

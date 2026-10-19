@@ -27,22 +27,27 @@ body {
 .muted { color: var(--muted); }
 
 .top {
-  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  display: flex; align-items: center; gap: 10px; flex-wrap: nowrap;
   padding: 14px 20px; background: var(--bg-soft);
   border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
 }
-.brand { display: flex; align-items: center; gap: 12px; }
+.brand { display: flex; align-items: center; gap: 12px; flex: 0 1 auto; min-width: 0; }
 .logo { font-size: 30px; }
 .brand h1 { margin: 0; font-size: 20px; letter-spacing: .02em; }
-.sub { color: var(--muted); font-size: 12px; }
-.topstate { display: flex; gap: 8px; flex: 1; flex-wrap: wrap; }
+.sub { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.topstate { display: flex; gap: 8px; flex: 0 0 auto; flex-wrap: nowrap; }
 .pill {
   background: var(--card); border: 1px solid var(--border-strong);
   border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--muted);
+  white-space: nowrap;
 }
 .pill.on { color: var(--ok); border-color: var(--ok); }
 .pill.off { color: var(--critical); border-color: var(--critical); }
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+.actions .btn { padding-right: 9px; padding-left: 9px; white-space: nowrap; }
+.tabs { display: flex; gap: 6px; flex: 0 0 auto; }
+.btn.tab { border-radius: 8px; }
+.btn.tab.selected { color: var(--accent); border-color: var(--accent); }
 .btn {
   background: var(--card); color: var(--text); border: 1px solid var(--border-strong);
   border-radius: 9px; padding: 7px 13px; font: inherit; cursor: pointer;
@@ -83,6 +88,10 @@ main { max-width: 1280px; margin: 0 auto; padding: 18px 20px 40px; }
 select, textarea {
   background: var(--card-deep); color: var(--text); border: 1px solid var(--border-strong);
   border-radius: 8px; padding: 5px 9px; font: inherit;
+}
+input[type="search"] {
+  min-width: 220px; background: var(--card-deep); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 9px; font: inherit;
 }
 textarea { width: 100%; resize: vertical; }
 .chk { color: var(--muted); font-size: 12px; display: flex; gap: 5px; align-items: center; }
@@ -140,6 +149,98 @@ textarea { width: 100%; resize: vertical; }
 
 .monitor .row { display: flex; justify-content: space-between; padding: 4px 0; gap: 10px; }
 .monitor .row .k { color: var(--muted); }
+.permission-view .panel-head { margin-bottom: 12px; }
+.permission-view .panel-head h2 { margin-bottom: 3px; }
+.permission-summary {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0;
+}
+.permission-stat {
+  display: flex; align-items: baseline; gap: 7px; padding: 7px 10px;
+  background: var(--card-deep); border: 1px solid var(--border); border-radius: 9px;
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.permission-stat:hover, .permission-stat.active { border-color: var(--accent); color: var(--accent); }
+.permission-stat strong { font-size: 18px; }
+.permission-stat span { color: var(--muted); font-size: 11px; }
+.permission-summary > .muted { margin-left: auto; }
+.permission-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.permission-warnings { margin: 10px 0; }
+.permission-warning {
+  background: var(--card-deep);
+  border: 1px solid var(--medium);
+  border-radius: 8px; color: var(--muted); padding: 8px 10px; margin-bottom: 6px; font-size: 12px;
+}
+.permission-app {
+  border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px;
+  margin-bottom: 9px; background: var(--card-deep);
+}
+.permission-app-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.permission-app h3 { margin: 0; font-size: 14px; }
+.permission-app-meta { color: var(--muted); font: 11px var(--mono); overflow-wrap: anywhere; }
+.permission-rows { margin-top: 8px; }
+.permission-row {
+  display: grid; grid-template-columns: minmax(120px, .8fr) minmax(160px, 1.2fr) auto;
+  align-items: center; gap: 6px 10px; padding: 7px 0; border-top: 1px dashed var(--border);
+}
+.permission-category, .permission-detail { color: var(--muted); font-size: 12px; }
+.permission-name { font-weight: 600; }
+.permission-side {
+  display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+}
+.permission-status {
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; min-height: 27px; padding: 4px 10px;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  font-size: 10px; line-height: 1; text-transform: uppercase; letter-spacing: .05em;
+}
+.permission-status.granted { color: var(--ok); border-color: var(--ok); }
+.permission-status.denied { color: var(--critical); border-color: var(--critical); }
+.permission-status.limited, .permission-status.restricted { color: var(--medium); border-color: var(--medium); }
+.permission-status.declared { color: var(--accent); border-color: var(--accent); }
+.permission-status.on { color: var(--ok); border-color: var(--ok); }
+.permission-status.off { color: var(--critical); border-color: var(--critical); }
+.permission-status.allowed { color: var(--ok); border-color: var(--ok); }
+.permission-status.blocked { color: var(--medium); border-color: var(--medium); }
+.permission-status.allow { color: var(--ok); border-color: var(--ok); }
+.permission-status.block { color: var(--medium); border-color: var(--medium); }
+.permission-status.unknown { color: var(--muted); }
+.permission-stale {
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; min-height: 27px; padding: 4px 10px;
+  color: var(--high); border: 1px dashed var(--high); border-radius: 999px;
+  font-size: 10px; line-height: 1; text-transform: uppercase; letter-spacing: .05em;
+}
+.permission-actions { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.removal-note {
+  margin: 14px 0 4px; padding: 10px 12px; line-height: 1.6;
+  border-top: 1px dashed var(--border);
+}
+.removal-note strong { color: var(--text); }
+.row-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box; min-height: 27px; padding: 4px 10px;
+  font-size: 10px; line-height: 1; text-transform: uppercase; letter-spacing: .05em;
+}
+.row-action.danger { color: var(--critical); border-color: var(--critical); }
+.row-action.danger:hover { color: var(--critical); border-color: var(--critical); }
+.row-action.warn { color: var(--high); border-color: var(--high); }
+.row-action.warn:hover { color: var(--high); border-color: var(--high); }
+.row-action:disabled { opacity: .45; cursor: not-allowed; }
+.removal-help {
+  margin: 10px 0; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--card-deep); padding: 8px 12px;
+}
+.removal-help summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.removal-help summary:hover { color: var(--accent); }
+.removal-help pre {
+  margin: 10px 0 4px; font-size: 11px; white-space: pre-wrap;
+  word-break: break-word; color: var(--text); overflow-x: auto;
+}
+.permission-scope { color: var(--muted); font: 11px var(--mono); overflow-wrap: anywhere; }
+.permission-last-used { grid-column: 2 / -1; color: var(--muted); font-size: 11px; }
+.permission-detail { grid-column: 2 / -1; }
+.no-permissions { margin: 8px 0 0; }
+#clearPermissionFilters:disabled { opacity: .5; cursor: default; }
 .btnrow { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .baseline { max-height: 260px; overflow: auto; background: var(--card-deep); border-radius: 10px; padding: 10px; }
 
@@ -153,3 +254,15 @@ dialog h2 { margin: 0 0 6px; }
 footer { text-align: center; padding: 14px; }
 .newflash { animation: flash 1.2s ease; }
 @keyframes flash { from { background: var(--card-deep); } }
+@media (max-width: 1550px) {
+  .top { flex-wrap: wrap; }
+  .topstate { flex: 1 1 auto; }
+  .actions { margin-left: 0; }
+}
+@media (max-width: 700px) {
+  .permission-row { grid-template-columns: 1fr auto; }
+  .permission-category, .permission-scope, .permission-last-used, .permission-detail { grid-column: 1 / -1; }
+  .permission-side { grid-column: 1 / -1; justify-content: flex-start; }
+  .permission-summary > .muted { margin-left: 0; width: 100%; }
+  input[type="search"] { min-width: 100%; }
+}

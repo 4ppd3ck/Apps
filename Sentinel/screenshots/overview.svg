@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Sentinel example dashboard</title><desc id="desc">A fictional host-security dashboard with sample alert data.</desc>
+  <rect width="1200" height="720" fill="#10131b"/><rect width="1200" height="72" fill="#171b27"/>
+  <text x="38" y="47" fill="#f4f6ff" font-family="Arial,sans-serif" font-size="25" font-weight="700">Sentinel</text><text x="1000" y="44" fill="#8ea0b7" font-family="Arial,sans-serif" font-size="14">SAMPLE HOST</text>
+  <g font-family="Arial,sans-serif">
+    <rect x="32" y="96" width="264" height="110" rx="14" fill="#271d27"/><text x="56" y="137" fill="#b0a3ba" font-size="14">CRITICAL</text><text x="56" y="183" fill="#f0a0ad" font-size="34" font-weight="700">0</text>
+    <rect x="318" y="96" width="264" height="110" rx="14" fill="#2a2420"/><text x="342" y="137" fill="#b5a991" font-size="14">HIGH</text><text x="342" y="183" fill="#efc37c" font-size="34" font-weight="700">1</text>
+    <rect x="604" y="96" width="264" height="110" rx="14" fill="#222536"/><text x="628" y="137" fill="#a5acc2" font-size="14">MEDIUM</text><text x="628" y="183" fill="#98b4f0" font-size="34" font-weight="700">2</text>
+    <rect x="890" y="96" width="278" height="110" rx="14" fill="#1b2630"/><text x="914" y="137" fill="#a5b4c0" font-size="14">MONITOR LINK</text><text x="914" y="180" fill="#75d7a2" font-size="20" font-weight="700">Connected</text>
+    <rect x="32" y="230" width="1136" height="430" rx="14" fill="#171b27"/>
+    <text x="56" y="273" fill="#f1f3fb" font-size="20" font-weight="700">Example alerts</text><text x="988" y="272" fill="#8996ad" font-size="14">DETECTION ONLY</text>
+    <path d="M55 300H1145M55 410H1145M55 520H1145" stroke="#30384a"/>
+    <rect x="56" y="325" width="82" height="26" rx="13" fill="#45341f"/><text x="73" y="344" fill="#efc37c" font-size="13" font-weight="700">HIGH</text>
+    <text x="165" y="341" fill="#e5e8f1" font-size="17" font-weight="700">New persistence entry</text><text x="165" y="372" fill="#9aa6bb" font-size="14">Sample application · baseline changed</text>
+    <rect x="56" y="435" width="96" height="26" rx="13" fill="#252b42"/><text x="69" y="454" fill="#a7b7ef" font-size="13" font-weight="700">MEDIUM</text>
+    <text x="165" y="451" fill="#e5e8f1" font-size="17" font-weight="700">New endpoint observed</text><text x="165" y="482" fill="#9aa6bb" font-size="14">sample-client → example.test</text>
+    <rect x="56" y="545" width="96" height="26" rx="13" fill="#252b42"/><text x="69" y="564" fill="#a7b7ef" font-size="13" font-weight="700">MEDIUM</text>
+    <text x="165" y="561" fill="#e5e8f1" font-size="17" font-weight="700">Permission change detected</text><text x="165" y="592" fill="#9aa6bb" font-size="14">Synthetic sample · review in context</text>
+    <text x="35" y="699" fill="#8290aa" font-size="13">SYNTHETIC EXAMPLE UI · Fictional alerts and host data</text>
+  </g>
+</svg>

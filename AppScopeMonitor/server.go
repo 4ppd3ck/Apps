@@ -195,6 +195,43 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/api/collectors":
 		postCollectors(ctx, w, r)
+	case "/api/theme":
+		data, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		id, _ := data["theme"].(string)
+		theme, err := ctx.Cfg.SetTheme(id)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "theme": theme})
+	case "/api/table-visibility":
+		data, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		visibility, err := saveTableVisibility(ctx.Cfg, data["visibility"])
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "visibility": visibility})
+	case "/api/dashboard-layout":
+		data, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		layout, err := saveDashboardLayout(ctx.Cfg, data["layout"])
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "layout": layout})
 	case "/api/gauge-style":
 		data, ok := readBody(r)
 		if !ok {
@@ -218,6 +255,10 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		postDataDelete(ctx, w, r)
 	case "/api/blocks":
 		postBlocks(ctx, w, r)
+	case "/api/block/grant":
+		postGrant(ctx, w, r, "block")
+	case "/api/files/grant":
+		postGrant(ctx, w, r, "files")
 	default:
 		writeJSON(w, 404, map[string]any{"error": "not found"})
 	}
@@ -237,12 +278,9 @@ func writeJSON(w http.ResponseWriter, code int, obj any) {
 }
 
 func readBody(r *http.Request) (map[string]any, bool) {
-	length, _ := strconv.Atoi(r.Header.Get("Content-Length"))
-	var data []byte
-	if length > 0 {
-		data = make([]byte, length)
-		n, _ := io.ReadFull(r.Body, data)
-		data = data[:n]
+	data, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 {
+		return nil, false
 	}
 	if len(data) == 0 {
 		data = []byte("{}")
@@ -354,6 +392,18 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 			}
 		}
 		return map[string]any{"style": style}, 200, nil
+	case "/api/themes":
+		themes, err := ctx.Cfg.Themes()
+		if err != nil {
+			return nil, 500, err
+		}
+		return map[string]any{
+			"themes": themes, "active": ctx.Cfg.ActiveTheme(),
+		}, 200, nil
+	case "/api/table-visibility":
+		return map[string]any{"visibility": tableVisibility(ctx.Cfg)}, 200, nil
+	case "/api/dashboard-layout":
+		return dashboardLayout(ctx.Cfg), 200, nil
 	case "/api/status":
 		return apiStatus(ctx), 200, nil
 	case "/api/summary":
@@ -365,17 +415,43 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 			"connections": ctx.Net.Snapshot()["connections"],
 			"updated_at":  ctx.Net.UpdatedAt(),
 		}, 200, nil
+	case "/api/connection-history":
+		qs, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return nil, 400, err
+		}
+		since, ok := ToFloat(qsValue(qs, "since", "0"))
+		if !ok {
+			return nil, 400, fmt.Errorf("invalid since")
+		}
+		limit, err := strconv.Atoi(qsValue(qs, "limit", "500"))
+		if err != nil {
+			return nil, 400, fmt.Errorf("invalid limit")
+		}
+		records, err := ctx.Store.QueryConnectionHistory(since, limit)
+		if err != nil {
+			return nil, 500, err
+		}
+		if records == nil {
+			records = []*ConnectionRecord{}
+		}
+		return map[string]any{"connections": records}, 200, nil
 	case "/api/traffic":
 		snap := ctx.Net.Snapshot()
 		history, _ := snap["history"].([]HistoryPoint)
 		if len(history) > 180 {
 			history = history[len(history)-180:]
 		}
+		totals, err := ctx.Net.TrafficSummary(ctx.Store)
+		if err != nil {
+			return nil, 500, err
+		}
 		return map[string]any{
 			"app_rates":       snap["app_rates"],
 			"ifaces":          snap["ifaces"],
 			"app_connections": snap["app_connections"],
 			"history":         history,
+			"totals":          totals,
 		}, 200, nil
 	case "/api/battery":
 		info := ctx.Battery()
@@ -397,11 +473,13 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 		if rules == nil {
 			rules = []*Block{}
 		}
+		_, grantable := grantScript("block")
 		return map[string]any{
 			"rules": rules,
 			"enforcement": map[string]any{
 				"mode": mode, "reason": reason,
-				"platform": PlatformString(),
+				"platform":        PlatformString(),
+				"grant_supported": grantable,
 			},
 		}, 200, nil
 	case "/api/stream":
@@ -430,6 +508,11 @@ func apiStatus(ctx *Ctx) map[string]any {
 	info["collectors"] = collectorInfos(ctx.Collectors())
 	info["android_devices"] = ctx.AndroidDevices()
 	info["version"] = Version
+	// on-demand file tracing (macOS): the padlock's state source
+	info["files_grant"] = map[string]any{
+		"supported": runtime.GOOS == "darwin",
+		"installed": filesGrantInstalled(),
+	}
 	return info
 }
 
@@ -656,6 +739,31 @@ func ToggleCollectors(ctx *Ctx, target string, enabled bool) map[string]any {
 		"enabled":    enabled,
 		"collectors": collectorInfos(ctx.Collectors()),
 	}
+}
+
+// postGrant runs the one-time privileged grant (or revoke) for a target
+// ("block" enforcement or "files" tracing) -- loopback only, since it pops
+// the platform's elevation dialog on the console session.
+func postGrant(ctx *Ctx, w http.ResponseWriter, r *http.Request, target string) {
+	if !requestIsLoopback(r) {
+		writeJSON(w, 403, map[string]any{"error": "loopback only"})
+		return
+	}
+	body, ok := readBody(r)
+	if !ok {
+		writeJSON(w, 400, map[string]any{"error": "bad JSON body"})
+		return
+	}
+	action := StrOf(body["action"])
+	if action == "" {
+		action = "grant"
+	}
+	if action != "grant" && action != "revoke" {
+		writeJSON(w, 400, map[string]any{"error": "action must be grant or revoke"})
+		return
+	}
+	payload, code := Grant(ctx, target, action)
+	writeJSON(w, code, payload)
 }
 
 func postBlocks(ctx *Ctx, w http.ResponseWriter, r *http.Request) {

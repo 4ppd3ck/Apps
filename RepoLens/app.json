@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "repolens",
+  "name": "RepoLens",
+  "icon": "🔎",
+  "desc": "Search GitHub for runnable open-source apps — find it, download it, run it",
+  "category": "Developer Tools",
+  "port": 0,
+  "urlPath": "/",
+  "network": true,
+  "binary": "repolens",
+  "args": [
+    "{port}"
+  ],
+  "version": "1.0"
+}

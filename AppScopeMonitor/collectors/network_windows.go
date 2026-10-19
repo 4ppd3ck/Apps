@@ -32,7 +32,7 @@ $owners = @{}
 while ($true) {
   $c = @()
   Get-NetTCPConnection -ErrorAction SilentlyContinue |
-    Where-Object { $_.State -ne 'Listen' } | ForEach-Object {
+    ForEach-Object {
       $c += @{proto='tcp'; state=[string]$_.State; la=[string]$_.LocalAddress;
               lp=$_.LocalPort; ra=[string]$_.RemoteAddress; rp=$_.RemotePort;
               pid=$_.OwningProcess}
@@ -71,9 +71,11 @@ while ($true) {
 `
 
 type connKey struct {
-	pid string
-	rip string
-	rp  int
+	pid   string
+	proto string
+	lp    int
+	rip   string
+	rp    int
 }
 
 // NetworkWindows collects connections + per-adapter rates via PowerShell.
@@ -255,6 +257,15 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
+func nullableAddress(address string) any {
+	switch strings.TrimSpace(address) {
+	case "", "0.0.0.0", "::", "::/0":
+		return nil
+	default:
+		return address
+	}
+}
+
 func (c *NetworkWindows) process(data map[string]any) {
 	procs, _ := data["procs"].(map[string]any)
 	owners, _ := data["owners"].(map[string]any)
@@ -272,7 +283,7 @@ func (c *NetworkWindows) process(data map[string]any) {
 		}
 		proto, _ := cv["proto"].(string)
 		ra, _ := cv["ra"].(string)
-		if proto != "tcp" || ra == "" {
+		if proto != "tcp" && proto != "udp" {
 			continue
 		}
 		pid := cv["pid"]
@@ -284,28 +295,20 @@ func (c *NetworkWindows) process(data map[string]any) {
 			user = monitor.GetPassUser()
 		}
 		state := strings.ToUpper(monitor.StrOf(cv["state"]))
+		if proto == "udp" && state == "" {
+			state = "BOUND"
+		}
 		conns = append(conns, map[string]any{
-			"proto":       "tcp",
+			"proto":       proto,
 			"state":       state,
 			"local_ip":    monitor.StrOf(cv["la"]),
 			"local_port":  intOrNil(cv["lp"]),
-			"remote_ip":   ra,
+			"remote_ip":   nullableAddress(ra),
 			"remote_port": intOrNil(cv["rp"]),
 			"pid":         pid,
 			"app":         procs[monitor.StrOf(pid)],
 			"user":        user,
 		})
-	}
-	if c.Ctx.Cfg.GetBool("hide_loopback_connections", true) {
-		filtered := conns[:0]
-		for _, conn := range conns {
-			rip, _ := conn["remote_ip"].(string)
-			if strings.HasPrefix(rip, "127.") || strings.HasPrefix(rip, "::1") {
-				continue
-			}
-			filtered = append(filtered, conn)
-		}
-		conns = filtered
 	}
 	c.Ctx.Net.UpdateConnections(conns)
 	c.emitNew(conns)
@@ -318,25 +321,26 @@ func (c *NetworkWindows) emitNew(conns []map[string]any) {
 	}
 	for _, conn := range conns {
 		key := connKey{
-			pid: monitor.StrOf(conn["pid"]),
-			rip: monitor.StrOf(conn["remote_ip"]),
-			rp:  monitor.IntOr(conn["remote_port"], 0),
+			pid:   monitor.StrOf(conn["pid"]),
+			proto: monitor.StrOf(conn["proto"]),
+			lp:    monitor.IntOr(conn["local_port"], 0),
+			rip:   monitor.StrOf(conn["remote_ip"]),
+			rp:    monitor.IntOr(conn["remote_port"], 0),
 		}
 		if c.seen[key] {
 			continue
 		}
 		c.seen[key] = true
 		c.Emit(&monitor.Event{
-			Category:  "network",
-			Kind:      "connection",
-			App:       conn["app"],
-			Pid:       conn["pid"],
-			User:      conn["user"],
-			Remote:    pyJoinAddr(conn["remote_ip"], conn["remote_port"]),
-			Local:     pyJoinAddr(conn["local_ip"], conn["local_port"]),
-			Proto:     "tcp",
-			Direction: monitor.DirectionOf(conn["local_port"], conn["remote_port"]),
-			Detail:    conn["state"],
+			Category: "network",
+			Kind:     "connection",
+			App:      conn["app"],
+			Pid:      conn["pid"],
+			User:     conn["user"],
+			Remote:   connEventAddr(conn["remote_ip"], conn["remote_port"]),
+			Local:    pyJoinAddr(conn["local_ip"], conn["local_port"]),
+			Proto:    monitor.StrOf(conn["proto"]),
+			Detail:   conn["state"],
 		})
 	}
 }
