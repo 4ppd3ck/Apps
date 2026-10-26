@@ -1,58 +1,102 @@
-# Descale
+# 💧 Descale
 
-Descale reports cleanup candidates, installed-app leftovers, and startup
-items. Review its report before choosing anything to clean. Confirmed cleanup
-normally moves selected files to Trash so they can be restored; it does not
-automatically clean your computer.
+**The kettle-cleaner for your computer: buildup report, app uninstaller and startup
+manager — and nothing is ever touched without your confirmation.**
 
-![Descale example report. All names and sizes are synthetic.](screenshots/overview.svg)
+Caches, logs, crash reports, leftover app traces, things that sneak into login items…
+Descale finds the scale, shows you exactly what it is, and moves it to the Trash (never
+straight to deletion). Every session is journalled and restorable.
 
-*Privacy-safe UI preview: fictional file names and sizes; no personal paths
-or scan results are included.*
+| | |
+|---|---|
+| ![Home](docs/screenshots/home.png) | ![Guardrails](docs/screenshots/guardrails.png) |
+| ![Batch uninstall](docs/screenshots/batch-uninstall.png) | |
 
-## Run with AppDeck
+---
 
-1. Install Go 1.27 or newer.
-2. Start AppDeck from its folder with `go run .`.
-3. Select **Start** on **Descale**, then **Open**.
+## What you get
 
-AppDeck builds the app the first time it starts. Descale binds to the local
-computer because it can move files to Trash. Do not change its network
-binding or expose it to other devices.
+- **💧 Buildup report** — regenerable caches (browser, app, cargo, brew…), logs, crash
+  reports, orphaned downloads — grouped, sized, and separated from *your data*.
+- **🗑️ App uninstaller — one app or a whole batch** — pick an app (or check
+  several and press *Uninstall selected*): Descale collects the binary plus its scattered
+  traces (preferences, appdata, caches) for one confirmed Trash move. Batch
+  uninstalls write one restorable journal entry per app; running apps and
+  AppDeck apps (their removal is permanent) are skipped with a reason —
+  uninstall AppDeck apps from the launcher's own batch select.
+- **🧹 Traces** — leftovers from apps already gone.
+- **🚀 Startup manager** — see and toggle what launches at login.
+- **🧾 Cleaning journal** — every session recorded, with what went where, so a clean is
+  always reviewable and restorable.
+- **🛡️ Guardrails, by design**:
+  - *safe* items (regenerable caches) are pre-selected; *review* items are never
+    pre-checked — you opt in, one by one.
+  - Cleaning moves files **to the Trash**; "Empty the Trash" is the only permanent action,
+    review-only, and must run alone.
+  - Rules are **signed** — the engine refuses rule files that don't match their signature.
+  - Localhost-only, zero telemetry: nothing about your machine leaves it.
+- **📐 OS/arch-aware** — macOS-first (Trash semantics, Apple Silicon), with platform-aware
+  rule sets.
 
-## Run directly
+---
 
-From this folder, start the dashboard with:
+## Install
+
+### The easy way — with the AppDeck launcher
+
+1. Put this folder in the launcher's `Apps/` directory (or import its zip).
+2. Start the launcher — it builds Descale on first start — and click the **💧 Descale** tile.
+
+### Build it yourself
+
+Requires [Go](https://go.dev/dl/):
 
 ```sh
-go run . serve 8212
+cd Descale
+go build -o descale ./cmd/descale
+./descale 8212
+# open http://127.0.0.1:8212
 ```
 
-Open <http://127.0.0.1:8212>. Press **Ctrl+C** to stop it. The command-line
-report is also available:
+(`start.sh` / `start.bat` at the root do the same.)
+
+---
+
+## Your first five minutes
+
+1. Read the landing page — the guardrails summary tells you the rules of the game before
+   anything happens. The server starts **read-only** until you confirm a clean.
+2. Press **🔍 Scan this machine** — you'll get a buildup report grouped by category with
+   sizes.
+3. Review the pre-checked *safe* items (caches that regenerate); anything marked *review*
+   starts unchecked — read before ticking.
+4. **Clean** — items go to the Trash. Changed your mind? The **🧾 journal** shows the
+   session and restores it.
+5. Visit **🚀 Startup** to trim what auto-launches, and **🗑️ Uninstall** the apps you
+   thought you'd removed.
+
+---
+
+## How it's built (for the curious / the expert)
+
+```
+cmd/descale/          — Go server: scan engine, Trash-based removal, journal, signature check
+rules/descale-rules.json (+ .sig) — cleanup rule definitions: DATA, not code —
+                        edit the JSON and rescan, no rebuild needed; the .sig pins the
+                        ruleset so a swapped file is rejected
+index.html, js/app.js, css/app.css — dashboard UI served by the binary
+start.sh / start.bat  — manual launch helpers
+```
+
+- **Rules as data** — one JSON describes per-OS targets (app-caches, browser-caches,
+  app-logs, crash-reports, cargo/brew caches…), their safety class, and the action to take.
+- **Confirm-first architecture** — the server boots read-only; every mutation requires an
+  explicit confirmation flow, and everything lands in the Trash except the single,
+  review-only "Empty the Trash".
+- Runs loopback-only; the UI is the only client.
+
+## Verify
 
 ```sh
-go run . scan
+go build ./...         # then run the binary and open the dashboard
 ```
-
-`scan` only reports results; it does not clean files. To build a reusable
-executable, run `go build -o descale .` and then `./descale serve 8212`.
-On Windows, use `go build -o descale.exe .` and run
-`.\descale.exe serve 8212`.
-
-## Use it carefully
-
-1. Choose **Scan** and wait for the report to finish.
-2. Read each rule's status, safety label, and sample list. An unavailable or
-   blocked rule is not evidence that its target is empty.
-3. Leave review-only items unchecked unless you know what they are.
-4. Review the proposed plan before confirming a cleanup.
-5. Use the journal/restore view if you need to put a moved item back.
-
-Do not run Descale as administrator/root just to get a larger result. Some
-operating-system-protected folders may be unavailable; the app should report
-that rather than encouraging a blind cleanup.
-
-Descale's AppDeck data directory contains its cleanup journal. Direct runs
-use local application defaults. Scan results can reveal usernames, file
-names, and paths, so review exports and screenshots before sharing them.

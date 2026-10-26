@@ -17,6 +17,7 @@
   --accent-soft: rgba(77, 163, 255, 0.08);
   --btn-text: #04101d;
   --gold: #e3b341;
+  --ok: #3fb950;
   --danger-text: #ffb3ad;
   --danger-bg: rgba(248, 81, 73, 0.1);
   --danger-border: rgba(248, 81, 73, 0.4);
@@ -40,6 +41,7 @@
   --accent-soft: rgba(11, 102, 208, 0.09);
   --btn-text: #ffffff;
   --gold: #9a6700;
+  --ok: #1a7f37;
   --danger-text: #8f2b26;
   --danger-bg: rgba(198, 58, 58, 0.07);
   --danger-border: rgba(198, 58, 58, 0.35);
@@ -240,6 +242,10 @@ a.primary.subtle, button.primary.subtle { color: var(--accent); background: var(
 a.ghost { text-decoration: none; }
 button.ghost { background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; }
 a.ghost:hover, button.ghost:hover { color: var(--text); text-decoration: underline; }
+
+.deck-badge { color: var(--ok); font-weight: 650; }
+button.install.update { color: var(--accent); }
+button.install.pending { opacity: 0.65; cursor: progress; }
 
 .empty { text-align: center; color: var(--muted); padding: 44px 0; }
 

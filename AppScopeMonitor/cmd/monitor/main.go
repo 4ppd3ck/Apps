@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,7 +30,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: monitor [--config PATH] [--host HOST] "+
 			"[--port PORT] [--open] [--debug]\n\n"+
 			"AppScope Monitor - privacy (camera/mic/file) & network activity "+
-			"monitor with a local web dashboard.\n\nflags:\n")
+			"monitor with a local dashboard.\n\nflags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -64,6 +65,8 @@ func main() {
 	bus := monitor.NewEventBus(store)
 	ctx := monitor.NewCtx(cfg, store, bus)
 	ctx.SetCollectors(collectors.BuildCollectors(ctx))
+	// external-IP geo enrichment: async ip-api.com lookups + persistent cache
+	ctx.Geo = monitor.NewGeoCache(filepath.Join(cfg.DataDir(), "geo_cache.json"))
 
 	// blocking enforcement: materialize the packaged helper/grant scripts
 	// beside the config, probe privilege level, then re-apply stored rules
@@ -90,7 +93,8 @@ func main() {
 		}
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.Host(), cfg.Port())
+	bindHost := strings.Trim(cfg.Host(), "[]")
+	addr := net.JoinHostPort(bindHost, strconv.Itoa(cfg.Port()))
 	srv, err := monitor.NewMonitorServer(addr, monitor.NewHandler(ctx))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot bind %s (%v) -- is another monitor "+
@@ -99,7 +103,11 @@ func main() {
 	}
 	srv.Debug = *debug
 	info := monitor.HostInfo()
-	url := "http://" + strings.Replace(addr, "0.0.0.0", "127.0.0.1", 1) // 0.0.0.0 is not openable in a browser
+	browserHost := strings.Trim(cfg.Host(), "[]")
+	if browserHost == "" || browserHost == "0.0.0.0" || browserHost == "::" {
+		browserHost = "127.0.0.1"
+	}
+	url := "http://" + net.JoinHostPort(browserHost, strconv.Itoa(cfg.Port()))
 	fmt.Printf("AppScope Monitor on %s (%s, user=%s, root=%s)\n",
 		info["hostname"], info["platform"], info["user"], pyBool(info["root"]))
 	fmt.Printf("Dashboard: %s\n", url)

@@ -15,6 +15,10 @@
 #   ./dist/SHA256SUMS
 set -eu
 
+# Package lives in cmd/sentinel; outputs (host binary, per-platform binaries,
+# dist/) land beside go.mod regardless of where the script is invoked from.
+cd "$(dirname "$0")"
+
 OS_NAME="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -55,7 +59,7 @@ build_one() {
   echo "== ${goos}/${goarch}"
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
     sh -c "if [ '$goarch' = 'arm' ]; then export GOARM=7; fi; \
-           go build -trimpath -ldflags '-s -w' -o '$out' ."
+           go build -trimpath -ldflags '-s -w' -o '$out' ./cmd/sentinel"
   if [ "$DIST" = "1" ]; then
     mkdir -p "dist/${goos}-${goarch}"
     cp "$out" "dist/${goos}-${goarch}/"

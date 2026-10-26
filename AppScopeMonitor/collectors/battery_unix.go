@@ -55,10 +55,16 @@ var (
 	reAssertions = regexp.MustCompile(`pid\s+(\d+)\(([^)]*)\):[^\n]*?` +
 		`((?:PreventUserIdleDisplaySleep|PreventUserIdleSystemSleep|` +
 		`PreventSystemSleep|PreventDiskIdle))\s+named:\s*"([^"]*)"`)
+	// thermal: ioreg reports battery temperature in hundredths of a degree
+	// (laptops only); pmset reports CPU_Speed_Limit throttling and whether
+	// a thermal warning level has been recorded
+	reBattTemp    = regexp.MustCompile(`"Temperature"\s*=\s*(\d+)`)
+	reCPUSpeedCap = regexp.MustCompile(`CPU_Speed_Limit\s*=\s*(\d+)`)
 )
 
 func (c *BatteryCollector) collectMacOS() map[string]any {
 	info := map[string]any{}
+	info["thermal"] = c.collectThermalDarwin()
 	// system CPU% (two `top` samples -> real instantaneous usage)
 	_, topOut, _ := monitor.Run([]string{"top", "-l", "2", "-n", "0", "-s", "1"},
 		25*time.Second)
@@ -266,6 +272,7 @@ func linuxBatteryDir() string {
 func (c *BatteryCollector) collectLinux() map[string]any {
 	bat := linuxBatteryDir()
 	info := map[string]any{}
+	info["thermal"] = c.collectThermalLinux()
 	// system CPU% from /proc/stat deltas between polls
 	if data, err := os.ReadFile("/proc/stat"); err == nil {
 		first := strings.Fields(strings.SplitN(string(data), "\n", 2)[0])
@@ -506,4 +513,134 @@ func (c *BatteryCollector) linuxTopApps() []map[string]any {
 		apps = apps[:8]
 	}
 	return apps
+}
+
+// ------------------------------------------------------------- thermal --
+
+// collectThermalDarwin reads what macOS exposes without root: battery
+// temperature (laptops only — desktop Macs have no battery sensor), the
+// OS's thermal-pressure signals from `pmset -g therm` (CPU_Speed_Limit
+// throttling + recorded thermal warnings), and the machine-wide
+// NSProcessInfo thermal state (0 nominal … 3 critical) via osascript —
+// that last one is the only unprivileged thermal signal desktop Macs
+// expose at all (SMC die sensors would need root powermetrics).
+func (c *BatteryCollector) collectThermalDarwin() map[string]any {
+	thermal := map[string]any{}
+	_, ioregOut, _ := monitor.Run([]string{"ioreg", "-rn", "AppleSmartBattery"},
+		6*time.Second)
+	if m := reBattTemp.FindStringSubmatch(ioregOut); m != nil {
+		if centi, err := strconv.ParseFloat(m[1], 64); err == nil && centi > 0 {
+			thermal["battery_temp_c"] = round1(centi / 100)
+		}
+	}
+	_, thermOut, _ := monitor.Run([]string{"pmset", "-g", "therm"}, 6*time.Second)
+	if m := reCPUSpeedCap.FindStringSubmatch(thermOut); m != nil {
+		if pct, err := strconv.Atoi(m[1]); err == nil && pct > 0 && pct < 100 {
+			thermal["throttle_percent"] = pct
+		}
+	}
+	if strings.Contains(thermOut, "thermal warning level") &&
+		!strings.Contains(thermOut, "No thermal warning level") {
+		thermal["thermal_warning"] = true
+	}
+	_, stateOut, _ := monitor.Run([]string{"osascript",
+		"-e", `use framework "Foundation"`,
+		"-e", "return (current application's NSProcessInfo's " +
+			"processInfo's thermalState) as integer"}, 6*time.Second)
+	if state, err := strconv.Atoi(strings.TrimSpace(stateOut)); err == nil &&
+		state >= 0 && state <= 3 {
+		thermal["thermal_state"] = state
+		thermal["thermal_state_name"] = []string{
+			"nominal", "fair", "serious", "critical"}[state]
+	}
+	return finalizeThermal(thermal)
+}
+
+// collectThermalLinux reads the thermal_class zones and hwmon sensors:
+// hottest reading becomes cpu_temp_c (with its zone name) and the top
+// zones ride along for the UI tooltip.
+func (c *BatteryCollector) collectThermalLinux() map[string]any {
+	zones := readThermalZones("/sys/class/thermal",
+		"thermal_zone", "/type", "/temp")
+	zones = append(zones, readHwmonZones("/sys/class/hwmon")...)
+	if len(zones) == 0 {
+		return nil
+	}
+	sortZones(zones)
+	thermal := map[string]any{
+		"cpu_temp_c": zones[0].Temp,
+		"zone":       zones[0].Zone,
+	}
+	if top := 4; len(zones) > top {
+		zones = zones[:top]
+	}
+	thermal["zones"] = zones
+	return finalizeThermal(thermal)
+}
+
+// readThermalZones parses thermal_zoneNN/type + /temp (millidegrees).
+func readThermalZones(base, prefix, typeSuffix, tempSuffix string) []thermalZone {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var zones []thermalZone
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		zone := strings.TrimPrefix(entry.Name(), prefix)
+		typeData, err := os.ReadFile(base + "/" + entry.Name() + typeSuffix)
+		if err != nil {
+			continue
+		}
+		tempData, err := os.ReadFile(base + "/" + entry.Name() + tempSuffix)
+		if err != nil {
+			continue
+		}
+		milli, err := strconv.ParseInt(strings.TrimSpace(string(tempData)), 10, 64)
+		if err != nil || milli <= 0 || milli > 150000 {
+			continue // implausible readings: sensor glitch
+		}
+		zones = append(zones, thermalZone{
+			Zone: strings.TrimSpace(string(typeData)) + " " + zone,
+			Temp: float64(milli) / 1000,
+		})
+	}
+	return zones
+}
+
+// readHwmonZones parses hwmonN/tempN_input (+ optional tempN_label), the
+// layout used by coretemp/k10temp/nvme drivers.
+func readHwmonZones(base string) []thermalZone {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var zones []thermalZone
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "hwmon") {
+			continue
+		}
+		dir := base + "/" + entry.Name()
+		for i := 1; i <= 16; i++ {
+			tempData, err := os.ReadFile(
+				fmt.Sprintf("%s/temp%d_input", dir, i))
+			if err != nil {
+				continue
+			}
+			milli, err := strconv.ParseInt(strings.TrimSpace(string(tempData)), 10, 64)
+			if err != nil || milli <= 0 || milli > 150000 {
+				continue
+			}
+			name := "hwmon " + entry.Name()[5:]
+			if label, err := os.ReadFile(
+				fmt.Sprintf("%s/temp%d_label", dir, i)); err == nil {
+				name = strings.TrimSpace(string(label))
+			}
+			zones = append(zones, thermalZone{
+				Zone: name, Temp: float64(milli) / 1000})
+		}
+	}
+	return zones
 }

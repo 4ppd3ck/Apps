@@ -23,7 +23,11 @@ async function api(path, body) {
   const opt = body ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) } : {};
   const r = await fetch(path, opt);
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    const err = new Error(data.error || ('HTTP ' + r.status));
+    err.payload = data; // error payloads can carry the operation's step log
+    throw err;
+  }
   return data;
 }
 
@@ -52,19 +56,65 @@ function setTheme(t) {
 $('#themeBtn').addEventListener('click', () =>
   setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 
+/* ---------- guardrails ---------- */
+
+let guardrails = true;
+
+function renderGuardBtn() {
+  const b = $('#guardBtn');
+  b.textContent = guardrails ? '🛡️ Guardrails' : '⚠️ Guardrails off';
+  b.classList.toggle('off', !guardrails);
+  b.title = guardrails
+    ? 'Guardrails are on: system and shared locations (Library roots, Containers, standard user folders) are never proposed or deleted. Click to turn off for expert use.'
+    : 'Expert mode: protected locations are NOT blocked. Only proceed if you know exactly what you are deleting. Click to turn guardrails back on.';
+}
+
+$('#guardBtn').addEventListener('click', async () => {
+  const target = !guardrails;
+  if (!target && !confirm('Turn off guardrails?\n\n' +
+    'Descale will no longer block protected system locations (Library roots, Containers, standard user folders) in scans and deletions.\n\n' +
+    'Only do this if you know exactly what you are deleting. The home folder itself and its parents stay protected either way.')) return;
+  try {
+    const r = await api('/api/guardrails', { enabled: target });
+    guardrails = r.guardrails;
+    renderGuardBtn();
+    toast(guardrails
+      ? 'Guardrails on — protected locations are blocked again.'
+      : 'Guardrails off — expert mode. Protected locations are no longer blocked.', !guardrails);
+  } catch (e) { toast(e.message, true); }
+});
+
+// one-line warning injected into every delete dialog while expert mode is on
+function expertNote() {
+  return guardrails ? '' :
+    '<div class="p"><span class="amber">⚠️ Expert mode — guardrails are off; protected locations are not blocked.</span></div>';
+}
+
 /* ---------- onboarding ---------- */
 
-function initOnboarding() {
-  if (!localStorage.getItem('descale.onboarded')) $('#onboard').hidden = false;
+function initOnboarding(info) {
+  // The dismissed flag lives server-side too: embedded webviews may not
+  // keep localStorage between launches, which made the banner reappear.
+  let seen = false;
+  try { seen = !!localStorage.getItem('descale.onboarded'); } catch (e) {}
+  if (info && info.onboarded) seen = true;
+  if (seen) return;
+  $('#onboard').hidden = false;
   $('#onboardOk').addEventListener('click', () => {
     $('#onboard').hidden = true;
-    localStorage.setItem('descale.onboarded', '1');
+    try { localStorage.setItem('descale.onboarded', '1'); } catch (e) {}
+    api('/api/onboarded', {}).catch(() => {}); // best-effort; banner stays hidden this session regardless
   });
 }
 
 /* ---------- tabs ---------- */
 
 function showTab(t) {
+  if (t === 'exclusions') { // the old top-level tab became a Traces sub-tab
+    t = 'traces';
+    localStorage.setItem('descale.tracesPane', 'exclusions');
+  }
+  if (!['buildup', 'uninstall', 'traces', 'startup'].includes(t)) t = 'buildup';
   tab = t;
   localStorage.setItem('descale.tab', t);
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
@@ -73,18 +123,41 @@ function showTab(t) {
   }
   $('#cleanbar').hidden = t !== 'buildup' || selected.size === 0;
   if (t === 'uninstall') loadApps();
-  if (t === 'traces') loadTraces();
+  if (t === 'traces') showTracePane(localStorage.getItem('descale.tracesPane') || 'cleanup');
   if (t === 'startup') loadStartup();
 }
 
 document.querySelectorAll('.tabs button').forEach(b =>
   b.addEventListener('click', () => showTab(b.dataset.tab)));
 
+/* sub-tabs inside Traces: Cleanup (the scan) and Exclusions */
+
+function showTracePane(pane) {
+  if (pane !== 'exclusions') pane = 'cleanup'; // self-heal stale/garbage stored values
+  localStorage.setItem('descale.tracesPane', pane);
+  document.querySelectorAll('.subtabs button').forEach(b => b.classList.toggle('on', b.dataset.pane === pane));
+  $('#pane-traces-cleanup').hidden = pane !== 'cleanup';
+  $('#pane-traces-exclusions').hidden = pane !== 'exclusions';
+  if (pane === 'cleanup') loadTraces();
+  else loadExclusions();
+}
+
+document.querySelectorAll('.subtabs button').forEach(b =>
+  b.addEventListener('click', () => showTracePane(b.dataset.pane)));
+
+// 📂 — show a trace/exclusion folder in the system file manager
+async function revealPath(path) {
+  try {
+    await api('/api/reveal', { path });
+  } catch (e) { toast('Could not open the folder: ' + e.message, true); }
+}
+
 /* ---------- Buildup: scanning (background job + polling) ---------- */
 
 async function init() {
+  let info = null;
   try {
-    const info = await api('/api/info');
+    info = await api('/api/info');
     const bits = [info.osVersion ? `macOS ${info.osVersion}` : info.os, info.archLabel].filter(Boolean);
     if (info.diskFreeBytes) bits.push(fmtBytes(info.diskFreeBytes) + ' free');
     $('#machine').textContent = `${bits.join(' · ')}\n${info.rulesActive} active rules · ${info.rulesSigned ? 'rules signed' : 'rules unsigned'} · v${info.version}`;
@@ -97,8 +170,10 @@ async function init() {
     $('#trustSigned').textContent = info.rulesSigned
       ? 'A signature file is present and verified against the public key embedded in this build.'
       : 'No signature file — running in unsigned local mode (add one with `descale rules sign`).';
+    guardrails = info.guardrails !== false; // older servers have no toggle: protected
+    renderGuardBtn();
   } catch (e) { showError('Could not reach the Descale server: ' + e.message); }
-  initOnboarding();
+  initOnboarding(info);
   showTab(tab);
   if (tab === 'buildup') pollScan(); // picks up an in-flight job after reload
 }
@@ -149,7 +224,7 @@ function cardHTML(res) {
       : res.status === 'ok' ? `<span class="chip size">${fmtBytes(res.sizeBytes)} · ${res.fileCount} files</span>` : ''
   ].join('');
   const samples = (res.samples || []).map(s =>
-    `<li><span>${esc(s.name)}</span><span>${fmtBytes(s.sizeBytes)}</span></li>`).join('');
+    `<li><span title="${esc(s.name)}">${esc(s.name)}</span><span>${fmtBytes(s.sizeBytes)}</span></li>`).join('');
 
   let control, dim = false;
   if (res.status === 'ok') {
@@ -293,15 +368,22 @@ function openConfirm() {
 
 async function doClean(ids) {
   $('#cleanBtn').disabled = true;
+  const box = logOpen('Cleaning…');
   try {
     const res = await api('/api/clean', { rules: ids, confirm: true });
+    logRender(box, res.log);
     const failed = (res.failed || []).length;
     let msg = `Cleaned ${res.files} files · ${fmtBytes(res.bytes)} → Trash`;
+    if (res.husks) msg += ` · ${res.husks} empty folder${res.husks === 1 ? '' : 's'} removed`;
     if ((res.commands || []).length) msg += ' · command ran';
     if (failed) msg += ` · ${failed} failed`;
+    if (res.logPath) msg += `\nlog: ${res.logPath}`;
+    logDone(failed ? 'Clean finished (with failures)' : 'Clean finished', box, msg.replace(/\n/, ' · '));
     toast(msg, failed > 0);
     scan();
   } catch (e) {
+    if (e.payload && e.payload.log) logRender(box, e.payload.log);
+    logDone('Clean failed', box, e.message);
     toast('Clean failed: ' + e.message, true);
   } finally {
     $('#cleanBtn').disabled = false;
@@ -320,7 +402,7 @@ async function loadJournalCount() {
           <span>${e.restored ? '↩️ restored' : ''}</span>
           <span><b>${fmtBytes(e.bytes)}</b> · ${e.files} files</span>
           <span class="muted">${esc((e.rules || []).join(', '))}</span>
-          ${!e.restored && e.items && e.items.length && (e.action || 'clean') === 'clean' ? `<button class="btn small ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
+          ${!e.restored && e.items && e.items.length ? `<button class="btn small ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
         </div>
       </div>`).join('');
     document.querySelectorAll('[data-restore]').forEach(b =>
@@ -337,6 +419,36 @@ async function loadJournalCount() {
 /* ---------- Uninstall tab ---------- */
 
 let appsCache = null;
+// The Uninstall tab splits by install scope: "system" (/Applications,
+// ~/Applications) and "appdeck" (AppDeck-managed apps). The choice persists.
+let uninstallScope = localStorage.getItem('descale.uninstallScope') === 'appdeck'
+  ? 'appdeck' : 'system';
+
+function setUninstallScope(scope) {
+  uninstallScope = scope;
+  localStorage.setItem('descale.uninstallScope', scope);
+  document.querySelectorAll('#uninstallSubtabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.scope === scope));
+  $('#appDetail').hidden = true; // the open detail card may belong to the other scope
+  appSelected.clear();           // selections never span scopes
+  renderApps();
+}
+
+// Batch selection: a Set of app paths (never spans scopes; AppDeck apps
+// selected here are skipped by the batch endpoint with a pointer back to
+// the launcher, since those uninstalls are permanent).
+const appSelected = new Set();
+
+function updateAppsBar() {
+  const bar = $('#appsBar');
+  const n = appSelected.size;
+  bar.hidden = n === 0;
+  $('#appsBarText').textContent = n === 1 ? '1 application selected' : `${n} applications selected`;
+  $('#appsUninstall').disabled = n === 0;
+}
+
+document.querySelectorAll('#uninstallSubtabs button').forEach(b =>
+  b.addEventListener('click', () => setUninstallScope(b.dataset.scope)));
 
 async function loadApps(force) {
   if (appsCache && !force) { renderApps(); return; }
@@ -351,7 +463,8 @@ async function loadApps(force) {
     }
     appsCache = d.apps;
   } catch (e) { toast('Could not list applications: ' + e.message, true); }
-  $('#appsMeta').textContent = appsCache ? `${appsCache.length} applications` : '';
+  document.querySelectorAll('#uninstallSubtabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.scope === uninstallScope));
   renderApps();
 }
 
@@ -364,15 +477,45 @@ function appIcon(a, big) {
 function renderApps() {
   const q = ($('#appSearch').value || '').trim().toLowerCase();
   const list = (appsCache || []).filter(a =>
-    !q || a.name.toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q));
+    (a.scope || 'system') === uninstallScope &&
+    (!q || a.name.toLowerCase().includes(q) || (a.id || '').toLowerCase().includes(q)));
+  const inScope = (appsCache || []).filter(a => (a.scope || 'system') === uninstallScope).length;
+  $('#appsMeta').textContent = appsCache
+    ? `${list.length} of ${inScope} application${inScope === 1 ? '' : 's'}${q ? ` matching “${q}”` : ''}`
+    : '';
   $('#appsList').innerHTML = list.map(a => `
-    <button class="card app-card" data-app="${esc(a.path)}">
+    <div class="card app-card${appSelected.has(a.path) ? ' selected' : ''}" role="button" tabindex="0" data-app="${esc(a.path)}">
+      <input type="checkbox" class="app-check" data-app="${esc(a.path)}" ${appSelected.has(a.path) ? 'checked' : ''}
+             aria-label="Select ${esc(a.name)} for batch uninstall">
       ${appIcon(a)}
       <span class="grow"><span class="t">${esc(a.name)}</span>${a.running ? ' <span class="chip review">running</span>' : ''}
+      ${a.source === 'registry' ? ' <span class="chip review" title="Registered in AppDeck\'s apps.json — AppDeck refuses to uninstall it; remove its entry there first">registry</span>' : ''}
       <br><span class="muted small mono">${esc(a.id || 'no bundle id')}${a.version ? ' · v' + esc(a.version) : ''}</span></span>
-    </button>`).join('') || '<p class="muted">No applications match.</p>';
-  document.querySelectorAll('[data-app]').forEach(el =>
-    el.addEventListener('click', () => openApp(el.dataset.app)));
+    </div>`).join('') ||
+    `<p class="muted">No ${uninstallScope === 'appdeck' ? 'AppDeck ' : ''}applications match.</p>`;
+  document.querySelectorAll('#appsList .app-card').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.app-check')) return; // the checkbox selects, never opens
+      openApp(el.dataset.app);
+    });
+    el.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && !e.target.closest('.app-check')) {
+        e.preventDefault();
+        openApp(el.dataset.app);
+      }
+    });
+  });
+  document.querySelectorAll('#appsList .app-check').forEach(cb =>
+    cb.addEventListener('change', () => {
+      if (cb.checked) appSelected.add(cb.dataset.app);
+      else appSelected.delete(cb.dataset.app);
+      cb.closest('.app-card').classList.toggle('selected', cb.checked);
+      const all = document.querySelectorAll('#appsList .app-check');
+      $('#appsAll').checked = all.length > 0 && [...all].every(c => c.checked);
+      updateAppsBar();
+    }));
+  $('#appsAll').checked = list.length > 0 && list.every(a => appSelected.has(a.path));
+  updateAppsBar();
 }
 
 async function openApp(path) {
@@ -418,19 +561,24 @@ function renderWinDetail(a) {
 }
 
 function renderAppDetail(d) {
-  const rows = [{ path: d.app.path, kind: 'application', sizeBytes: d.bundleBytes }, ...d.leftovers]
+  if (!Array.isArray(d.leftovers)) d.leftovers = []; // older servers send null when an app has none
+  const bundlePath = d.bundlePath || d.app.path; // AppDeck apps: the launcher-managed folder, not the .app inside it
+  const rows = [{ path: bundlePath, kind: 'application', sizeBytes: d.bundleBytes }, ...d.leftovers]
     .map(l => `
     <label class="rowline">
       <input type="checkbox" checked data-leftover="${esc(l.path)}">
-      <span class="mono grow">${esc(l.path)}</span>
+      <span class="mono grow" title="${esc(l.path)}">${esc(l.path)}</span>
       <span class="chip">${esc(l.kind)}</span>
       <span class="chip size">${fmtBytes(l.sizeBytes)}</span>
     </label>`).join('');
   const isWin = d.app.kind === 'winapp';
+  // AppDeck uninstalls delegate to the launcher, which stops a running app
+  // itself — only native apps must be quit first.
+  const mustQuit = d.app.running && d.app.scope !== 'appdeck';
   const uninstallBtn = isWin
     ? `<button class="btn danger" id="winUninstall" ${d.app.uninstallString ? '' : 'disabled'}>Run uninstaller</button>`
-    : `<button class="btn danger" id="uninstallBtn" ${d.app.running ? 'disabled' : ''}>
-         ${d.app.running ? 'Quit the app first' : `🗑️ Uninstall ${esc(d.app.name)} (${fmtBytes(d.totalBytes)})`}
+    : `<button class="btn danger" id="uninstallBtn" ${mustQuit ? 'disabled' : ''}>
+         ${mustQuit ? 'Quit the app first' : `🗑️ Uninstall ${esc(d.app.name)} (${fmtBytes(d.totalBytes)})`}
        </button>`;
   const delBtn = d.leftovers.length
     ? `<button class="btn" id="deleteLeftoversBtn" title="move the checked folders to the Trash — the application itself stays installed">
@@ -447,6 +595,7 @@ function renderAppDetail(d) {
       <p class="muted small mono">${esc(d.app.id || (isWin ? 'registry entry' : 'no bundle id'))} — ${d.leftovers.length} leftover location(s) · total ${fmtBytes(d.totalBytes)}</p>
       <div id="leftoverList">${rows}</div>
       ${isWin ? `<p class="muted small">Registered uninstaller: <span class="mono">${esc(d.app.uninstallString || '(none)')}</span></p>` : ''}
+      ${d.app.scope === 'appdeck' ? `<p class="muted small">AppDeck app: uninstalling runs AppDeck's own uninstall (it stops the app and removes the app folder permanently); the checked leftovers above still move to the Trash.${d.app.source === 'registry' ? ' <b class="amber">This one is registered in AppDeck\'s apps.json — AppDeck will refuse until its entry is removed there.</b>' : ''}</p>` : ''}
       <div class="dialog-actions">
         ${uninstallBtn}
         ${delBtn}
@@ -475,28 +624,74 @@ function renderAppDetail(d) {
 function deleteLeftoversFlow(d) {
   const checked = [...document.querySelectorAll('#leftoverList input:checked')]
     .map(cb => cb.dataset.leftover)
-    .filter(p => p !== d.app.path);
+    .filter(p => p !== (d.bundlePath || d.app.path));
   if (!checked.length) { toast('No leftover folders checked.', true); return; }
   const chosen = d.leftovers.filter(l => checked.includes(l.path));
   $('#udTitle').textContent = `Delete ${chosen.length} leftover location(s) of ${d.app.name}?`;
   $('#udList').innerHTML = chosen.map(l => `
-    <div class="p"><span>${esc(l.path)}</span><span>${fmtBytes(l.sizeBytes)}</span></div>`).join('');
+    <div class="p"><span>${esc(l.path)}</span><span>${fmtBytes(l.sizeBytes)}</span></div>`).join('') + expertNote();
   const dlg = $('#uninstallDialog');
   dlg.returnValue = '';
   dlg.showModal();
   $('#udGo').onclick = async () => {
     dlg.close('yes');
+    const box = logOpen(`Deleting leftovers of ${d.app.name}…`);
     try {
       const res = await api('/api/app/leftovers/delete', { path: d.app.path, paths: checked });
+      logRender(box, res.log);
       const failed = (res.failed || []).length;
       const skipped = (res.skipped || []).length;
-      toast(`Deleted ${res.removed} location(s) · ${fmtBytes(res.bytes)} → Trash` +
-        `${failed ? ' · ' + failed + ' failed' : ''}${skipped ? ' · ' + skipped + ' skipped' : ''}`,
-        failed > 0);
+      let summary = `${res.removed} location(s) · ${fmtBytes(res.bytes)} → Trash` +
+        `${failed ? ' · ' + failed + ' failed' : ''}${skipped ? ' · ' + skipped + ' skipped' : ''}`;
+      if (res.logPath) summary += ` · log: ${res.logPath}`;
+      logDone('Leftovers deleted', box, summary);
+      toast(`Deleted ${summary}`, failed > 0);
       loadJournalCount();
       openApp(d.app.path);
-    } catch (e) { toast('Delete failed: ' + e.message, true); }
+    } catch (e) {
+      if (e.payload && e.payload.log) logRender(box, e.payload.log);
+      logDone('Delete failed', box, e.message);
+      toast('Delete failed: ' + e.message, true);
+    }
   };
+}
+
+// operation log modal — shows the timestamped step trail the backend now
+// returns for uninstall / leftover deletion, styled like the deck's import log
+function logOpen(title) {
+  $('#logTitle').textContent = title;
+  const box = $('#logLines');
+  box.innerHTML = '<div class="log-line"><span class="log-msg">working…</span></div>';
+  $('#logClose').disabled = true;
+  $('#logDialog').showModal();
+  return box;
+}
+function logRender(box, steps) {
+  box.innerHTML = (steps || []).map(s => {
+    // Success lines end in ", 0 failed"/"0 skipped" — a bare word match turned
+    // every one of them red. Real problems carry uppercase FAILED/REFUSED/
+    // SKIPPED markers, or a non-zero count before the word.
+    const bad = /\b(FAILED|REFUSED|SKIPPED)\b/.test(s.msg) ||
+      /\b[1-9]\d* (failed|skipped)\b/i.test(s.msg);
+    const ok = /^ok\b/.test(s.msg);
+    return `<div class="log-line${bad ? ' is-bad' : ok ? ' is-ok' : ''}">` +
+      `<span class="log-time">${esc(s.at)}</span><span class="log-msg">${esc(s.msg)}</span></div>`;
+  }).join('') || '<div class="log-line"><span class="log-msg">(no step log — older server)</span></div>';
+  box.scrollTop = box.scrollHeight;
+}
+function logDone(title, box, summary) {
+  $('#logTitle').textContent = title;
+  if (summary) {
+    box.insertAdjacentHTML('beforeend', `<div class="log-line log-summary"><span class="log-msg">${esc(summary)}</span></div>`);
+    box.scrollTop = box.scrollHeight;
+  }
+  $('#logClose').disabled = false;
+}
+function failuresToLine(failed) {
+  const f = failed || [];
+  if (!f.length) return '';
+  const first = f[0].error ? ` — ${f[0].path}: ${f[0].error}` : '';
+  return `${f.length} failed${first}`;
 }
 
 function uninstallFlow(d) {
@@ -504,23 +699,80 @@ function uninstallFlow(d) {
   if (!checked.length) { toast('Nothing selected.', true); return; }
   $('#udTitle').textContent = `Uninstall ${d.app.name}?`;
   $('#udList').innerHTML = `
-    <div class="p"><span>${esc(d.app.path)}</span><span>${fmtBytes(d.bundleBytes)}</span></div>
+    <div class="p"><span>${esc(d.bundlePath || d.app.path)}</span><span>${fmtBytes(d.bundleBytes)}</span></div>
     ${d.leftovers.filter(l => checked.includes(l.path)).map(l => `
-      <div class="p"><span>${esc(l.path)}</span><span>${fmtBytes(l.sizeBytes)}</span></div>`).join('')}`;
+      <div class="p"><span>${esc(l.path)}</span><span>${fmtBytes(l.sizeBytes)}</span></div>`).join('')}
+    ${expertNote()}`;
   const dlg = $('#uninstallDialog');
   dlg.returnValue = '';
   dlg.showModal();
   $('#udGo').onclick = async () => {
     dlg.close('yes');
+    const box = logOpen(`Uninstalling ${d.app.name}…`);
     try {
       const res = await api('/api/app/uninstall', { path: d.app.path, confirm: true });
+      logRender(box, res.log);
       const failed = (res.failed || []).length;
-      toast(`Uninstalled ${res.app}: ${res.files} items · ${fmtBytes(res.bytes)} → Trash${failed ? ' · ' + failed + ' failed' : ''}`, failed > 0);
+      let summary = `${res.files} items · ${fmtBytes(res.bytes)} → Trash${failed ? ' · ' + failuresToLine(res.failed) : ''}`;
+      if (res.logPath) summary += ` · log: ${res.logPath}`;
+      logDone(`Uninstalled ${res.app}`, box, summary);
+      toast(`Uninstalled ${res.app}: ${summary}`, failed > 0);
       appsCache = null;
       $('#appDetail').hidden = true;
       loadApps(true);
       loadJournalCount();
-    } catch (e) { toast('Uninstall failed: ' + e.message, true); }
+    } catch (e) {
+      if (e.payload && e.payload.log) logRender(box, e.payload.log);
+      logDone('Uninstall failed', box, e.message);
+      toast('Uninstall failed: ' + e.message, true);
+    }
+  };
+}
+
+/* ---------- batch uninstall ---------- */
+
+// One confirmed dialog, one POST, per-app results streamed into the log.
+// AppDeck apps are skipped server-side with a pointer back to the launcher
+// (their uninstall is permanent — never bundled into a Trash-restorable
+// batch), and running apps are skipped with a quit-it-first note.
+function uninstallBatchFlow() {
+  const sel = [...appSelected]
+    .map(p => (appsCache || []).find(a => a.path === p))
+    .filter(Boolean);
+  if (!sel.length) { toast('Nothing selected.', true); return; }
+  $('#udTitle').textContent = `Uninstall ${sel.length} application${sel.length === 1 ? '' : 's'}?`;
+  $('#udList').innerHTML =
+    sel.map(a => `
+      <div class="p"><span>${esc(a.name)}</span><span class="muted">${esc(a.id || '')}${a.running ? ' · running (will be skipped)' : ''}</span></div>`).join('') +
+    `<div class="p muted small">Each app moves to the Trash with its leftovers — one restorable
+      journal entry per app. AppDeck apps are skipped: uninstall those from the launcher
+      (permanent there).</div>
+     ${expertNote()}`;
+  const dlg = $('#uninstallDialog');
+  dlg.returnValue = '';
+  dlg.showModal();
+  $('#udGo').onclick = async () => {
+    dlg.close('yes');
+    const box = logOpen(`Uninstalling ${sel.length} applications…`);
+    try {
+      const res = await api('/api/apps/uninstall', { paths: sel.map(a => a.path) });
+      logRender(box, res.log);
+      const skipped = (res.skipped || []).length;
+      let summary = `${res.uninstalled} app${res.uninstalled === 1 ? '' : 's'} · ${fmtBytes(res.bytes)} → Trash` +
+        (skipped ? ` · ${skipped} skipped` : '');
+      if (res.logPath) summary += ` · log: ${res.logPath}`;
+      logDone('Batch uninstall finished', box, summary);
+      toast(`Uninstalled ${res.uninstalled} app${res.uninstalled === 1 ? '' : 's'}: ${summary}`, res.uninstalled === 0);
+      appSelected.clear();
+      appsCache = null;
+      $('#appDetail').hidden = true;
+      loadApps(true);
+      loadJournalCount();
+    } catch (e) {
+      if (e.payload && e.payload.log) logRender(box, e.payload.log);
+      logDone('Batch uninstall failed', box, e.message);
+      toast('Batch uninstall failed: ' + e.message, true);
+    }
   };
 }
 
@@ -541,27 +793,158 @@ async function loadTraces() {
 }
 
 function renderTraces(d) {
+  if (!Array.isArray(d.traces)) d.traces = []; // older servers send null when nothing is found
   $('#tracesNote').textContent = d.note || $('#tracesNote').textContent;
   $('#tracesMeta').textContent = d.traces.length
     ? `${d.traces.length} trace(s) · ${fmtBytes(d.bytes)} total`
     : 'no traces — every leftover location belongs to an installed app';
+  $('#tracesSearch').hidden = d.traces.length === 0;
+  $('#tracesKind').hidden = d.traces.length === 0;
+  // A rescan (or a scan finishing while the user was already working)
+  // rebuilds the table — preserve their checked paths and filter state.
+  const prevChecked = new Set(
+    [...document.querySelectorAll('.trace-check:checked')].map(cb => cb.dataset.trace));
+  const prevSearch = $('#tracesSearch').value;
+  const prevKind = $('#tracesKind').value;
+  const kinds = [...new Set(d.traces.map(t => t.kind))].sort();
+  $('#tracesKind').innerHTML = '<option value="">All kinds</option>' +
+    kinds.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
   const tb = $('#tbl-traces').tBodies[0];
   tb.innerHTML = d.traces.map((t) => `
-    <tr>
+    <tr class="trace-row" data-search="${esc(t.path.toLowerCase())}" data-kind="${esc(t.kind)}">
       <td><input type="checkbox" class="trace-check" data-trace="${esc(t.path)}" data-size="${t.sizeBytes}"></td>
-      <td class="mono">${esc(t.path)}</td>
-      <td><span class="chip">${esc(t.kind)}</span></td>
+      <td class="mono" title="${esc(t.path)}">${esc(t.path)}</td>
+      <td title="${esc(t.kind)}"><span class="chip">${esc(t.kind)}</span></td>
       <td><span class="chip size">${fmtBytes(t.sizeBytes)}</span></td>
+      <td class="actions">
+        <button class="btn small ghost icon" data-reveal="${esc(t.path)}" title="Show this folder in your file manager">📂</button>
+        <button class="btn small ghost icon" data-exclude="${esc(t.path)}" title="Never scan or delete this folder">🚫</button>
+      </td>
     </tr>`).join('') ||
-    '<tr><td colspan="4" class="muted">nothing to clean</td></tr>';
-  $('#tracesDelete').disabled = true;
-  document.querySelectorAll('.trace-check').forEach(cb =>
-    cb.addEventListener('change', updateTracesSelection));
+    '<tr><td colspan="5" class="muted">nothing to clean</td></tr>';
+  document.querySelectorAll('.trace-check').forEach(cb => {
+    cb.checked = prevChecked.has(cb.dataset.trace);
+    cb.addEventListener('change', updateTracesSelection);
+  });
+  tb.querySelectorAll('[data-exclude]').forEach(b =>
+    b.addEventListener('click', () => excludeTrace(b.dataset.exclude)));
+  tb.querySelectorAll('[data-reveal]').forEach(b =>
+    b.addEventListener('click', () => revealPath(b.dataset.reveal)));
+  $('#tracesSearch').value = prevSearch;
+  $('#tracesKind').value = prevKind;
+  applyTraceFilters();
+  updateTracesSelection();
 }
+
+/* ---------- trace exclusions (never scan / never delete) ---------- */
+
+// The Exclusions tab: everything currently on the never-scan list, each
+// row with a one-click restore back into the scannable world.
+async function loadExclusions() {
+  const tb = $('#tbl-exclusions').tBodies[0];
+  try {
+    const d = await api('/api/traces/exclusions');
+    // {"exclusions": ["<path>", …]} in entered spelling
+    const list = Array.isArray(d.exclusions) ? d.exclusions : Object.keys(d.exclusions || {});
+    list.sort();
+    $('#exclMeta').textContent = list.length
+      ? `${list.length} folder(s) excluded`
+      : 'nothing excluded — every leftover location is scanned';
+    $('#exclAll').hidden = list.length === 0;
+    $('#exclRestore').hidden = list.length === 0;
+    tb.innerHTML = list.map(p => `
+      <tr class="excl-row">
+        <td><input type="checkbox" class="excl-check" data-excl="${esc(p)}"></td>
+        <td class="mono" title="${esc(p)}">${esc(p)}</td>
+        <td class="actions">
+          <button class="btn small ghost icon" data-reveal="${esc(p)}" title="Show this folder in your file manager">📂</button>
+          <button class="btn small ghost icon" data-unexclude="${esc(p)}" title="Restore to the scan — this folder becomes visible to Cleanup again">↩️</button>
+        </td>
+      </tr>`).join('') ||
+      '<tr><td colspan="3" class="muted">no exclusions — use the 🚫 button next to a trace, or check traces and choose “Exclude selected”</td></tr>';
+    $('#exclAll').checked = false;
+    $('#exclRestore').disabled = true;
+    tb.querySelectorAll('.excl-check').forEach(cb =>
+      cb.addEventListener('change', updateExclSelection));
+    tb.querySelectorAll('[data-reveal]').forEach(b =>
+      b.addEventListener('click', () => revealPath(b.dataset.reveal)));
+    tb.querySelectorAll('[data-unexclude]').forEach(b =>
+      b.addEventListener('click', async () => {
+        try {
+          await api('/api/traces/exclusions/remove', { path: b.dataset.unexclude });
+          toast('Restored to scan: ' + b.dataset.unexclude);
+          loadExclusions();
+        } catch (err) { toast(err.message, true); }
+      }));
+  } catch (e) {
+    $('#exclMeta').textContent = '';
+    toast('Could not load the exclusion list: ' + e.message, true);
+  }
+}
+
+function updateExclSelection() {
+  const checked = [...document.querySelectorAll('.excl-check:checked')];
+  $('#exclRestore').disabled = !checked.length;
+  $('#exclAll').checked = checked.length > 0 &&
+    checked.length === document.querySelectorAll('.excl-check').length;
+}
+
+// Batch restore: remove every checked exclusion in one pass, then reload.
+$('#exclRestore').addEventListener('click', async () => {
+  const checked = [...document.querySelectorAll('.excl-check:checked')]
+    .map(cb => cb.dataset.excl);
+  if (!checked.length) return;
+  let ok = 0, failed = 0;
+  for (const p of checked) {
+    try {
+      await api('/api/traces/exclusions/remove', { path: p });
+      ok++;
+    } catch (e) { failed++; }
+  }
+  toast(`Restored ${ok} folder(s) to the scan${failed ? ` · ${failed} failed` : ''}.`, failed > 0);
+  loadExclusions();
+});
+
+$('#exclAll').addEventListener('change', e => {
+  document.querySelectorAll('.excl-check').forEach(cb => { cb.checked = e.target.checked; });
+  updateExclSelection();
+});
+
+$('#exclReload').addEventListener('click', loadExclusions);
+
+async function excludeTrace(path) {
+  try {
+    await api('/api/traces/exclusions/add', { path });
+    toast('Excluded from future scans: ' + path);
+    loadTraces();
+  } catch (e) { toast(e.message, true); }
+}
+
+// The live path search and the kind filter share one pass; hidden rows keep
+// any checked state so clearing a filter restores exactly what was selected.
+function applyTraceFilters() {
+  const q = $('#tracesSearch').value.trim().toLowerCase();
+  const kind = $('#tracesKind').value;
+  let visible = 0;
+  document.querySelectorAll('.trace-row').forEach(tr => {
+    const hit = (!q || tr.dataset.search.includes(q)) && (!kind || tr.dataset.kind === kind);
+    tr.style.display = hit ? '' : 'none';
+    if (hit) visible++;
+  });
+  const total = document.querySelectorAll('.trace-row').length;
+  if (!tracesCache) return;
+  $('#tracesMeta').textContent = (q || kind)
+    ? `${visible} of ${total} shown`
+    : `${total} trace(s) · ${fmtBytes(tracesCache.bytes)} total`;
+}
+
+$('#tracesSearch').addEventListener('input', applyTraceFilters);
+$('#tracesKind').addEventListener('change', applyTraceFilters);
 
 function updateTracesSelection() {
   const checked = [...document.querySelectorAll('.trace-check:checked')];
   $('#tracesDelete').disabled = !checked.length;
+  $('#tracesExclude').disabled = !checked.length;
   $('#tracesAll').checked = checked.length > 0 &&
     checked.length === document.querySelectorAll('.trace-check').length;
   const bytes = checked.reduce((n, cb) => n + (parseInt(cb.dataset.size, 10) || 0), 0);
@@ -571,11 +954,33 @@ function updateTracesSelection() {
 }
 
 $('#tracesAll').addEventListener('change', (e) => {
-  document.querySelectorAll('.trace-check').forEach(cb => { cb.checked = e.target.checked; });
+  // with an active filter, select-all covers the visible rows only
+  document.querySelectorAll('.trace-row').forEach(tr => {
+    if (tr.style.display !== 'none') {
+      tr.querySelector('.trace-check').checked = e.target.checked;
+    }
+  });
   updateTracesSelection();
 });
 
 $('#tracesReload').addEventListener('click', loadTraces);
+
+// Batch exclude: move every checked trace to the never-scan list in one
+// round trip, then reload so they disappear from the scan.
+$('#tracesExclude').addEventListener('click', async () => {
+  const checked = [...document.querySelectorAll('.trace-check:checked')]
+    .map(cb => cb.dataset.trace);
+  if (!checked.length) return;
+  let ok = 0, failed = 0;
+  for (const p of checked) {
+    try {
+      await api('/api/traces/exclusions/add', { path: p });
+      ok++;
+    } catch (e) { failed++; }
+  }
+  toast(`Excluded ${ok} folder(s)${failed ? ` · ${failed} failed` : ''} — they no longer appear in the Cleanup scan.`, failed > 0);
+  loadTraces();
+});
 
 $('#tracesDelete').addEventListener('click', () => {
   const checked = [...document.querySelectorAll('.trace-check:checked')]
@@ -584,7 +989,7 @@ $('#tracesDelete').addEventListener('click', () => {
   const chosen = (tracesCache.traces || []).filter(t => checked.includes(t.path));
   $('#udTitle').textContent = `Delete ${checked.length} trace(s)?`;
   $('#udList').innerHTML = chosen.map(t => `
-    <div class="p"><span>${esc(t.path)}</span><span>${fmtBytes(t.sizeBytes)}</span></div>`).join('');
+    <div class="p"><span>${esc(t.path)}</span><span>${fmtBytes(t.sizeBytes)}</span></div>`).join('') + expertNote();
   const dlg = $('#uninstallDialog');
   dlg.returnValue = '';
   dlg.showModal();
@@ -665,8 +1070,25 @@ $('#deselectAll').addEventListener('click', deselectAll);
 $('#cancelClean').addEventListener('click', () => $('#confirmDialog').close());
 $('#confirmDialog').addEventListener('cancel', e => e.target.close());
 $('#udCancel').addEventListener('click', () => $('#uninstallDialog').close());
+$('#logClose').addEventListener('click', () => $('#logDialog').close());
 $('#appSearch').addEventListener('input', renderApps);
-$('#appsReload').addEventListener('click', () => { appsCache = null; loadApps(true); });
+$('#appsReload').addEventListener('click', () => { appsCache = null; appSelected.clear(); loadApps(true); });
+$('#appsAll').addEventListener('change', () => {
+  const on = $('#appsAll').checked;
+  document.querySelectorAll('#appsList .app-check').forEach(cb => {
+    cb.checked = on;
+    if (on) appSelected.add(cb.dataset.app); else appSelected.delete(cb.dataset.app);
+    cb.closest('.app-card').classList.toggle('selected', on);
+  });
+  updateAppsBar();
+});
+$('#appsDeselect').addEventListener('click', () => {
+  appSelected.clear();
+  document.querySelectorAll('#appsList .app-check').forEach(cb => { cb.checked = false; cb.closest('.app-card').classList.remove('selected'); });
+  $('#appsAll').checked = false;
+  updateAppsBar();
+});
+$('#appsUninstall').addEventListener('click', uninstallBatchFlow);
 $('#trustBtn').addEventListener('click', () => $('#trustDialog').showModal());
 $('#trustClose').addEventListener('click', () => $('#trustDialog').close());
 

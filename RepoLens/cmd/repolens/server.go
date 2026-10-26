@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,11 +24,21 @@ type okResp struct {
 	OK bool `json:"ok"`
 }
 
-type trendingResp struct {
-	Repos    []any `json:"repos"`
-	Searches []any `json:"searches"`
+func (s *server) handleTrending(w http.ResponseWriter) {
+	s.histMu.Lock()
+	defer s.histMu.Unlock()
+	searches := make([]trendQuery, 0, 8)
+	for _, q := range topN(s.hist.Searches, 8) {
+		searches = append(searches, trendQuery{Query: q, Hits: s.hist.Searches[q]})
+	}
+	repos := make([]trendRepo, 0, 8)
+	for _, r := range topN(s.hist.Repos, 8) {
+		repos = append(repos, trendRepo{Repo: r, Hits: s.hist.Repos[r]})
+	}
+	writeJSON(w, 200, map[string]any{"searches": searches, "repos": repos})
 }
 
+// unusedTrendingResp removes the old placeholder shape.
 type searchResp struct {
 	Query      string         `json:"query"`
 	TotalCount int            `json:"totalCount"`
@@ -59,6 +70,108 @@ type server struct {
 	gh        *ghClient
 	publicDir string
 	now       func() time.Time
+	// dataDir hosts history.json (the local trending source).
+	dataDir string
+	histMu  sync.Mutex
+	hist    history
+}
+
+// history is the local trending source: search-query and repo-open hit
+// counts, persisted to <dataDir>/history.json. Purely local — the former
+// SQLite analytics stayed server-side; this never leaves the machine.
+type history struct {
+	Searches map[string]int `json:"searches"`
+	Repos    map[string]int `json:"repos"`
+}
+
+// trendQuery/trendRepo mirror what the frontend's trending chips render.
+type trendQuery struct {
+	Query string `json:"query"`
+	Hits  int    `json:"hits"`
+}
+type trendRepo struct {
+	Repo string `json:"repo"`
+	Hits int    `json:"hits"`
+}
+
+// maxHistoryEntries bounds each map so a long-lived run cannot grow it
+// forever; pruning keeps the most-used entries.
+const maxHistoryEntries = 200
+
+func (s *server) loadHistory() {
+	s.hist = history{Searches: map[string]int{}, Repos: map[string]int{}}
+	data, err := os.ReadFile(filepath.Join(s.dataDir, "history.json"))
+	if err == nil {
+		_ = json.Unmarshal(data, &s.hist)
+	}
+	if s.hist.Searches == nil {
+		s.hist.Searches = map[string]int{}
+	}
+	if s.hist.Repos == nil {
+		s.hist.Repos = map[string]int{}
+	}
+}
+
+func (s *server) saveHistory() {
+	data, err := json.Marshal(s.hist)
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(s.dataDir, 0o755)
+	tmp := filepath.Join(s.dataDir, "history.json.tmp")
+	if os.WriteFile(tmp, data, 0o644) == nil {
+		_ = os.Rename(tmp, filepath.Join(s.dataDir, "history.json"))
+	}
+}
+
+// recordHit bumps a counter map and prunes it to the top N when it overflows.
+func recordHit(m map[string]int, key string) {
+	if key == "" {
+		return
+	}
+	m[key]++
+	if len(m) <= maxHistoryEntries*2 {
+		return
+	}
+	type kv struct {
+		k string
+		v int
+	}
+	all := make([]kv, 0, len(m))
+	for k, v := range m {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].v > all[j].v })
+	clear(m)
+	for _, e := range all[:maxHistoryEntries] {
+		m[e.k] = e.v
+	}
+}
+
+// topN returns the most-hit keys, descending.
+func topN(m map[string]int, n int) []string {
+	type kv struct {
+		k string
+		v int
+	}
+	all := make([]kv, 0, len(m))
+	for k, v := range m {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].v != all[j].v {
+			return all[i].v > all[j].v
+		}
+		return all[i].k < all[j].k
+	})
+	out := make([]string, 0, n)
+	for _, e := range all {
+		if len(out) >= n {
+			break
+		}
+		out = append(out, e.k)
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -74,11 +187,20 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/track" && r.Method == http.MethodPost:
 		s.handleTrack(w, r)
 	case r.URL.Path == "/api/trending":
-		writeJSON(w, 200, trendingResp{Repos: []any{}, Searches: []any{}})
+		s.handleTrending(w)
 	case r.URL.Path == "/api/health":
 		writeJSON(w, 200, okResp{OK: true})
 	case r.URL.Path == "/api/platform":
-		writeJSON(w, 200, map[string]any{"os": runtime.GOOS, "dialogs": dialogsSupported()})
+		writeJSON(w, 200, map[string]any{
+			"os": runtime.GOOS, "dialogs": dialogsSupported(),
+			"appdeck": launcherURL() != "", "launcher": launcherURL(),
+		})
+	case r.URL.Path == "/api/appdeck/install" && r.Method == http.MethodPost:
+		s.handleAppDeckInstall(w, r)
+	case r.URL.Path == "/api/appdeck/install" && r.Method == http.MethodGet:
+		s.handleAppDeckInstallStatus(w, r)
+	case r.URL.Path == "/api/appdeck/install/cancel" && r.Method == http.MethodPost:
+		s.handleAppDeckInstallCancel(w, r)
 	case r.URL.Path == "/api/user-repos":
 		s.handleUserRepos(w, r)
 	case r.URL.Path == "/api/download":
@@ -330,8 +452,13 @@ func (s *server) handleTrack(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, 400, errResp{Error: "Invalid tracking payload"})
 		return
 	}
-	// Analytics are intentionally a no-op in the native server (the former
-	// SQLite database is not needed for the app to work).
+	// Local history only: powers the trending chips ("from your recent
+	// searches"). Nothing leaves the machine; counts persist in history.json.
+	s.histMu.Lock()
+	recordHit(s.hist.Repos, payload.Repo)
+	recordHit(s.hist.Searches, payload.Query)
+	s.saveHistory()
+	s.histMu.Unlock()
 	writeJSON(w, 200, okResp{OK: true})
 }
 

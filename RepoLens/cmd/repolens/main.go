@@ -133,9 +133,11 @@ func main() {
 
 	srv := &server{
 		gh:        newGHClient(dataDir, token),
+		dataDir:   dataDir,
 		publicDir: filepath.Join(root, "public"),
 		now:       time.Now,
 	}
+	srv.loadHistory()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ln, err := net.Listen("tcp", addr)

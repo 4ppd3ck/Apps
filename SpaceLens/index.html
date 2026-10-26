@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>🔭 SpaceLens</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="title-row">
+      <h1>🔭 <span>SpaceLens</span> <small class="ver"></small></h1>
+      <button id="themeBtn" class="btn ghost small-btn" title="Toggle light/dark theme">🌙</button>
+    </div>
+    <p class="sub">What's eating your disk — browse freely; deleting moves to the OS Trash, nothing is lost for good.</p>
+    <div class="controls">
+      <select id="rootSel" aria-label="Scan location"></select>
+      <button id="addBtn" class="btn ghost" title="Add this location to the multi-scan list">＋ Add</button>
+      <button id="scanBtn" class="btn">Scan</button>
+      <button id="cancelBtn" class="btn ghost" hidden>Stop</button>
+      <span id="progress" class="progress muted"></span>
+    </div>
+    <div id="chips" class="chips" hidden></div>
+  </header>
+
+  <main class="main">
+    <section class="chart-wrap">
+      <div id="views" class="views" role="tablist" aria-label="Chart view">
+        <button class="btn ghost active" data-view="sun" role="tab">☀ Sunburst</button>
+        <button class="btn ghost" data-view="treemap" role="tab">▦ Treemap</button>
+        <button class="btn ghost" data-view="bars" role="tab">≡ Bars</button>
+      </div>
+      <div class="chart-area">
+        <canvas id="sun" width="900" height="900"></canvas>
+        <div id="bars" class="bars" hidden></div>
+        <div id="center" class="center" hidden>
+          <div id="centerName" class="center-name"></div>
+          <div id="centerSize" class="center-size"></div>
+          <div id="centerHint" class="center-hint muted"></div>
+        </div>
+        <div id="tip" class="tip" hidden></div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="crumbs" id="crumbs"></div>
+      <div class="sel" id="sel">
+        <p class="muted" id="selEmpty">Scan a folder, then click any segment to zoom in; click the middle to go back up.</p>
+      </div>
+      <h3>Biggest files <span class="muted small" id="bigMeta"></span></h3>
+      <div id="bigList" class="big-list"></div>
+    </aside>
+  </main>
+
+  <div id="delbar" class="delbar" hidden>
+    <span id="delCount" class="muted"></span>
+    <button id="delBtn" class="btn danger">🗑 Trash selected</button>
+    <button id="delClear" class="btn ghost">Clear</button>
+  </div>
+
+  <dialog id="confirmDlg" class="dlg">
+    <h3>Move to Trash?</h3>
+    <p class="muted small">Items go to the OS Trash / Recycle Bin — recoverable, never permanently deleted here.</p>
+    <ul id="delList" class="del-list mono"></ul>
+    <div class="dlg-actions">
+      <button id="delGo" class="btn danger"></button>
+      <button id="delCancel" class="btn ghost">Cancel</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -32,6 +32,7 @@ type NetworkMacOS struct {
 	seen      map[seenKeyDarwin]bool
 	prevBytes map[string][2]int64
 	prevIface map[string][2]int64
+	byteTicks int
 }
 
 type seenKeyDarwin struct {
@@ -88,6 +89,15 @@ func (c *NetworkMacOS) run() {
 			c.emitNewConns(conns, interval)
 			rates, ifaces, tin, tout := c.traffic(t0)
 			c.Ctx.Net.UpdateTraffic(rates, ifaces, tin, tout)
+			// per-connection byte counters refresh on a slower cadence: the
+			// counters are cumulative per socket, so sampling every 5th poll
+			// (~15s) keeps the extra nettop run cheap
+			c.byteTicks++
+			if c.byteTicks >= 5 {
+				c.byteTicks = 0
+				c.Ctx.Net.UpdateConnBytes(nettopConnBytes())
+				c.Ctx.Net.UpdateAppBytes(nettopProcessBytes())
+			}
 		}()
 		c.Sleep(interval)
 	}
@@ -375,4 +385,89 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// -- per-connection bytes -------------------------------------------------
+
+// nettop per-socket line:
+//
+//	"<ts> tcp4 192.168.1.2:51653<->39.97.141.140:443 en0 Established <in> <out> ..."
+//
+// (the process aggregate lines carry "name.pid" and never match this).
+var reNettopSock = regexp.MustCompile(
+	`^\S+\s+(tcp[46]|udp[46])\s+(\S+)<->(\S+)\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s`)
+
+// nettopConnBytes samples per-connection cumulative byte counters from
+// nettop's per-socket output (TCP only; best-effort — sockets nettop can't
+// attribute simply stay absent and render as "—" in the dashboard).
+func nettopConnBytes() map[string][2]int64 {
+	_, out, _ := monitor.Run([]string{"/usr/bin/nettop", "-x", "-l", "1",
+		"-m", "tcp"}, 10*time.Second)
+	counters := map[string][2]int64{}
+	for _, line := range strings.Split(out, "\n") {
+		m := reNettopSock.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		proto := m[1]
+		local := nettopSockEndpoint(m[2], strings.HasSuffix(proto, "6"))
+		remote := nettopSockEndpoint(m[3], strings.HasSuffix(proto, "6"))
+		if local == "" || remote == "" {
+			continue
+		}
+		bin, err1 := strconv.ParseInt(m[4], 10, 64)
+		bout, err2 := strconv.ParseInt(m[5], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		counters[monitor.ConnBytesKey(proto, local, remote)] = [2]int64{bin, bout}
+	}
+	return counters
+}
+
+// nettopProcessBytes samples per-process cumulative byte totals with
+// nettop's aggregate view. Without -m it covers TCP and UDP together, so
+// unlike the per-socket counters this captures QUIC/UDP traffic (which has
+// no observable remote endpoint). Returns "process name" -> {in, out};
+// multiple PIDs sharing one name are summed.
+func nettopProcessBytes() map[string][2]int64 {
+	_, out, _ := monitor.Run([]string{"/usr/bin/nettop", "-P", "-x", "-l", "1"},
+		10*time.Second)
+	totals := map[string][2]int64{}
+	for _, line := range strings.Split(out, "\n") {
+		m := reNettopLine.FindStringSubmatchIndex(line)
+		if m == nil {
+			continue
+		}
+		app := line[m[2]:m[3]]
+		nums := reNumbers.FindAllString(line[m[1]:], -1)
+		if app == "" || len(nums) < 2 {
+			continue
+		}
+		bin, err1 := strconv.ParseInt(nums[0], 10, 64)
+		bout, err2 := strconv.ParseInt(nums[1], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		prev := totals[app]
+		totals[app] = [2]int64{prev[0] + bin, prev[1] + bout}
+	}
+	return totals
+}
+
+// nettopSockEndpoint normalises a nettop socket endpoint to "ip:port".
+// IPv6 endpoints use "addr.port" (dot) notation; wildcard endpoints ("*.*")
+// don't identify a connection and yield "".
+func nettopSockEndpoint(addr string, ipv6 bool) string {
+	if addr == "" || strings.HasPrefix(addr, "*") {
+		return ""
+	}
+	if ipv6 {
+		idx := strings.LastIndex(addr, ".")
+		if idx < 0 {
+			return addr
+		}
+		return addr[:idx] + ":" + addr[idx+1:]
+	}
+	return addr
 }

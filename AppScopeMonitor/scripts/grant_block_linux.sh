@@ -28,6 +28,10 @@ if [ "${1:-}" = "--revoke" ]; then
         sudo "$HELPER_DST" del ip "$a" "$b" >/dev/null 2>&1 || true
     done < /var/lib/appscope-block/rules.conf
   fi
+  # country blocks live in one ipset + two -m set rules: tear those down
+  sudo /usr/sbin/iptables -D OUTPUT -m set --match-set appscope_block dst -j DROP 2>/dev/null || true
+  sudo /usr/sbin/iptables -D INPUT -m set --match-set appscope_block src -j DROP 2>/dev/null || true
+  sudo /usr/sbin/ipset destroy appscope_block 2>/dev/null || true
   sudo rm -f "$SUDOERS" "$HELPER_DST"
   sudo rm -rf /var/lib/appscope-block 2>/dev/null || true
   echo "Revoked: applied rules lifted; helper, sudoers entry and iptables rules removed."

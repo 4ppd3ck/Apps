@@ -1,58 +1,93 @@
-# Sentinel
+# 🚨 Sentinel
 
-Sentinel checks the local computer for security indicators and presents
-alerts in a dashboard. It can also use AppScope Monitor's connection and
-privacy events for additional context. Sentinel detects and reports; it does
-not block network traffic.
+**A host-compromise watchdog for your machine — RATs, MITM, rogue IPs, zombie processes,
+keyloggers, exfiltration: checked every 15 seconds, alerted the moment they appear.**
 
-![Sentinel example dashboard. All values are synthetic.](screenshots/overview.svg)
+Sentinel never talks to the internet. It watches *your own machine* — processes, network
+listeners, ARP/DNS state, persistence locations, the firewall — and enriches network
+findings with provider intelligence from **IPolice** (its loopback-only partner) and
+connection data from **AppScope Monitor** when that's running. Detection rules, not vibes:
+every alert names the check, the evidence, and what to do.
 
-*Privacy-safe UI preview: fictional alerts and device data only.*
+| | |
+|---|---|
+| ![Alerts](docs/screenshots/alerts.png) | ![The check suite](docs/screenshots/checks.png) |
 
-## Run with AppDeck
+*(Screenshot: a real catch — the watchdog flagged a binary running from a temp directory,
+exactly the way malware stages itself.)*
 
-1. Install Go 1.27 or newer.
-2. Start AppDeck from its folder with `go run .`.
-3. Start **AppScope Monitor** first if you want the extra event and
-   connection context.
-4. Start **Sentinel**, then choose **Open** on its card.
+---
 
-The first Go-app start can download dependencies and take a little time.
-Sentinel continues its host checks if AppScope Monitor is unavailable, but
-the dashboard will have less correlated information.
+## What you get
 
-## Run directly
+- **🧟 Process checks** — zombies, orphans, known attack-tool names, execution from temp
+  paths.
+- ** RAT/backdoor listeners, rogue remotes, beacon-callback patterns** — enriched with
+  AppScope Monitor's connection stream when available.
+- **🕵️ MITM checks** — gateway MAC changes, ARP conflicts/spoofing, DNS resolver changes,
+  rebinding probes.
+- **⚓ Persistence checks** — new launch agents/daemons, cron, autostart, systemd units,
+  Run keys, startup folders.
+- **🧱 Firewall checks** — firewall state, default policies, per-app allow rules.
+- **🚨 A working alert pipeline** — severities CRITICAL→INFO, ack/exclude/auto-ack per
+  finding, silencing windows, notifications, export; scans every 15 s.
+- **🔒 Architecture honesty** — Sentinel makes **zero external requests**; the *only*
+  internet-facing half of the pair is IPolice (see its README), and they talk over
+  loopback.
 
-From this folder:
+---
+
+## Install
+
+### The easy way — with the AppDeck launcher
+
+1. Put this folder in the launcher's `Apps/` directory (or import its zip).
+2. Start the launcher — it builds Sentinel on first start — and click the **🚨 Sentinel**
+   tile. Run it beside **AppScope Monitor** and **IPolice** for the full picture.
+
+### Build it yourself
+
+Requires [Go](https://go.dev/dl/):
 
 ```sh
-go run . --host 127.0.0.1 --port 8899
+cd Sentinel
+go build -o sentinel ./cmd/sentinel
+./sentinel                      # or: ./sentinel -once   (one scan, print, exit)
 ```
 
-Open <http://127.0.0.1:8899>. Press **Ctrl+C** to stop it. To build a local
-binary:
+---
+
+## Your first five minutes
+
+1. Open the **Watchdog** tab — severity counts up top; unacked findings below with
+   evidence JSON.
+2. Read an alert fully: check name, the plain-language explanation, the evidence payload.
+3. Real alert → investigate; known-benign → **ack** once, **exclude** the rule, or
+   **auto-ack** its future occurrences.
+4. Scan the **CHECKS** list — each shows what it looks for and how long it took.
+5. Try **⇨ Export** to keep an incident record.
+
+---
+
+## How it's built (for the curious / the expert)
+
+```
+cmd/sentinel/
+├─ engine.go / beacon.go / exfil.go / integ.go — the detection engine: process, network,
+│   beacon-periodicity, exfil-heuristics and integrity checks
+├─ firewall.go / intel.go — firewall state; provider intelligence via loopback IPolice
+├─ alert.go / exclusions.go — severity pipeline, ack/exclude/auto-ack persistence
+└─ main.go — loopback server + UI
+Scripts/tcc.sh — macOS TCC helper
+```
+
+- **No-agent-hub design**: the watchdog reads only local state (+ the loopback feeds);
+  there is no code path to an external network destination.
+- `-once` mode makes the whole engine scriptable (cron it, pipe to your alerting).
+
+## Verify
 
 ```sh
-go build -o sentinel .
-./sentinel --host 127.0.0.1 --port 8899
+go build ./... && go vet ./... && go test ./...
+./sentinel -once
 ```
-
-On Windows, use `go build -o sentinel.exe .` and run `.\sentinel.exe` in
-PowerShell.
-
-## First-run behavior and data
-
-Sentinel learns a baseline of normal host and network information before
-reporting many changes. Let it run long enough to establish that baseline,
-then review alerts in context. A network, software, or permission change can
-be expected and may still need review.
-
-AppDeck stores Sentinel's state in its app-specific `APPDECK_DATA` folder.
-A direct run defaults to `./data`. That state includes alerts and a baseline
-of machine-specific details. Keep it local, and review it before sharing or
-deleting it. Use **Reset baseline** in the dashboard only after an intentional
-system or network change.
-
-Sentinel can inspect local processes, network settings, persistence locations,
-and platform permission records. Run it only on computers you own or are
-authorized to administer. It does not replace antivirus or incident response.

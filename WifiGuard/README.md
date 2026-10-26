@@ -1,31 +1,75 @@
-# Wi-Fi Guard
+# 🛰️ Wi-Fi Guard
 
-Wi-Fi Guard shows which running AppDeck apps are available to other devices
-on your local Wi-Fi, and which remain local-only. It reads the AppDeck
-launcher status; it does not scan your network.
+**What this deck shares with your Wi-Fi, at a glance — and what it deliberately keeps
+local-only.**
 
-![Wi-Fi Guard example. The displayed address is documentation-only.](screenshots/overview.svg)
+One tiny page, live: it reads the launcher's app list every 5 seconds and splits your
+apps into *shared on Wi-Fi* (reachable from other devices) vs *local-only* (hidden from
+the network by design). Flip sharing from the dashboard and this page updates itself,
+with a toast for every change.
 
-*Privacy-safe UI preview: sample app names and the reserved documentation
-address `192.0.2.10`; no real network details are shown.*
+![Wifi Guard](docs/screenshots/shared.png)
 
-## Run with AppDeck
+*(Screenshot: fictional mock data — 4 shared, 2 local-only, 2 running.)*
 
-Wi-Fi Guard depends on AppDeck's local app-status API, so run it from the
-launcher:
+---
 
-1. Start AppDeck from its folder with `go run .`.
-2. Start **Wi-Fi Guard** and choose **Open**.
-3. Start other apps to see their current status in the list.
+## What you get
 
-The page refreshes its information when it opens. To change an app's sharing
-setting, return to the AppDeck dashboard and use that app card's Wi-Fi
-sharing control. Wi-Fi Guard only reports the status AppDeck provides.
+- **🛰️ The two buckets that matter** — shared-on-Wi-Fi vs local-only, counted up top;
+  local-only apps are hidden from the list *by design* (that's the point).
+- **🟢 Running / stopped badges** — which shared apps are actually up right now.
+- **📡 LAN URLs, click-to-copy** — every shared app shows the address your phone/tablet
+  would use; click it to copy.
+- **🔄 Live tracking** — 5-second auto-poll plus manual **↻ Refresh**; a toast announces
+  every change it sees.
+- **🌙 Dark/light**, persisted; ~10 KB self-contained, zero dependencies.
 
-## Local access and privacy
+*Privacy model: this page only reads the launcher's status — it never scans the network
+or touches other devices. What it shows is exactly what the launcher itself exposes.*
 
-The list can show LAN URLs and app names. Treat it as local network
-information: do not share screenshots or copied URLs without checking them.
-Other devices can open an app only when the app is running and AppDeck has
-sharing enabled for it. Keep sharing disabled when you only need access from
-this computer, and do not expose the launcher to the public internet.
+---
+
+## Install
+
+### The easy way — with the AppDeck launcher
+
+1. Put this folder in the launcher's `Apps/` directory (or import its zip).
+2. Start the launcher and click the **🛰️ Wi-Fi Guard** tile. It talks to the launcher
+   automatically.
+
+### Standalone
+
+```sh
+cd WifiGuard
+python3 -m http.server
+# open http://localhost:8000 — shows its error state without the launcher
+```
+
+---
+
+## Your first five minutes
+
+1. Open it next to the launcher dashboard — the counters fill in.
+2. Flip an app's sharing (📶/💻 on its card in the dashboard) and watch the toast land
+   here within five seconds.
+3. Click a LAN URL to copy it; open it on your phone.
+
+---
+
+## How it's built (for the curious / the expert)
+
+```
+index.html — the entire app (~10 KB): markup, styles, logic inline; polls
+             (window.APPDECK?.launcher || location.origin) + /api/apps
+```
+
+- Classification is three filters over the launcher's app list: `network && !desktop &&
+  url` → shared; `!network` → local-only; `running` → live badge.
+- Theme persisted in `localStorage` (`wifiguard-theme`); everything else is stateless.
+
+## Verify
+
+```sh
+python3 -m http.server   # error state without the launcher; with it: live buckets
+```

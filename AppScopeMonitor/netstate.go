@@ -62,6 +62,21 @@ type NetState struct {
 	updatedAt    float64
 	store        *Store
 	sessionStart float64
+	connBytes    map[string][2]int64 // best-effort per-connection counters
+
+	// per-destination byte accounting: connBytes are cumulative per socket
+	// and vanish when the socket closes, so each counter sample is diffed
+	// against the previous one and the deltas accumulate per (app, remote
+	// IP) until they flush to the store's destination_traffic table.
+	destPending   map[string][2]int64 // keyed "app\x00remote ip"
+	lastDestFlush float64
+
+	// per-app process-level byte accounting (nettop per-process totals,
+	// TCP+UDP): same diff-and-accumulate pattern, flushed into app_traffic.
+	// QUIC/UDP traffic has no observable remote endpoint, so this is the
+	// only source that captures it.
+	appPending   map[string][2]int64
+	lastAppBytes map[string][2]int64
 }
 
 // NewNetState creates the shared network state.
@@ -258,6 +273,216 @@ func (n *NetState) UpdatedAt() float64 {
 	return n.updatedAt
 }
 
+// ConnBytesKey builds the per-connection byte-counter key: normalised proto
+// ("tcp"/"udp", tcp4/tcp6 collapse to "tcp") plus local and remote
+// "ip:port" endpoints. Shared by the macOS nettop collector and the
+// snapshot enrichment so both sides agree on one key.
+func ConnBytesKey(proto, local, remote string) string {
+	p := strings.ToLower(strings.TrimSpace(proto))
+	if len(p) > 1 && (p[len(p)-1] == '4' || p[len(p)-1] == '6') {
+		p = p[:len(p)-1] // tcp4/tcp6/udp6 -> tcp/udp
+	}
+	return p + "|" + local + "|" + remote
+}
+
+// destFlushInterval paces destination_traffic writes; a killed daemon loses
+// at most this window of byte deltas.
+const destFlushInterval = 30.0 // seconds
+
+// UpdateConnBytes replaces the best-effort per-connection byte counters
+// (cumulative since socket creation; macOS nettop per-socket output). A nil
+// map clears the previous counters. Counters are diffed against the previous
+// sample and the deltas accumulate per (app, remote IP) destination, flushed
+// to the store every destFlushInterval so per-site totals survive socket
+// churn. Attributing a socket needs the current connection table, so
+// unattributable sockets are skipped this round.
+func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
+	n.mu.Lock()
+	prev := n.connBytes
+	n.connBytes = counters
+
+	appBySock := make(map[string]string, len(n.connections))
+	ipBySock := make(map[string]string, len(n.connections))
+	for _, conn := range n.connections {
+		key := ConnBytesKey(StrOf(conn["proto"]),
+			formatConnectionEndpoint(conn["local_ip"], conn["local_port"]),
+			formatConnectionEndpoint(conn["remote_ip"], conn["remote_port"]))
+		app, _ := conn["app"].(string)
+		if app == "" {
+			app = "Unknown"
+		}
+		appBySock[key] = app
+		if ip, _ := conn["remote_ip"].(string); ClassifyIP(ip) == "external" {
+			ipBySock[key] = ip
+		}
+	}
+	now := Now()
+	if n.destPending == nil {
+		n.destPending = map[string][2]int64{}
+	}
+	for key, cur := range counters {
+		dIn, dOut := cur[0], cur[1]
+		if last, ok := prev[key]; ok {
+			// same socket: only the growth is new traffic (a decrease means
+			// the counter went away and came back — keep the remainder)
+			if cur[0] > last[0] {
+				dIn = cur[0] - last[0]
+			} else {
+				dIn = 0
+			}
+			if cur[1] > last[1] {
+				dOut = cur[1] - last[1]
+			} else {
+				dOut = 0
+			}
+		}
+		if dIn == 0 && dOut == 0 {
+			continue
+		}
+		app, ip := appBySock[key], ipBySock[key]
+		if app == "" || ip == "" {
+			continue
+		}
+		dkey := app + "\x00" + ip
+		d := n.destPending[dkey]
+		d[0] += dIn
+		d[1] += dOut
+		n.destPending[dkey] = d
+	}
+	flushDest := n.store != nil && len(n.destPending) > 0 &&
+		now-n.lastDestFlush >= destFlushInterval
+	var batch []DestinationDelta
+	if flushDest {
+		batch = make([]DestinationDelta, 0, len(n.destPending))
+		for key, v := range n.destPending {
+			app, ip, _ := strings.Cut(key, "\x00")
+			batch = append(batch, DestinationDelta{
+				App: app, RemoteIP: ip, BytesIn: v[0], BytesOut: v[1],
+			})
+		}
+		n.destPending = map[string][2]int64{}
+		n.lastDestFlush = now
+	}
+	flushApp := n.store != nil && len(n.appPending) > 0 &&
+		now-n.lastDestFlush >= destFlushInterval
+	var appBatch []DestinationDelta
+	if flushApp {
+		appBatch = make([]DestinationDelta, 0, len(n.appPending))
+		for app, v := range n.appPending {
+			appBatch = append(appBatch, DestinationDelta{
+				App: app, BytesIn: v[0], BytesOut: v[1],
+			})
+		}
+		n.appPending = map[string][2]int64{}
+	}
+	n.mu.Unlock()
+
+	if flushDest {
+		if err := n.store.AddDestinationBytes(batch, now); err != nil {
+			fmt.Printf("[network] destination traffic error: %v\n", err)
+		}
+	}
+	if flushApp {
+		if err := n.store.AddAppTraffic(appBatch, now); err != nil {
+			fmt.Printf("[network] app traffic error: %v\n", err)
+		}
+	}
+}
+
+// UpdateAppBytes replaces the per-process cumulative byte totals (nettop
+// per-process aggregates, TCP+UDP). Deltas against the previous sample
+// accumulate per app until the shared flush interval elapses. nettop
+// sometimes reports a truncated process name, so names are reconciled
+// against the live connection table's app names when unambiguous.
+func (n *NetState) UpdateAppBytes(appTotals map[string][2]int64) {
+	n.mu.Lock()
+	prev := n.lastAppBytes
+	if n.appPending == nil {
+		n.appPending = map[string][2]int64{}
+	}
+	knownApps := make(map[string]bool, len(n.connections))
+	for _, conn := range n.connections {
+		if app, ok := conn["app"].(string); ok && app != "" {
+			knownApps[app] = true
+		}
+	}
+	for app, cur := range appTotals {
+		if app == "" {
+			continue
+		}
+		if !knownApps[app] {
+			for known := range knownApps {
+				// "Code Helper" is the nettop-truncated tail of "ZCode Helper"
+				if strings.HasSuffix(known, " "+app) {
+					app = known
+					break
+				}
+			}
+		}
+		dIn, dOut := cur[0], cur[1]
+		if last, ok := prev[app]; ok {
+			if cur[0] > last[0] {
+				dIn = cur[0] - last[0]
+			} else {
+				dIn = 0
+			}
+			if cur[1] > last[1] {
+				dOut = cur[1] - last[1]
+			} else {
+				dOut = 0
+			}
+		}
+		if dIn == 0 && dOut == 0 {
+			continue
+		}
+		d := n.appPending[app]
+		d[0] += dIn
+		d[1] += dOut
+		n.appPending[app] = d
+	}
+	n.lastAppBytes = appTotals
+	n.mu.Unlock()
+}
+
+// FlushDestinationBytes persists any pending per-destination and per-app
+// byte deltas immediately (used before shutdown and by tests).
+func (n *NetState) FlushDestinationBytes() {
+	n.mu.Lock()
+	if n.store == nil || (len(n.destPending) == 0 && len(n.appPending) == 0) {
+		n.mu.Unlock()
+		return
+	}
+	batch := make([]DestinationDelta, 0, len(n.destPending))
+	for key, v := range n.destPending {
+		app, ip, _ := strings.Cut(key, "\x00")
+		batch = append(batch, DestinationDelta{
+			App: app, RemoteIP: ip, BytesIn: v[0], BytesOut: v[1],
+		})
+	}
+	n.destPending = map[string][2]int64{}
+	appBatch := make([]DestinationDelta, 0, len(n.appPending))
+	for app, v := range n.appPending {
+		appBatch = append(appBatch, DestinationDelta{
+			App: app, BytesIn: v[0], BytesOut: v[1],
+		})
+	}
+	n.appPending = map[string][2]int64{}
+	ts := Now()
+	n.lastDestFlush = ts
+	store := n.store
+	n.mu.Unlock()
+	if len(batch) > 0 {
+		if err := store.AddDestinationBytes(batch, ts); err != nil {
+			fmt.Printf("[network] destination traffic error: %v\n", err)
+		}
+	}
+	if len(appBatch) > 0 {
+		if err := store.AddAppTraffic(appBatch, ts); err != nil {
+			fmt.Printf("[network] app traffic error: %v\n", err)
+		}
+	}
+}
+
 // Snapshot returns the enriched view served to the dashboard.
 func (n *NetState) Snapshot() map[string]any {
 	n.mu.Lock()
@@ -273,6 +498,10 @@ func (n *NetState) Snapshot() map[string]any {
 	}
 	hist := make([]HistoryPoint, len(n.history))
 	copy(hist, n.history)
+	connBytes := make(map[string][2]int64, len(n.connBytes))
+	for k, v := range n.connBytes {
+		connBytes[k] = v
+	}
 	updatedAt := n.updatedAt
 	n.mu.Unlock()
 
@@ -308,6 +537,13 @@ func (n *NetState) Snapshot() map[string]any {
 		}
 		if host != "" {
 			row["host"] = host
+		}
+		if counters, ok := connBytes[ConnBytesKey(
+			StrOf(c["proto"]),
+			formatConnectionEndpoint(c["local_ip"], c["local_port"]),
+			formatConnectionEndpoint(c["remote_ip"], c["remote_port"]),
+		)]; ok {
+			row["bytes_in"], row["bytes_out"] = counters[0], counters[1]
 		}
 		enriched = append(enriched, row)
 	}

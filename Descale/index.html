@@ -25,6 +25,7 @@
       </div>
     </div>
     <div class="machine" id="machine"></div>
+    <button id="guardBtn" class="btn ghost theme-btn" title="Guardrails">🛡️</button>
     <button id="themeBtn" class="btn ghost theme-btn" title="Toggle light/dark" aria-label="Toggle light or dark theme">🌙</button>
   </div>
   <nav class="tabs">
@@ -60,31 +61,72 @@
     </details>
   </section>
 
-  <!-- ============ Uninstall tab ============ -->
+  <!-- ============ Uninstall tab: system + appdeck ============ -->
   <section id="tab-uninstall" hidden>
+    <div class="subtabs" id="uninstallSubtabs">
+      <button data-scope="system" class="on">🖥️ System</button>
+      <button data-scope="appdeck">🧩 AppDeck</button>
+    </div>
     <div class="toolbar">
       <input id="appSearch" class="search" type="search" placeholder="Filter applications…">
+      <label class="rowline-inline"><input type="checkbox" id="appsAll"> select all</label>
       <button id="appsReload" class="btn ghost small">↻ Reload list</button>
       <span id="appsMeta" class="muted"></span>
     </div>
     <div id="appsList" class="grid"></div>
     <div id="appDetail" hidden></div>
+    <div class="cleanbar" id="appsBar" hidden>
+      <span id="appsBarText">0 selected</span>
+      <span style="flex:1"></span>
+      <button id="appsDeselect" class="btn ghost small">Deselect</button>
+      <button id="appsUninstall" class="btn danger small" disabled>🗑️ Uninstall selected</button>
+    </div>
   </section>
 
-  <!-- ============ Traces tab ============ -->
+  <!-- ============ Traces tab: cleanup + exclusions ============ -->
   <section id="tab-traces" hidden>
-    <p class="muted note" id="tracesNote">Folders and files left by applications that are <b>no longer installed</b> — data, caches, preferences, saved states, launch agents. Nothing is checked by default: review, select, delete. Everything moves to the Trash and stays restorable from the journal. A folder shared by an installed vendor (e.g. <span class="mono">Google</span> holding Chrome) is never proposed.</p>
-    <div class="toolbar">
-      <button id="tracesReload" class="btn ghost small">↻ Rescan</button>
-      <label class="rowline-inline"><input type="checkbox" id="tracesAll"> select all</label>
-      <span id="tracesMeta" class="muted"></span>
-      <button id="tracesDelete" class="btn danger small" disabled style="margin-left:auto">🗑️ Delete selected</button>
+    <div class="subtabs">
+      <button data-pane="cleanup" class="on">🧹 Cleanup</button>
+      <button data-pane="exclusions">🚫 Exclusions</button>
     </div>
-    <div class="tbl-wrap tall">
-      <table id="tbl-traces">
-        <thead><tr><th style="width:2em"></th><th>Path</th><th>Kind</th><th>Size</th></tr></thead>
-        <tbody></tbody>
-      </table>
+
+    <div id="pane-traces-cleanup">
+      <p class="muted note" id="tracesNote">Folders and files left by applications that are <b>no longer installed</b> — data, caches, preferences, saved states, launch agents. Nothing is checked by default: review, select, delete. Everything moves to the Trash and stays restorable from the journal. A folder shared by an installed vendor (e.g. <span class="mono">Google</span> holding Chrome) is never proposed.</p>
+      <div class="toolbar">
+        <button id="tracesReload" class="btn ghost small">↻ Rescan</button>
+        <input type="search" id="tracesSearch" class="search" placeholder="Filter traces…" style="max-width:22rem" hidden>
+        <select id="tracesKind" hidden aria-label="Filter by kind"></select>
+        <span id="tracesMeta" class="muted"></span>
+        <div class="actions-cluster">
+          <label class="rowline-inline"><input type="checkbox" id="tracesAll"> select all</label>
+          <button id="tracesExclude" class="btn ghost small" disabled title="Add the checked folders to the exclusion list — they disappear from this scan and can never be deleted by Descale">🚫 Exclude selected</button>
+          <button id="tracesDelete" class="btn danger small" disabled>🗑️ Delete selected</button>
+        </div>
+      </div>
+      <div class="tbl-wrap tall">
+        <table id="tbl-traces">
+          <thead><tr><th style="width:36px"></th><th>Path</th><th style="width:112px">Kind</th><th style="width:112px">Size</th><th style="width:132px" title="📂 show the folder in the file manager · 🚫 never scan or delete"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="pane-traces-exclusions" hidden>
+      <p class="muted note">Folders you marked <b>never scan / never delete</b> (the 🚫 button next to a trace, or “Exclude selected”). Excluded folders are invisible to the Cleanup scan and refused by the delete guardrail — even stale dashboards cannot trash them. Restore one (or many) to make it scannable again immediately.</p>
+      <div class="toolbar">
+        <span id="exclMeta" class="muted"></span>
+        <div class="actions-cluster">
+          <label class="rowline-inline"><input type="checkbox" id="exclAll"> select all</label>
+          <button id="exclRestore" class="btn primary small" disabled>↩️ Restore selected</button>
+          <button id="exclReload" class="btn ghost small">↻ Rescan</button>
+        </div>
+      </div>
+      <div class="tbl-wrap tall">
+        <table id="tbl-exclusions">
+          <thead><tr><th style="width:36px"></th><th>Path</th><th style="width:132px" title="📂 show the folder in the file manager · ↩️ restore to the scan"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -134,6 +176,14 @@
   </div>
 </dialog>
 
+<dialog id="logDialog">
+  <h3 id="logTitle">Working…</h3>
+  <div id="logLines" class="log-lines" aria-live="polite"></div>
+  <div class="dialog-actions">
+    <button class="btn ghost" id="logClose">Close</button>
+  </div>
+</dialog>
+
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
 <dialog id="trustDialog" aria-labelledby="trustTitle">
@@ -143,6 +193,7 @@
     <li><b>Zero telemetry</b>: no analytics, no crash reporting, no file inventories — nothing about your machine leaves it.</li>
     <li>Cleaning moves files to the <b>Trash</b> first and every session is journalled and restorable. The one permanent action (Empty the Trash / Recycle Bin) is review-only and always requires a separate confirmation.</li>
     <li>The rules database is a local file: <code>rules/descale-rules.json</code>. <span id="trustSigned"></span></li>
+    <li><b>Guardrails</b> keep system and shared locations (Library roots, Containers, your user folders) out of every scan and deletion. Experts can lift that protection from the 🛡️ button in the header; the home directory itself stays protected either way.</li>
     <li>The journal lives at <code id="trustJournal"></code>.</li>
     <li>Scans never send anything anywhere; every endpoint listed in the README runs on this machine, for this machine.</li>
   </ul>

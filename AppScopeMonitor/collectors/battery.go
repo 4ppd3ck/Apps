@@ -38,6 +38,7 @@ type BatteryCollector struct {
 	state       string
 	hasState    bool
 	lowFlags    map[string]bool
+	thermalHot  bool               // a thermal_hot alert is active (cleared with hysteresis)
 	prevCPU     [3]float64         // (total jiffies, idle jiffies, ts) -- Linux
 	prevJiffies map[int][2]float64 // pid -> (jiffies, ts) -- Linux top apps
 }
@@ -77,6 +78,7 @@ func (c *BatteryCollector) run() {
 // publish mirrors _publish.
 func (c *BatteryCollector) publish(info map[string]any) {
 	c.Ctx.SetBattery(info)
+	c.checkThermalAlerts(thermalOf(info))
 	if info["percent"] == nil {
 		return // no battery on this machine; CPU/disk gauges still served
 	}

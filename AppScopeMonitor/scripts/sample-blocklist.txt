@@ -1,0 +1,28 @@
+# AppScope Monitor — sample blocklist file
+# =========================================
+#
+# Use the "Blocklist file" option on the Blocked connections panel to
+# enforce every address in a file like this one. The file is re-read on
+# every re-apply/restart, so you can edit it without re-adding the rule.
+#
+# FORMAT
+#   one IPv4 address or CIDR per line
+#   bare IPs are treated as single hosts (/32)
+#   lines starting with # are comments; trailing # comments work too
+#   ranges: IPv4 with a prefix length between /1 and /32
+#
+# SAFETY
+#   loopback (127/8), private (10/8, 172.16/12, 192.168/16), CGNAT
+#   (100.64/10), link-local and multicast/reserved ranges are ignored
+#   automatically — your own machine and LAN can never be caught.
+#
+# WIRING
+#   When the IPolice companion app is running, the monitor also registers
+#   this file as an IPolice source (name: list/<label>), so the same
+#   ranges show up in IPolice and are visible to Sentinel.
+#
+# Examples:
+203.0.113.10            # a single host (becomes 203.0.113.10/32)
+203.0.113.0/24          # a /24 subnet
+198.51.100.7
+192.0.2.0/24

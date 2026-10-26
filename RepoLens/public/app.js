@@ -31,6 +31,9 @@ const els = {
   bulkProgressLabel: document.getElementById('bulk-progress-label'),
   bulkCancel: document.getElementById('bulk-cancel'),
   bulkRetry: document.getElementById('bulk-retry'),
+  bulkInstall: document.getElementById('bulk-install'),
+  saveMode: document.getElementById('save-mode'),
+  saveFolderBtn: document.getElementById('save-folder-btn'),
   toasts: document.getElementById('toasts'),
 };
 
@@ -439,6 +442,8 @@ function cardHtml(r) {
   if (r.license) meta.push(`${esc(r.license)} license`);
   if (r.pushedAt) meta.push('updated ' + timeAgo(r.pushedAt));
   if (r.archived) meta.push('⚠ archived');
+  const installed = APPDECK_LAUNCHER && isInstalledOnDeck(r.name);
+  if (installed) meta.push('<span class="deck-badge">✓ on AppDeck</span>');
 
   const osBadges = r.oses.length
     ? r.oses.map((o) =>
@@ -470,6 +475,7 @@ function cardHtml(r) {
     ${tags ? `<div class="topics">${tags}</div>` : ''}
     <div class="actions">
       ${primaryAction(r)}
+      ${installButton(r, installed)}
       ${releaseInfo}
       <button type="button" class="ghost dl" data-url="${esc(zipballUrl(r))}" data-name="${esc(r.name)}-source.zip">⬇ .zip source</button>
       <a class="ghost" href="${esc(r.htmlUrl)}/releases" target="_blank" rel="noopener noreferrer">All releases ↗</a>
@@ -477,18 +483,30 @@ function cardHtml(r) {
   </article>`;
 }
 
+function bestOSAsset(r) {
+  if (!USER_OS || !r.latestAssets?.length) return null;
+  const candidates = r.latestAssets.filter((a) => a.os === USER_OS).sort((a, b) => b.downloads - a.downloads);
+  return candidates[0] || null;
+}
+
 function primaryAction(r) {
-  if (USER_OS && r.latestAssets?.length) {
-    const candidates = r.latestAssets.filter((a) => a.os === USER_OS).sort((a, b) => b.downloads - a.downloads);
-    if (candidates.length) {
-      const best = candidates[0];
-      return `<button type="button" class="primary dl" data-url="${esc(best.url)}" data-name="${esc(best.name)}">⬇ Download for ${OS_LABELS[USER_OS]} (${fmtBytes(best.size)})</button>`;
-    }
+  const best = bestOSAsset(r);
+  if (best) {
+    return `<button type="button" class="primary dl" data-url="${esc(best.url)}" data-name="${esc(best.name)}">⬇ Download for ${OS_LABELS[USER_OS]} (${fmtBytes(best.size)})</button>`;
   }
   if (r.latestRelease) {
     return `<button type="button" class="primary subtle dl" data-url="${esc(r.latestRelease.url)}" data-name="${esc(r.name)}-release.zip">⬇ Get latest release</button>`;
   }
   return `<a class="primary subtle" href="${esc(r.htmlUrl)}" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a>`;
+}
+
+// The card's AppDeck install action: the OS asset when one exists, otherwise
+// the backend hands the repo URL to AppDeck for a git import. Empty until the
+// platform probe confirms RepoLens runs under AppDeck.
+function installButton(r, installed) {
+  if (!APPDECK_LAUNCHER) return '';
+  const best = bestOSAsset(r);
+  return `<button type="button" class="ghost install" data-repo="${esc(r.fullName)}" data-name="${esc(r.name)}" data-url="${esc(best ? best.url : '')}" title="${installed ? 'Reinstall the latest version into AppDeck' : 'Install this app into the AppDeck dashboard'}">${installed ? '🔄 Update on AppDeck' : '🧩 Install on AppDeck'}</button>`;
 }
 
 function showError(message) {
@@ -498,8 +516,13 @@ function showError(message) {
 /* ---------- click handling (downloads + analytics) ---------- */
 
 els.results.addEventListener('click', (e) => {
-  const dl = e.target.closest('button.dl');
   const card = e.target.closest('article.card');
+  const inst = e.target.closest('button.install');
+  if (inst && card) {
+    installOnAppDeck(inst);
+    return;
+  }
+  const dl = e.target.closest('button.dl');
   if (dl && card) {
     trackClick(card.dataset.repo || '', dl.classList.contains('primary') ? 'download' : 'source', dl.dataset.url);
     downloadItem(dl.dataset.url, dl.dataset.name);
@@ -520,6 +543,160 @@ function trackClick(repo, action, href) {
   }
 }
 
+/* ---------- install on AppDeck ---------- */
+
+let APPDECK_LAUNCHER = '';
+const installedDeckIds = new Set();
+const installedDeckNames = new Set();
+const activeInstalls = new Map(); // repo full name → { jobId, btn, timer }
+
+function slugifyId(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+}
+
+// AppDeck slugifies the manifest id, so the repo name usually lands as the
+// app id; the display-name match covers the cases where it doesn't.
+function isInstalledOnDeck(name) {
+  return installedDeckIds.has(slugifyId(name)) || installedDeckNames.has(String(name).toLowerCase());
+}
+
+// One-shot platform probe: turns the install UI on and loads the installed
+// set. Buttons rendered before it lands are painted by the boot re-run.
+async function loadPlatform() {
+  try {
+    const d = await apiJSON('/api/platform');
+    if (d && d.appdeck && d.launcher) {
+      APPDECK_LAUNCHER = d.launcher;
+      await refreshInstalledApps();
+    }
+  } catch {}
+  els.bulkInstall.classList.toggle('hidden', !APPDECK_LAUNCHER);
+}
+
+// The launcher's app list is deliberately CORS-open, so the page reads it
+// straight from the dashboard — no backend round-trip for the badge.
+async function refreshInstalledApps() {
+  if (!APPDECK_LAUNCHER) return;
+  try {
+    const res = await fetch(`${APPDECK_LAUNCHER}/api/apps`);
+    const apps = await res.json();
+    installedDeckIds.clear();
+    installedDeckNames.clear();
+    for (const a of Array.isArray(apps) ? apps : []) {
+      if (a.id) installedDeckIds.add(a.id);
+      if (a.name) installedDeckNames.add(String(a.name).toLowerCase());
+    }
+  } catch {}
+}
+
+async function installOnAppDeck(btn) {
+  if (!APPDECK_LAUNCHER) return;
+  const repo = btn.dataset.repo;
+  if (!repo) return;
+  if (activeInstalls.has(repo)) {
+    cancelInstall(repo, 'Install canceled.'); // clicking a running install cancels it
+    return;
+  }
+  const payload = { repo: `https://github.com/${repo}`, name: btn.dataset.name || '' };
+  if (btn.dataset.url) payload.url = btn.dataset.url;
+  let d;
+  try {
+    d = await apiJSON('/api/appdeck/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    toast(`Install failed: ${err.message}`, 'error', 6000);
+    return;
+  }
+  activeInstalls.set(repo, { jobId: d.job, btn });
+  btn.classList.add('pending');
+  btn.textContent = '⏳ Starting…';
+  pollInstall(repo);
+}
+
+function pollInstall(repo) {
+  const rec = activeInstalls.get(repo);
+  if (!rec) return;
+  rec.timer = setTimeout(async () => {
+    if (activeInstalls.get(repo) !== rec) return;
+    let d;
+    try {
+      d = await apiJSON(`/api/appdeck/install?id=${encodeURIComponent(rec.jobId)}`);
+    } catch (err) {
+      if (String(err.message || '').includes('Unknown install job')) {
+        activeInstalls.delete(repo);
+        restoreInstallBtn(rec.btn);
+        toast(`Install failed: ${err.message}`, 'error', 6000);
+        return;
+      }
+      pollInstall(repo); // transient — keep polling
+      return;
+    }
+    if (activeInstalls.get(repo) !== rec) return;
+    if (!d.done) {
+      rec.btn.textContent = d.note || '⏳ Installing…';
+      pollInstall(repo);
+      return;
+    }
+    activeInstalls.delete(repo);
+    if (d.ok) {
+      const name = (d.result && d.result.name) || repo.split('/').pop();
+      toastWithAction(`Installed ${name} on AppDeck`, 'Open AppDeck', () => {
+        if (d.result?.dashboard) window.open(d.result.dashboard, '_blank');
+      });
+      await refreshInstalledApps();
+      setCardInstalled(rec.btn.closest('article.card'), true);
+      restoreInstallBtn(rec.btn);
+    } else {
+      restoreInstallBtn(rec.btn);
+      toast(`Install failed: ${d.error || 'unknown error'}`, 'error', 8000);
+    }
+  }, 1000);
+}
+
+async function cancelInstall(repo, message) {
+  const rec = activeInstalls.get(repo);
+  if (!rec) return;
+  activeInstalls.delete(repo);
+  clearTimeout(rec.timer);
+  try {
+    await apiJSON('/api/appdeck/install/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: rec.jobId }),
+    });
+  } catch {}
+  restoreInstallBtn(rec.btn);
+  if (message) toast(message);
+}
+
+function restoreInstallBtn(btn) {
+  if (!btn) return;
+  btn.classList.remove('pending');
+  const installed = isInstalledOnDeck(btn.dataset.name || '');
+  btn.classList.toggle('update', installed);
+  btn.textContent = installed ? '🔄 Update on AppDeck' : '🧩 Install on AppDeck';
+}
+
+// The badge lives in the card's meta row; flipping it in place shows a
+// finished install without re-running the search.
+function setCardInstalled(card, installed) {
+  if (!card) return;
+  const meta = card.querySelector('.meta');
+  if (!meta) return;
+  let badge = meta.querySelector('.deck-badge');
+  if (installed && !badge) {
+    badge = document.createElement('span');
+    badge.className = 'deck-badge';
+    badge.textContent = '✓ on AppDeck';
+    meta.appendChild(badge);
+  } else if (!installed && badge) {
+    badge.remove();
+  }
+}
+
 /* ---------- bulk download by user ---------- */
 
 let bulkRepos = [];
@@ -531,6 +708,7 @@ function updateBulkSummary() {
   const checked = els.bulkList.querySelectorAll('input[type="checkbox"]:checked').length;
   els.bulkSummary.textContent = `${checked} of ${bulkRepos.length} selected`;
   els.bulkDownload.disabled = checked === 0 || bulkRunning;
+  els.bulkInstall.disabled = checked === 0 || bulkRunning || bulkInstalling;
 }
 
 async function loadUserRepos() {
@@ -561,6 +739,7 @@ async function loadUserRepos() {
       </label>`).join('');
     els.bulkSummary.textContent = `0 of ${bulkRepos.length} selected` + (d.truncated ? ' (first 300 by recent activity)' : '');
     els.bulkDownload.disabled = false;
+    els.bulkInstall.disabled = false;
     for (const cb of els.bulkList.querySelectorAll('input[type="checkbox"]')) {
       cb.addEventListener('change', updateBulkSummary);
     }
@@ -684,6 +863,106 @@ els.bulkRetry.addEventListener('click', async () => {
   }
 });
 
+/* ---------- bulk install on AppDeck ---------- */
+
+// Bulk installs are always source imports (the user-repo list carries no
+// release enrichment): AppDeck git-clones each repo and generates the
+// manifest. Runs sequentially through the same per-repo install jobs the
+// cards use; the button doubles as the cancel control.
+let bulkInstalling = false;
+let bulkInstallCancel = false;
+let bulkInstallJobId = null;
+
+els.bulkInstall.addEventListener('click', () => {
+  if (bulkInstalling) {
+    bulkInstallCancel = true;
+    if (bulkInstallJobId) {
+      apiJSON('/api/appdeck/install/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: bulkInstallJobId }),
+      }).catch(() => {});
+    }
+    els.bulkProgressLabel.textContent = 'Canceling…';
+    return;
+  }
+  startBulkInstall();
+});
+
+async function startBulkInstall() {
+  if (bulkInstalling || !APPDECK_LAUNCHER) return;
+  const checked = [...els.bulkList.querySelectorAll('input[type="checkbox"]:checked')];
+  if (!checked.length) return;
+  bulkInstalling = true;
+  bulkInstallCancel = false;
+  els.bulkDownload.disabled = true;
+  els.bulkInstall.disabled = false;
+  els.bulkInstall.textContent = '✕ Cancel installs';
+  els.bulkProgress.classList.remove('hidden');
+  els.bulkBar.style.width = '0%';
+  els.bulkRetry.classList.add('hidden');
+  const total = checked.length;
+  let okCount = 0;
+  let failCount = 0;
+  let lastError = '';
+  for (let i = 0; i < total; i++) {
+    if (bulkInstallCancel) break;
+    const cb = checked[i];
+    const name = cb.dataset.name || '';
+    els.bulkBar.style.width = Math.round((i / total) * 100) + '%';
+    els.bulkProgressLabel.textContent = `Installing ${i + 1}/${total}: ${name}…`;
+    try {
+      const d = await apiJSON('/api/appdeck/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: `https://github.com/${cb.dataset.fullname}`, name }),
+      });
+      bulkInstallJobId = d.job;
+      const res = await waitInstallDone(d.job);
+      if (res.ok) okCount++;
+      else { failCount++; lastError = res.error || lastError; }
+    } catch (err) {
+      failCount++;
+      lastError = err.message;
+    }
+    bulkInstallJobId = null;
+  }
+  const canceled = bulkInstallCancel;
+  bulkInstalling = false;
+  bulkInstallJobId = null;
+  els.bulkProgress.classList.add('hidden');
+  els.bulkInstall.textContent = '🧩 Install selected on AppDeck';
+  updateBulkSummary();
+  await refreshInstalledApps();
+  if (canceled) toast(`Install run canceled — ${okCount} installed.`, 'info', 6000);
+  else if (failCount) toast(`Installed ${okCount}/${total} · ${failCount} failed${lastError ? ` — ${lastError}` : ''}`, 'error', 8000);
+  else toast(`Installed ${okCount} repositor${okCount === 1 ? 'y' : 'ies'} on AppDeck.`, 'success', 7000);
+}
+
+function waitInstallDone(jobId) {
+  return new Promise((resolve) => {
+    const tick = async () => {
+      let d;
+      try {
+        d = await apiJSON(`/api/appdeck/install?id=${encodeURIComponent(jobId)}`);
+      } catch (err) {
+        if (String(err.message || '').includes('Unknown install job')) {
+          resolve({ ok: false, error: err.message });
+          return;
+        }
+        setTimeout(tick, 1200);
+        return;
+      }
+      if (!d.done) {
+        setTimeout(tick, 1200);
+        return;
+      }
+      resolve({ ok: !!d.ok, error: d.error || '' });
+    };
+    tick();
+  });
+}
+
 /* ---------- trending (from local history) ---------- */
 
 async function loadTrending() {
@@ -767,6 +1046,12 @@ els.bulkDownload.addEventListener('click', startBulkDownload);
 setSaveMode(getSaveMode());
 els.saveMode.addEventListener('change', () => setSaveMode(els.saveMode.value));
 els.saveFolderBtn.addEventListener('click', pickFolder);
+
+// Platform probe enables the AppDeck install UI; if cards are already on
+// screen, re-run the view so they pick up the buttons and badges.
+loadPlatform().then(() => {
+  if (els.results.querySelector('article.card')) run({ push: false });
+});
 
 paramsToState(new URLSearchParams(location.search));
 syncControls();

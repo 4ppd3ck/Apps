@@ -14,6 +14,8 @@
 #       queue of command files, keeps the applied set in rules.txt.
 #   C:\ProgramData\AppScopeBlock\queue\   writable by Users (the monitor
 #       drops add/del commands here; only the helper executes them).
+#       ACLs are explicit (inheritance disabled): nothing else under
+#       AppScopeBlock is user-writable.
 #   Scheduled task "AppScopeBlock" (SYSTEM, highest privileges) running the
 #       helper -- the monitor triggers it with schtasks /run, never elevating.
 #
@@ -41,6 +43,15 @@ function Remove-AllRules {
         foreach ($line in Get-Content $rulesPath) {
             $p = $line -split "\|", 3
             if ($p.Count -lt 2 -or $p[0] -eq "") { continue }
+
+            if ($p[0] -eq "country" -or $p[0] -eq "list" -or $p[0] -eq "provider") {
+                # chunk rules carry a numbered suffix: lift them all at once
+                netsh advfirewall firewall delete rule `
+                    name="AppScope block country $($p[1]) out *" | Out-Null
+                netsh advfirewall firewall delete rule `
+                    name="AppScope block country $($p[1]) in *" | Out-Null
+                continue
+            }
             netsh advfirewall firewall delete rule `
                 name="AppScope block $($p[0]) $($p[1]) out" | Out-Null
             netsh advfirewall firewall delete rule `
@@ -60,9 +71,16 @@ if ($Revoke) {
 New-Item -ItemType Directory -Force -Path (Join-Path $Dir "queue") | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "appscope-block-helper.ps1") `
     (Join-Path $Dir "appscope-block-helper.ps1") -Force
-# the unelevated monitor needs write access to the queue only -- never to
-# the helper or rules.txt (Users group via its well-known SID)
-icacls (Join-Path $Dir "queue") /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+# Explicit ACLs only -- inheritance from ProgramData is disabled so a
+# standard user cannot create or replace anything in the broker tree.
+# SYSTEM and Administrators own everything; the unelevated monitor gets
+# write access to the queue ONLY (Users via well-known SID), never to the
+# helper or rules.txt.
+icacls $Dir /inheritance:r | Out-Null
+icacls $Dir /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
+icacls (Join-Path $Dir "queue") /inheritance:r | Out-Null
+icacls (Join-Path $Dir "queue") /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" `
+    "*S-1-5-32-545:(OI)(CI)M" | Out-Null
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Dir\appscope-block-helper.ps1`" -ProcessQueue"

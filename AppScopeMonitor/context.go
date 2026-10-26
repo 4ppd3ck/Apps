@@ -39,6 +39,8 @@ type Ctx struct {
 	Bus      *EventBus
 	Net      *NetState
 	Enforcer *Enforcer
+	Geo      *GeoCache      // external-IP geo enrichment (nil disables it)
+	Country  *CountrySource // per-country CIDR data via IPolice (nil-safe)
 
 	collectors []Collector
 
@@ -53,11 +55,16 @@ type Ctx struct {
 func NewCtx(cfg *Config, store *Store, bus *EventBus) *Ctx {
 	netState := NewNetState(240)
 	netState.SetStore(store)
+	var country *CountrySource
+	if cfg != nil { // nil cfg in tests
+		country = NewCountrySource(cfg.DataDir())
+	}
 	return &Ctx{
 		Cfg:            cfg,
 		Store:          store,
 		Bus:            bus,
 		Net:            netState,
+		Country:        country,
 		androidDevices: []string{},
 	}
 }

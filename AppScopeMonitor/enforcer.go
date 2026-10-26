@@ -23,14 +23,26 @@
 package monitor
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+)
+
+// PFBlockTable is the pf table holding every blocked country's CIDRs
+// (macOS); IPBlockSet is the matching ipset set (Linux direct mode). The
+// privileged helpers own both — the monitor only feeds them CIDR lists.
+const (
+	PFBlockTable = "appscope_block_cn"
+	IPBlockSet   = "appscope_block"
 )
 
 const (
@@ -75,6 +87,48 @@ func NewEnforcer(ctx *Ctx) *Enforcer {
 func runCombined(cmd []string, timeout time.Duration) (int, string) {
 	rc, out, errOut := Run(cmd, timeout)
 	return rc, out + errOut
+}
+
+// runCombinedStdin is runCombined with stdin: the country-block helper
+// reads CIDR lists on stdin (thousands of networks cannot ride argv).
+func runCombinedStdin(cmd []string, input string, timeout time.Duration) (int, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if len(cmd) == 0 {
+		return 127, "empty command"
+	}
+	c := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	c.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+	c.Stdin = strings.NewReader(input)
+	err := c.Run()
+	if ctx.Err() != nil {
+		return 124, "timeout"
+	}
+	out := strings.TrimSpace(stdout.String() + stderr.String())
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && out == "" {
+			out = fmt.Sprintf("exit %d", ee.ExitCode())
+		}
+		if out == "" {
+			out = err.Error()
+		}
+	}
+	return exitCodeOf(err), out
+}
+
+func exitCodeOf(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return 1
 }
 
 // helperSrcPath mirrors _HELPER_SRC: the project's scripts/appscope-block-helper.sh.
@@ -241,6 +295,22 @@ func (e *Enforcer) Apply(rule *Block) (string, string) {
 			args = append(args, port)
 		}
 		rc, out = runCombined(e.helperCmd(args...), 30*time.Second)
+	case rtype == "country":
+		if runtime.GOOS == "windows" {
+			return e.applyWindows(rule) // handled above; unreachable
+		}
+		if runtime.GOOS == "linux" && e.Mode == "direct" {
+			return e.ipsetCIDRRules(rule, true)
+		}
+		return e.countryHelper(rule, true)
+	case rtype == "list" || rtype == "provider":
+		if runtime.GOOS == "windows" {
+			return e.applyWindows(rule) // handled above; unreachable
+		}
+		if runtime.GOOS == "linux" && e.Mode == "direct" {
+			return e.ipsetCIDRRules(rule, true)
+		}
+		return e.cidrHelper(rule, true)
 	default:
 		return "error", fmt.Sprintf("unknown rule type %s", rtype)
 	}
@@ -293,6 +363,22 @@ func (e *Enforcer) Unapply(rule *Block) (string, string) {
 			args = append(args, port)
 		}
 		rc, out = runCombined(e.helperCmd(args...), 30*time.Second)
+	case rtype == "country":
+		if runtime.GOOS == "windows" {
+			return e.unapplyWindows(rule) // handled above; unreachable
+		}
+		if runtime.GOOS == "linux" && e.Mode == "direct" {
+			return e.ipsetCIDRRules(rule, false)
+		}
+		return e.countryHelper(rule, false)
+	case rtype == "list" || rtype == "provider":
+		if runtime.GOOS == "windows" {
+			return e.unapplyWindows(rule) // handled above; unreachable
+		}
+		if runtime.GOOS == "linux" && e.Mode == "direct" {
+			return e.ipsetCIDRRules(rule, false)
+		}
+		return e.cidrHelper(rule, false)
 	default:
 		return "error", fmt.Sprintf("unknown rule type %s", rtype)
 	}
@@ -311,7 +397,203 @@ func (e *Enforcer) Unapply(rule *Block) (string, string) {
 	return "error", truncate(detail, 200)
 }
 
+// ------------------------------------------------------------- country --
+
+// countryHelper feeds the privileged helper a country's CIDR list on stdin
+// (thousands of networks cannot ride argv). The helper validates every
+// range, filters protected ones and regenerates the pf table / ipset.
+func (e *Enforcer) countryHelper(rule *Block, add bool) (string, string) {
+	cc := strings.ToUpper(strings.TrimSpace(rule.Value))
+	if !add {
+		rc, out := runCombinedStdin(e.helperCmd("del", "country", cc), "", 30*time.Second)
+		if rc != 0 {
+			return "error", truncate(out, 200)
+		}
+		return "removed", fmt.Sprintf("country %s removed from the firewall", cc)
+	}
+	cidrs, err := e.Ctx.Country.Ensure(cc)
+	if err != nil {
+		return "queued", truncate(err.Error(), 200)
+	}
+	cidrs = FilterSafeCIDRs(cidrs)
+	if len(cidrs) == 0 {
+		return "error", "country feed contained no blockable public ranges"
+	}
+	rc, out := runCombinedStdin(e.helperCmd("add", "country", cc),
+		strings.Join(cidrs, "\n"), 120*time.Second)
+	if rc != 0 {
+		return "error", truncate(out, 200)
+	}
+	return "enforced", fmt.Sprintf("%d CIDRs enforced (country %s)", len(cidrs), cc)
+}
+
+// ipsetCIDRRules is the Linux direct-mode path (root): rebuild the
+// appscope_block ipset from every active CIDR rule (country + list) —
+// idempotent, so add and remove share one code path — and keep exactly one
+// iptables -m set rule per direction while any CIDR rule is active.
+func (e *Enforcer) ipsetCIDRRules(rule *Block, add bool) (string, string) {
+	ranges := map[string][]string{}
+	if rules, err := e.Ctx.Store.ListBlocks(); err == nil {
+		for _, r := range rules {
+			if r.ID == rule.ID {
+				continue
+			}
+			if r.Type != "country" && r.Type != "list" && r.Type != "provider" {
+				continue
+			}
+			if list, ok := e.cidrsForRule(r); ok {
+				ranges[r.Type+"\x00"+r.Value] = list
+			}
+		}
+	}
+	if add {
+		list, status, detail := e.cidrsForApply(rule)
+		if status != "" {
+			return status, detail
+		}
+		ranges[rule.Type+"\x00"+rule.Value] = list
+	}
+	cidrs := FilterSafeCIDRs(unionCIDRs(ranges))
+
+	var sb strings.Builder
+	sb.WriteString("create " + IPBlockSet + " hash:net -exist\n")
+	sb.WriteString("flush " + IPBlockSet + "\n")
+	for _, c := range cidrs {
+		sb.WriteString("add " + IPBlockSet + " " + c + "\n")
+	}
+	rc, out := runCombinedStdin([]string{"ipset", "-exist", "restore"},
+		sb.String(), 120*time.Second)
+	if rc != 0 {
+		return "error", truncate("ipset restore: "+out, 200)
+	}
+	for _, chain := range []struct{ name, match string }{
+		{"OUTPUT", "dst"}, {"INPUT", "src"},
+	} {
+		check := []string{"iptables", "-w", "-C", chain.name, "-m", "set",
+			"--match-set", IPBlockSet, chain.match, "-j", "DROP"}
+		present, _ := runCombined(check, 10*time.Second)
+		if len(cidrs) > 0 && present != 0 {
+			insert := append([]string{"iptables", "-w", "-I", chain.name,
+				"-m", "set", "--match-set", IPBlockSet, chain.match}, "-j", "DROP")
+			if rc2, out2 := runCombined(insert, 10*time.Second); rc2 != 0 {
+				return "error", truncate("iptables -I: "+out2, 200)
+			}
+		} else if len(cidrs) == 0 && present == 0 {
+			del := append([]string{"iptables", "-w", "-D", chain.name,
+				"-m", "set", "--match-set", IPBlockSet, chain.match}, "-j", "DROP")
+			runCombined(del, 10*time.Second)
+		}
+	}
+	if add {
+		return "enforced", fmt.Sprintf("%d CIDRs enforced (%s %s)",
+			len(cidrs), rule.Type, rule.Value)
+	}
+	return "removed", "ranges removed from the ipset"
+}
+
+// cidrsForApply fetches the ranges a rule being ADDED should enforce:
+// country rules resolve via IPolice (queued on failure), list rules parse
+// their file. Returns (nil, status, detail) on a short-circuit.
+func (e *Enforcer) cidrsForApply(rule *Block) ([]string, string, string) {
+	switch rule.Type {
+	case "country":
+		cc := strings.ToUpper(strings.TrimSpace(rule.Value))
+		cidrs, err := e.Ctx.Country.Ensure(cc)
+		if err != nil {
+			return nil, "queued", truncate(err.Error(), 200)
+		}
+		return cidrs, "", ""
+	case "list":
+		cidrs, err := ParseIPFile(e.listPath(rule))
+		if err != nil {
+			return nil, "error", truncate("blocklist file: "+err.Error(), 200)
+		}
+		return cidrs, "", ""
+	case "provider":
+		cidrs, err := e.Ctx.Country.EnsureProvider(rule.Value)
+		if err != nil {
+			return nil, "queued", truncate(err.Error(), 200)
+		}
+		return cidrs, "", ""
+	}
+	return nil, "error", "unknown CIDR rule type " + rule.Type
+}
+
+// cidrsForRule reads the current ranges of an already-stored rule without
+// network fetches (country: cache; list: file as it stands now).
+func (e *Enforcer) cidrsForRule(rule *Block) ([]string, bool) {
+	switch rule.Type {
+	case "country":
+		return e.Ctx.Country.Cached(rule.Value)
+	case "list":
+		cidrs, err := ParseIPFile(e.listPath(rule))
+		return cidrs, err == nil
+	case "provider":
+		return e.Ctx.Country.Cached(rule.Value)
+	}
+	return nil, false
+}
+
+// listPath returns the blocklist file path stored with a list rule.
+func (e *Enforcer) listPath(rule *Block) string {
+	if rule.AppPath != nil {
+		return *rule.AppPath
+	}
+	return ""
+}
+
+func unionCIDRs(ranges map[string][]string) []string {
+	var out []string
+	for _, list := range ranges {
+		out = append(out, list...)
+	}
+	return out
+}
+
+// cidrHelper feeds the privileged helper a CIDR list on stdin for the
+// monitor-managed set rules (list / provider — both use the helper's
+// generic `list <label>` command). list rules additionally mirror their
+// file into IPolice (file source) when it is up.
+func (e *Enforcer) cidrHelper(rule *Block, add bool) (string, string) {
+	label := SanitizeLabel(rule.Value)
+	if !add {
+		rc, out := runCombinedStdin(e.helperCmd("del", "list", label), "", 30*time.Second)
+		if rc != 0 {
+			return "error", truncate(out, 200)
+		}
+		return "removed", fmt.Sprintf("blocklist %s removed from the firewall", label)
+	}
+	var cidrs []string
+	switch rule.Type {
+	case "provider":
+		var err error
+		if cidrs, err = e.Ctx.Country.EnsureProvider(rule.Value); err != nil {
+			return "queued", truncate(err.Error(), 200)
+		}
+	default: // list
+		path := e.listPath(rule)
+		var err error
+		if cidrs, err = ParseIPFile(path); err != nil {
+			return "error", truncate("blocklist file: "+err.Error(), 200)
+		}
+		if e.Ctx.Country != nil {
+			go e.Ctx.Country.EnsureListSource(label, path)
+		}
+	}
+	if len(cidrs) == 0 {
+		return "error", "rule contained no blockable public ranges"
+	}
+	rc, out := runCombinedStdin(e.helperCmd("add", "list", label),
+		strings.Join(cidrs, "\n"), 120*time.Second)
+	if rc != 0 {
+		return "error", truncate(out, 200)
+	}
+	return "enforced", fmt.Sprintf("%d ranges enforced (list %s)", len(cidrs), label)
+}
+
 // Reconcile (re)applies all stored rules; call at startup and after grant.
+// Country rules additionally refresh their CIDR caches in the background
+// (cache-first — an offline IPolice keeps the last good table enforceable).
 func (e *Enforcer) Reconcile() (int, error) {
 	rules, err := e.Ctx.Store.ListBlocks()
 	if err != nil {
@@ -322,6 +604,9 @@ func (e *Enforcer) Reconcile() (int, error) {
 		status, detail := e.Apply(r)
 		e.Ctx.Store.UpdateBlockStatus(r.ID, status, detail)
 		done++
+		if r.Type == "country" && e.Ctx.Country != nil {
+			go e.Ctx.Country.EnsureBackground(r.Value)
+		}
 	}
 	return done, nil
 }
@@ -363,6 +648,9 @@ func (e *Enforcer) brokerApply(rule *Block, add bool) (string, string) {
 }
 
 func (e *Enforcer) applyWindows(rule *Block) (string, string) {
+	if rule.Type == "country" || rule.Type == "list" || rule.Type == "provider" {
+		return e.cidrWindows(rule, true)
+	}
 	if e.Mode == "helper" {
 		return e.brokerApply(rule, true)
 	}
@@ -400,6 +688,9 @@ func (e *Enforcer) applyWindows(rule *Block) (string, string) {
 }
 
 func (e *Enforcer) unapplyWindows(rule *Block) (string, string) {
+	if rule.Type == "country" || rule.Type == "list" || rule.Type == "provider" {
+		return e.cidrWindows(rule, false)
+	}
 	if e.Mode == "helper" {
 		return e.brokerApply(rule, false)
 	}

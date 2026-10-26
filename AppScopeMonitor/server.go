@@ -86,7 +86,7 @@ func NewMonitorServer(addr string, handler http.Handler) (*MonitorServer, error)
 	}
 	srv := &MonitorServer{Listener: ln}
 	wrapped := &debugHandler{inner: handler, server: srv}
-	srv.HTTP = &http.Server{Handler: wrapped}
+	srv.HTTP = &http.Server{Handler: hostGuard(hostOf(addr), wrapped)}
 	srv.HTTP.ErrorLog = log.New(&filteredWriter{next: os.Stderr},
 		"", log.LstdFlags)
 	return srv, nil
@@ -325,11 +325,15 @@ func resolveWebDir() string {
 var webDir = resolveWebDir()
 
 func serveStatic(_ *Ctx, w http.ResponseWriter, name string) {
-	safe := filepath.Base(name) // no traversal
-	if safe == "index.html" || name == "index.html" {
-		safe = "index.html"
+	// Root-relative within web/, traversal-proof: Clean of a rooted path can
+	// never escape upward, so sub-folder assets (web/flags/*.svg — the country
+	// flag sprites) serve too. The old filepath.Base(name) flattened
+	// "flags/cn.svg" into "cn.svg" and 404'd every sub-folder asset.
+	rel := strings.TrimPrefix(filepath.ToSlash(filepath.Clean("/"+name)), "/")
+	if rel == "index.html" || name == "index.html" {
+		rel = "index.html"
 	}
-	if safe == "" || safe == "." || safe == string(filepath.Separator) {
+	if rel == "" || rel == "." || strings.HasPrefix(rel, "../") {
 		writeJSON(w, 404, map[string]any{"error": "not found"})
 		return
 	}
@@ -340,15 +344,15 @@ func serveStatic(_ *Ctx, w http.ResponseWriter, name string) {
 	// only refreshes assets it actually staged). Disk is consulted only when
 	// the file isn't embedded — that covers the MONITOR_WEB_DIR dev override
 	// and folders carrying extra files the build doesn't know about.
-	body, err := webFS.ReadFile("web/" + safe)
+	body, err := webFS.ReadFile("web/" + rel)
 	if err != nil {
-		body, err = os.ReadFile(filepath.Join(webDir, safe))
+		body, err = os.ReadFile(filepath.Join(webDir, filepath.FromSlash(rel)))
 	}
 	if err != nil {
 		// Tab/favicon requests hit /favicon.ico by convention; answer with
 		// the app icon so browser tabs (and the Windows/macOS app windows)
 		// show the AppScope shield.
-		if safe == "favicon.ico" {
+		if rel == "favicon.ico" {
 			if ico, ierr := os.ReadFile(filepath.Join(webDir, "icon.png")); ierr == nil {
 				w.Header().Set("Content-Type", "image/png")
 				w.Header().Set("Content-Length", strconv.Itoa(len(ico)))
@@ -369,7 +373,7 @@ func serveStatic(_ *Ctx, w http.ResponseWriter, name string) {
 		writeJSON(w, 404, map[string]any{"error": "not found"})
 		return
 	}
-	ct := contentTypes[strings.ToLower(filepath.Ext(safe))]
+	ct := contentTypes[strings.ToLower(filepath.Ext(rel))]
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
@@ -411,9 +415,37 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 	case "/api/events":
 		return apiEvents(ctx, r.URL.RawQuery)
 	case "/api/connections":
+		snap := ctx.Net.Snapshot()
+		conns, _ := snap["connections"].([]map[string]any)
+		enrichConnections(ctx, conns) // geo + first_seen; cache-only, never blocks
 		return map[string]any{
-			"connections": ctx.Net.Snapshot()["connections"],
-			"updated_at":  ctx.Net.UpdatedAt(),
+			"connections": conns,
+			"updated_at":  snap["updated_at"],
+		}, 200, nil
+	case "/api/destinations":
+		qs, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			return nil, 400, err
+		}
+		since, ok := ToFloat(qsValue(qs, "since", "0"))
+		if !ok {
+			return nil, 400, fmt.Errorf("invalid since")
+		}
+		countries, sites, apps, err := destinationSummary(ctx, since)
+		if err != nil {
+			return nil, 500, err
+		}
+		if countries == nil {
+			countries = []IPCountryRow{}
+		}
+		if sites == nil {
+			sites = []SiteGroup{}
+		}
+		if apps == nil {
+			apps = []AppGroup{}
+		}
+		return map[string]any{
+			"countries": countries, "sites": sites, "apps": apps,
 		}, 200, nil
 	case "/api/connection-history":
 		qs, err := url.ParseQuery(r.URL.RawQuery)
@@ -435,6 +467,7 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 		if records == nil {
 			records = []*ConnectionRecord{}
 		}
+		enrichConnectionRecords(ctx, records)
 		return map[string]any{"connections": records}, 200, nil
 	case "/api/traffic":
 		snap := ctx.Net.Snapshot()
@@ -474,6 +507,25 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 			rules = []*Block{}
 		}
 		_, grantable := grantScript("block")
+		ipolice := map[string]any{"available": false}
+		countryCIDRs := map[string]int{}
+		if ctx.Country != nil {
+			ipolice = ctx.Country.Status()
+		}
+		for _, r := range rules {
+			if r.Type == "country" || r.Type == "provider" {
+				countryCIDRs[r.Value] = ctx.Country.CachedCount(r.Value)
+				if countryCIDRs[r.Value] == 0 {
+					// data not in yet (IPolice's feed refresh races the
+					// first fetch): retry in the background, debounced
+					if r.Type == "country" {
+						go ctx.Country.EnsureBackground(r.Value)
+					} else {
+						go ctx.Country.EnsureProviderBackground(r.Value)
+					}
+				}
+			}
+		}
 		return map[string]any{
 			"rules": rules,
 			"enforcement": map[string]any{
@@ -481,7 +533,20 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 				"platform":        PlatformString(),
 				"grant_supported": grantable,
 			},
+			"ipolice":       ipolice,
+			"country_cidrs": countryCIDRs,
 		}, 200, nil
+	case "/api/ipolice/providers":
+		if ctx.Country == nil {
+			return map[string]any{"providers": []string{},
+				"error": "country source unavailable"}, 200, nil
+		}
+		names, err := ctx.Country.ProviderNames()
+		if err != nil {
+			return map[string]any{"providers": []string{},
+				"error": err.Error()}, 200, nil
+		}
+		return map[string]any{"providers": names}, 200, nil
 	case "/api/stream":
 		return nil, http.StatusSeeOther, nil
 	default:
@@ -874,8 +939,93 @@ func blockAdd(ctx *Ctx, enf *Enforcer, body map[string]any, w http.ResponseWrite
 			return
 		}
 		rule = &Block{Type: "app", Value: baseNameNoSlash(path), AppPath: &path}
+	case "country":
+		cc := NormalizeCC(strings.TrimSpace(StrOf(body["cc"])))
+		if cc == "" {
+			cc = NormalizeCC(ip) // tolerate the generic value field
+		}
+		if cc == "" {
+			writeJSON(w, 400, map[string]any{"error": "invalid country code " +
+				"(two-letter ISO 3166-1, e.g. CN)"})
+			return
+		}
+		// guardrail: blocking the machine's own country can cut the
+		// user's connectivity — require an explicit UI confirmation
+		if ctx.Country != nil {
+			if own := ctx.Country.OwnCountry(); own != "" && own == cc &&
+				!Truthy(body["confirm"]) {
+				writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("%s appears "+
+					"to be your own country — blocking it can cut your "+
+					"connectivity. Confirm the warning to proceed anyway.", cc)})
+				return
+			}
+		}
+		rule = &Block{Type: "country", Value: cc}
+	case "list":
+		path := strings.TrimSpace(StrOf(body["list"]))
+		if path == "" && strings.TrimSpace(StrOf(body["list_text"])) != "" {
+			// pasted list: persist it under data/blocklists/ so the rule
+			// keeps a real file (IPolice's file source reads it too)
+			text := strings.TrimSpace(StrOf(body["list_text"]))
+			label := SanitizeLabel(StrOf(body["name"]))
+			if label == "" {
+				label = "uploaded"
+			}
+			dir := filepath.Join(ctx.Cfg.DataDir(), "blocklists")
+			if err := os.MkdirAll(dir, 0o755); err == nil {
+				path = filepath.Join(dir, label+".txt")
+				if err := os.WriteFile(path, []byte(text+"\n"), 0o600); err != nil {
+					path = ""
+				}
+			}
+		}
+		if path == "" {
+			path = ip // tolerate the generic value field
+		}
+		if !filepath.IsAbs(path) {
+			writeJSON(w, 400, map[string]any{"error": "blocklist file path must " +
+				"be absolute (e.g. /path/to/blocklist.txt)"})
+			return
+		}
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
+			writeJSON(w, 400, map[string]any{"error": "cannot read the blocklist " +
+				"file: " + path})
+			return
+		}
+		cidrs, err := ParseIPFile(path)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": "cannot parse the " +
+				"blocklist file: " + err.Error()})
+			return
+		}
+		if len(cidrs) == 0 {
+			writeJSON(w, 400, map[string]any{"error": "no blockable public " +
+				"ranges in " + path + " — see sample-blocklist.txt in the " +
+				"config scripts folder for the format"})
+			return
+		}
+		label := SanitizeLabel(strings.TrimSuffix(filepath.Base(path),
+			filepath.Ext(path)))
+		if label == "" {
+			label = "blocklist"
+		}
+		countDetail := fmt.Sprintf("%d ranges parsed at add time", len(cidrs))
+		rule = &Block{Type: "list", Value: label, AppPath: &path,
+			Detail: &countDetail}
+	case "provider":
+		name := strings.TrimSpace(StrOf(body["provider"]))
+		if name == "" {
+			name = ip // tolerate the generic value field
+		}
+		if name == "" || len(name) > 80 {
+			writeJSON(w, 400, map[string]any{"error": "pick an IPolice list " +
+				"(provider) to block"})
+			return
+		}
+		rule = &Block{Type: "provider", Value: name}
 	default:
-		writeJSON(w, 400, map[string]any{"error": "type must be ip, connection or app"})
+		writeJSON(w, 400, map[string]any{"error": "type must be ip, connection, " +
+			"country, list, provider or app"})
 		return
 	}
 	appPath := rule.AppPath
@@ -887,6 +1037,11 @@ func blockAdd(ctx *Ctx, enf *Enforcer, body map[string]any, w http.ResponseWrite
 	rule.ID = bid
 	status, detail := enf.Apply(rule)
 	ctx.Store.UpdateBlockStatus(bid, status, detail)
+	if rule.Type == "country" {
+		// warm the CIDR cache while the rule may still be queued, so the
+		// panel shows the range count and the grant enforces instantly
+		go ctx.Country.EnsureBackground(rule.Value)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "id": bid, "status": status,
 		"detail": detail})
 }

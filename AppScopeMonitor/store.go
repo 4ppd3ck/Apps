@@ -58,6 +58,24 @@ CREATE TABLE IF NOT EXISTS connection_history (
 );
 CREATE INDEX IF NOT EXISTS idx_connection_history_last_seen
     ON connection_history (last_seen DESC);
+CREATE TABLE IF NOT EXISTS destination_traffic (
+    app TEXT NOT NULL,
+    remote_ip TEXT NOT NULL,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    PRIMARY KEY (app, remote_ip)
+);
+CREATE INDEX IF NOT EXISTS idx_destination_traffic_last_seen
+    ON destination_traffic (last_seen);
+CREATE TABLE IF NOT EXISTS app_traffic (
+    app TEXT PRIMARY KEY,
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -350,6 +368,12 @@ func (s *Store) DeleteBefore(cutoff float64) (int64, error) {
 		"DELETE FROM connection_history WHERE COALESCE(ended_at, last_seen) < ?", cutoff); err != nil {
 		return 0, err
 	}
+	if _, err := s.db.Exec("DELETE FROM destination_traffic WHERE last_seen < ?", cutoff); err != nil {
+		return 0, err
+	}
+	if _, err := s.db.Exec("DELETE FROM app_traffic WHERE last_seen < ?", cutoff); err != nil {
+		return 0, err
+	}
 	return affected, nil
 }
 
@@ -365,6 +389,13 @@ type ConnectionRecord struct {
 	Remote    string   `json:"remote"`
 	Scope     string   `json:"scope"`
 	State     string   `json:"state"`
+
+	// geo enrichment (filled from the geo cache when available)
+	GeoCC      string `json:"geo_cc,omitempty"`
+	GeoCountry string `json:"geo_country,omitempty"`
+	GeoCity    string `json:"geo_city,omitempty"`
+	GeoReverse string `json:"geo_reverse,omitempty"`
+	GeoOrg     string `json:"geo_org,omitempty"`
 }
 
 type connectionIdentity struct {
@@ -505,6 +536,217 @@ func (s *Store) QueryConnectionHistory(since float64, limit int) ([]*ConnectionR
 		records = append(records, &record)
 	}
 	return records, rows.Err()
+}
+
+// OpenConnectionStarts returns identity -> started_at for every open
+// connection-history record, so the live view can render how long each
+// endpoint has been connected (first seen -> now).
+func (s *Store) OpenConnectionStarts() (map[string]float64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		"SELECT identity, started_at FROM connection_history WHERE ended_at IS NULL")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var identity string
+		var started float64
+		if err := rows.Scan(&identity, &started); err != nil {
+			return nil, err
+		}
+		out[identity] = started
+	}
+	return out, rows.Err()
+}
+
+// DestinationDelta is one per-destination byte accumulation produced by the
+// connection poll: bytes seen on sockets belonging to (app, remote IP)
+// since the previous counter sample.
+type DestinationDelta struct {
+	App      string
+	RemoteIP string
+	BytesIn  int64
+	BytesOut int64
+}
+
+// DestinationTraffic is one persisted per-destination byte total. Bytes are
+// cumulative "since first recording" for the (app, IP) pair — per-socket
+// counters vanish when a socket closes, so the daemon accumulates deltas
+// into this table instead.
+type DestinationTraffic struct {
+	App       string  `json:"app"`
+	RemoteIP  string  `json:"remote_ip"`
+	BytesIn   int64   `json:"bytes_in"`
+	BytesOut  int64   `json:"bytes_out"`
+	FirstSeen float64 `json:"first_seen"`
+	LastSeen  float64 `json:"last_seen"`
+}
+
+// DestinationSpan aggregates one (app, remote endpoint) group of connection
+// lifecycles out of the history: how many connections were observed, for how
+// long in total, and how many are still open.
+type DestinationSpan struct {
+	App         string
+	Remote      string
+	Connections int64
+	Open        int64
+	Seconds     float64
+	LastSeen    float64
+}
+
+// AddDestinationBytes accumulates per-destination byte deltas (UPSERT).
+// first_seen is set on insert and never updated, so the row brackets the
+// whole recording window for that destination.
+func (s *Store) AddDestinationBytes(deltas []DestinationDelta, ts float64) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, d := range deltas {
+		if d.RemoteIP == "" {
+			continue
+		}
+		app := d.App
+		if app == "" {
+			app = "Unknown"
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO destination_traffic (app, remote_ip, bytes_in, bytes_out, first_seen, last_seen)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(app, remote_ip) DO UPDATE SET
+			     bytes_in = bytes_in + excluded.bytes_in,
+			     bytes_out = bytes_out + excluded.bytes_out,
+			     last_seen = excluded.last_seen`,
+			app, d.RemoteIP, d.BytesIn, d.BytesOut, ts, ts); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DestinationBytes returns per-destination byte totals touched since ts.
+func (s *Store) DestinationBytes(since float64) ([]DestinationTraffic, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT app, remote_ip, bytes_in, bytes_out, first_seen, last_seen
+		 FROM destination_traffic WHERE last_seen >= ?`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DestinationTraffic
+	for rows.Next() {
+		var t DestinationTraffic
+		var app, ip sql.NullString
+		if err := rows.Scan(&app, &ip, &t.BytesIn, &t.BytesOut, &t.FirstSeen, &t.LastSeen); err != nil {
+			return nil, err
+		}
+		t.App, t.RemoteIP = app.String, ip.String
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// AddAppTraffic accumulates per-app byte deltas measured at the process
+// level (nettop per-process totals, TCP+UDP). Unlike destination_traffic,
+// these totals don't depend on per-socket attribution, so they capture
+// QUIC/UDP traffic that has no observable remote endpoint.
+func (s *Store) AddAppTraffic(deltas []DestinationDelta, ts float64) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, d := range deltas {
+		if d.App == "" {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO app_traffic (app, bytes_in, bytes_out, first_seen, last_seen)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(app) DO UPDATE SET
+			     bytes_in = bytes_in + excluded.bytes_in,
+			     bytes_out = bytes_out + excluded.bytes_out,
+			     last_seen = excluded.last_seen`,
+			d.App, d.BytesIn, d.BytesOut, ts, ts); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// AppTraffic returns per-app process-level byte totals touched since ts.
+func (s *Store) AppTraffic(since float64) ([]DestinationTraffic, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT app, bytes_in, bytes_out, first_seen, last_seen
+		 FROM app_traffic WHERE last_seen >= ?`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DestinationTraffic
+	for rows.Next() {
+		var t DestinationTraffic
+		var app sql.NullString
+		if err := rows.Scan(&app, &t.BytesIn, &t.BytesOut, &t.FirstSeen, &t.LastSeen); err != nil {
+			return nil, err
+		}
+		t.App = app.String
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DestinationSpans groups external connection lifecycles by (app, remote
+// endpoint). Seconds sums each lifecycle's duration (started_at ->
+// ended/last seen); Open counts lifecycles not yet closed.
+func (s *Store) DestinationSpans(since float64) ([]DestinationSpan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT app, remote, COUNT(*),
+		        SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END),
+		        SUM(COALESCE(ended_at, last_seen) - started_at),
+		        MAX(last_seen)
+		 FROM connection_history
+		 WHERE scope = 'external' AND last_seen >= ?
+		 GROUP BY app, remote`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DestinationSpan
+	for rows.Next() {
+		var span DestinationSpan
+		var app, remote sql.NullString
+		if err := rows.Scan(&app, &remote, &span.Connections,
+			&span.Open, &span.Seconds, &span.LastSeen); err != nil {
+			return nil, err
+		}
+		span.App, span.Remote = app.String, remote.String
+		if span.Seconds < 0 {
+			span.Seconds = 0
+		}
+		out = append(out, span)
+	}
+	return out, rows.Err()
 }
 
 func nullableText(value any) string {

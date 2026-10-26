@@ -102,9 +102,20 @@ while ($true) {
     100 * $totalDelta / ([math]::Max(1, $cores) * 1.0)), 1)
   if ($null -ne $cpuFromLoad -and $totalDelta -le 0) { $cpu = $cpuFromLoad }
   $apps = @($apps | Sort-Object { $_.cpu } -Descending | Select-Object -First 8)
+  # thermal zone (tenths of Kelvin -> °C); admin-only on many machines,
+  # so a failure just leaves $thermal null and the payload omits it
+  $thermal = $null
+  try {
+    $tz = Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop |
+            Select-Object -First 1
+    if ($tz -and $tz.CurrentTemperature -gt 0) {
+      $thermal = [math]::Round([double]$tz.CurrentTemperature / 10 - 273.15, 1)
+    }
+  } catch { $thermal = $null }
   @{percent = $percent; state = $state; cpu = $cpu; diskpct = $diskpct;
     diskused = $diskused; disktotal = $disktotal; mempct = $mempct;
     memused = $memused; memtotal = $memtotal; vols = $vols;
+    thermal = $thermal;
     apps = @($apps)} |
     ConvertTo-Json -Depth 3 -Compress | Write-Output
   [Console]::Out.Flush()
@@ -176,6 +187,12 @@ func (c *BatteryCollector) normalizeWindows(info map[string]any) {
 		apps = jsonList(info["apps"])
 	}
 	info["top_apps"] = apps
+	// thermal: WMI reports one zone temperature in °C (null when denied)
+	if temp, ok := monitor.ToFloat(info["thermal"]); ok && temp > 0 && temp < 150 {
+		info["thermal"] = finalizeThermal(map[string]any{"cpu_temp_c": temp})
+	} else {
+		delete(info, "thermal")
+	}
 }
 
 // jsonList mirrors Python's _as_list-ish handling of PowerShell arrays that

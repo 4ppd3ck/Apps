@@ -55,7 +55,7 @@ build_one() {
   echo "== ${goos}/${goarch}"
   env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
     sh -c "if [ '$goarch' = 'arm' ]; then export GOARM=7; fi; \
-           go build -trimpath -ldflags '-s -w' -o '$out' ."
+           go build -trimpath -ldflags '-s -w' -o '$out' ./cmd/monitor"
   if [ "$DIST" = "1" ]; then
     mkdir -p "dist/${goos}-${goarch}"
     cp "$out" "dist/${goos}-${goarch}/"

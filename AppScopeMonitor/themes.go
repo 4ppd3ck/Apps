@@ -30,6 +30,15 @@ var builtinThemes = []Theme{
 		},
 	},
 	{
+		ID: "light", Name: "Light", Description: "A light palette for bright rooms.",
+		Colors: map[string]string{
+			"--bg": "#f2f4f8", "--panel": "#ffffff", "--panel2": "#eef1f6",
+			"--line": "#d8dde7", "--text": "#1c2430", "--dim": "#5a6577",
+			"--accent": "#0e6fd8", "--green": "#0e7a45", "--red": "#b3261e",
+			"--amber": "#8a5800", "--purple": "#6d28d9", "--cyan": "#0e7490",
+		},
+	},
+	{
 		ID: "red", Name: "Red", Description: "A dark palette with warm red surfaces and accents.",
 		Colors: map[string]string{
 			"--bg": "#130b0d", "--panel": "#1e1216", "--panel2": "#29171c",

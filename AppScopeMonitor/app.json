@@ -7,11 +7,14 @@
   "category": "Tools",
   "port": 8765,
   "urlPath": "/",
-  "network": false,
+  "network": true,
   "binary": "monitor",
   "args": [
     "--port",
     "{port}"
   ],
-  "version": "1.0"
+  "env": {
+    "IPOLICE_URL": "http://127.0.0.1:9106"
+  },
+  "version": "1.1"
 }

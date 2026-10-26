@@ -6,6 +6,8 @@ var tableVisibilityDefaults = map[string]bool{
 	"traffic-panel":            true,
 	"traffic-totals-panel":     true,
 	"live-connections-panel":   true,
+	"geo-countries-panel":      true,
+	"sites-panel":              true,
 	"connections-panel":        true,
 	"top-apps-panel":           true,
 	"connection-summary-panel": true,
@@ -18,7 +20,8 @@ var tableVisibilityDefaults = map[string]bool{
 }
 
 var dashboardLayoutOrder = []string{
-	"traffic-panel", "live-connections-panel", "traffic-totals-panel",
+	"traffic-totals-panel", "traffic-panel", "live-connections-panel",
+	"geo-countries-panel", "sites-panel",
 	"connections-panel", "top-apps-panel", "connection-summary-panel",
 	"battery-panel", "privacy-panel", "files-panel", "network-panel",
 	"system-panel", "blocks-panel",
@@ -27,14 +30,16 @@ var dashboardLayoutOrder = []string{
 func dashboardLayout(cfg *Config) map[string]any {
 	order := append([]string(nil), dashboardLayoutOrder...)
 	widths := map[string]any{}
+	heights := map[string]any{"connection-summary-panel": 461}
 	panelLocks := map[string]any{}
+	collapsed := map[string]any{}
 	for _, panel := range dashboardLayoutOrder {
 		widths[panel] = "full"
 		panelLocks[panel] = false
+		collapsed[panel] = false
 	}
 	widths["top-apps-panel"] = "half"
 	widths["connection-summary-panel"] = "half"
-	heights := map[string]any{}
 	locked := false
 	if saved, ok := cfg.Data["dashboard_layout"].(map[string]any); ok {
 		var savedOrder []any
@@ -94,13 +99,22 @@ func dashboardLayout(cfg *Config) map[string]any {
 				}
 			}
 		}
+		if savedCollapsed, ok := saved["collapsed"].(map[string]any); ok {
+			for id, value := range savedCollapsed {
+				if _, valid := tableVisibilityDefaults[id]; valid {
+					if isCollapsed, ok := value.(bool); ok {
+						collapsed[id] = isCollapsed
+					}
+				}
+			}
+		}
 		if value, ok := saved["locked"].(bool); ok {
 			locked = value
 		}
 	}
 	return map[string]any{
 		"order": order, "widths": widths, "heights": heights,
-		"locked": locked, "panel_locks": panelLocks,
+		"locked": locked, "panel_locks": panelLocks, "collapsed": collapsed,
 	}
 }
 
@@ -137,7 +151,7 @@ func saveDashboardLayout(cfg *Config, value any) (map[string]any, error) {
 		}
 		layout["order"] = order
 	}
-	for _, key := range []string{"widths", "heights", "panel_locks"} {
+	for _, key := range []string{"widths", "heights", "panel_locks", "collapsed"} {
 		raw, exists := input[key]
 		if !exists {
 			continue
@@ -164,12 +178,12 @@ func saveDashboardLayout(cfg *Config, value any) (map[string]any, error) {
 					return nil, fmt.Errorf("invalid height for %q", id)
 				}
 				current[id] = height
-			case "panel_locks":
-				isLocked, ok := item.(bool)
+			case "panel_locks", "collapsed":
+				flag, ok := item.(bool)
 				if !ok {
-					return nil, fmt.Errorf("invalid lock state for %q", id)
+					return nil, fmt.Errorf("invalid %s state for %q", key, id)
 				}
-				current[id] = isLocked
+				current[id] = flag
 			}
 		}
 	}

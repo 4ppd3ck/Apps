@@ -48,7 +48,8 @@ if [ "${1:-}" = "--revoke" ]; then
     sudo rm -f "${PFCONF}.appscope.bak"
     sudo /sbin/pfctl -f "$PFCONF" >/dev/null 2>&1 || true
   fi
-  sudo rm -rf /var/db/appscope-block "$ANCHOR" 2>/dev/null || true
+  # "$ANCHOR.cidrs" (the country pf table's file) dies with the anchor
+  sudo rm -rf /var/db/appscope-block "$ANCHOR" "$ANCHOR.cidrs" 2>/dev/null || true
   echo "Revoked: applied rules lifted; helper, sudoers entry and pf anchor removed."
   exit 0
 fi

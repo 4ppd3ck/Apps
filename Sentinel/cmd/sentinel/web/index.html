@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel · AppDeck</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='88'>🚨</text></svg>">
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">🚨</span>
+    <div>
+      <h1>Sentinel</h1>
+      <div class="sub">host-compromise watchdog · <span id="platform">…</span></div>
+    </div>
+  </div>
+  <div class="topstate">
+    <span id="monitorState" class="pill">monitor: …</span>
+    <span id="intelState" class="pill" hidden>ipolice: …</span>
+    <span id="scanState" class="pill">…</span>
+  </div>
+  <div class="tabsrow">
+    <nav class="tabs" aria-label="Dashboard views">
+      <button id="dashboardTab" class="btn tab selected" aria-selected="true">Watchdog</button>
+      <button id="sensitiveTab" class="btn tab" aria-selected="false">Live Access</button>
+      <button id="permissionsTab" class="btn tab" aria-selected="false">App Access</button>
+      <button id="firewallTab" class="btn tab" aria-selected="false">Firewall Rules</button>
+    <button id="exclusionsTab" class="btn tab" aria-selected="false">Exclusions</button>
+    </nav>
+    <div class="actions">
+      <button id="exportBtn" class="btn ghost">⇩ Export</button>
+      <button id="themeBtn" class="btn ghost" title="Toggle theme">🌙</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="dashboardView">
+    <section class="tiles" id="tiles"></section>
+
+    <div class="cols">
+      <section class="panel alerts">
+        <div class="panel-head">
+          <div class="filters">
+            <select id="alertApp" aria-label="Filter alerts by app">
+              <option value="">all apps</option>
+            </select>
+            <select id="alertCheck" aria-label="Filter alerts by check">
+              <option value="">all checks</option>
+            </select>
+            <select id="sevFilter" aria-label="Filter by severity">
+              <option value="">all severities</option>
+              <option value="critical">critical+</option>
+              <option value="high">high+</option>
+              <option value="medium">medium+</option>
+              <option value="low">low+</option>
+              <option value="info">info</option>
+            </select>
+            <select id="alertState" aria-label="Filter by silencing state">
+              <option value="">silencing: all</option>
+              <option value="notify">will notify</option>
+              <option value="autoack">auto-ack on</option>
+              <option value="excluded">notifications off</option>
+            </select>
+            <label class="chk"><input type="checkbox" id="hideAcked" checked> hide acked</label>
+          </div>
+          <div class="btnrow">
+            <button id="ackAll" class="btn ghost small">Ack all</button>
+            <button id="delAcked" class="btn ghost small">🗑 Delete acked</button>
+          </div>
+        </div>
+        <div id="alertList" class="alert-list"><p class="muted">loading…</p></div>
+      </section>
+
+      <section class="side">
+        <section class="panel">
+          <h2>Checks</h2>
+          <div id="checkList" class="check-list"><p class="muted">loading…</p></div>
+        </section>
+
+        <section class="panel">
+          <h2>Current findings</h2>
+          <div id="findingList" class="finding-list"><p class="muted">loading…</p></div>
+        </section>
+
+        <section class="panel">
+          <h2>AppScope Monitor</h2>
+          <div id="monitorPanel" class="monitor"><p class="muted">loading…</p></div>
+        </section>
+
+        <section class="panel">
+          <h2>Baseline &amp; rules</h2>
+          <div class="btnrow">
+            <button id="resetBase" class="btn ghost small">Reset baseline (re-learn)</button>
+            <button id="editRules" class="btn ghost small">Edit rules</button>
+          </div>
+          <pre id="baseline" class="baseline mono small" hidden></pre>
+        </section>
+      </section>
+    </div>
+  </div>
+
+  <section id="permissionsView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>App Access</h2>
+        <p class="muted small">Reported grants and sandbox capabilities for installed apps. An unknown or missing entry is not the same as denied. Apps start collapsed; click one to expand its grants.</p>
+      </div>
+      <div class="btnrow">
+        <button class="btn ghost small guardrail-toggle" aria-pressed="true"
+          title="When on, Sentinel refuses remediation actions against Apple-owned launchd items, macOS system firewall entries, and com.apple.* TCC grants. Turn off only if you know exactly what you are doing.">🛡 Guardrails on</button>
+        <button id="refreshPermissions" class="btn ghost small">⟳ Refresh</button>
+      </div>
+    </div>
+    <div id="permissionSummary" class="permission-summary"></div>
+    <div class="permission-toolbar">
+      <input id="permissionSearch" type="search" placeholder="Search apps, permissions, or paths" aria-label="Search app permissions">
+      <select id="permissionCategory" aria-label="Filter by permission category">
+        <option value="">All categories</option>
+      </select>
+      <select id="permissionStatus" aria-label="Filter by access status">
+        <option value="">All access states</option>
+        <option value="granted">Granted</option>
+        <option value="limited">Limited / restricted</option>
+        <option value="denied">Denied</option>
+        <option value="declared">Declared capability</option>
+        <option value="leftover">Leftover</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <select id="permissionSource" aria-label="Filter by permission source">
+        <option value="">All sources</option>
+      </select>
+      <button id="togglePermissionGroups" class="btn ghost small" type="button" disabled>Expand all</button>
+      <button id="clearPermissionFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="permissionWarnings" class="permission-warnings"></div>
+    <div id="permissionList" class="permission-list"><p class="muted">Select App Access to load inventory.</p></div>
+    <p class="removal-note muted small">
+      <strong>What can actually be deleted here:</strong> only rows with an
+      <strong>Unload &amp; delete</strong> or <strong>Delete</strong> button — third-party
+      launchd jobs in /Library/LaunchDaemons and /Library/LaunchAgents, and helper binaries in
+      /Library/PrivilegedHelperTools. Those locations are user-writable with administrator
+      approval. Items without a button (or whose Remove fails with a system-protection error)
+      are protected by macOS and cannot be removed from any app while System Integrity
+      Protection is enabled.
+      <br>
+      <strong>Unload &amp; delete</strong> (orange) is for launchd jobs — LaunchDaemons and
+      LaunchAgents: it first unloads the job from launchd (stopping the running process so it
+      does not just respawn) and then deletes the plist file.
+      <br>
+      <strong>Delete</strong> (orange) is for bare helper binaries in
+      /Library/PrivilegedHelperTools: those are plain executables, not launchd jobs, so there is
+      nothing to unload — the file is removed directly. If a daemon still points at a deleted
+      helper, remove the daemon too, or launchd will simply fail to start it.
+      <br>
+      <strong>Remove</strong> (red) deletes a user TCC grant row after saving a backup. Sentinel
+      must have Full Disk Access to enable it. System-database TCC rows are SIP-protected:
+      even root cannot modify that file, so system grants cannot be removed from here —
+      for those, <code>sudo tccutil reset</code> is Apple's supported route.
+      <br>
+      <strong>tccutil caveat:</strong> <code>tccutil reset &lt;Service&gt; &lt;bundle-id&gt;</code>
+      only works for apps LaunchServices still knows (it fails with error -10814 for
+      uninstalled/leftover entries), and <code>tccutil reset &lt;Service&gt;</code> without a
+      bundle id cannot target one app — it resets <em>all</em> apps' preferences for that
+      service (every app re-prompts on next use).
+      <br>
+      Sentinel is configured for AppDeck's Elevated launch so its own app identity can receive
+      that access. Every action here also exists as a terminal command — see Firewall Rules for
+      firewall-specific commands.
+    </p>
+  </section>
+
+  <section id="sensitiveView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>Live Access</h2>
+        <p class="muted small">Apps holding or attempting access to the microphone, camera, password-manager data or sensitive files right now — Sentinel's own per-OS scan plus AppScope Monitor's privacy events (camera/mic use the local scan can't see, e.g. without Full Disk Access), refreshed every fast tick. Apps start collapsed; click one to expand its accesses. Each expanded row has a <strong>popup on/off</strong> button that silences alerts for that one app+file pair only — the app's other files still alert. Recently-used rows (TCC, consent store, monitor events) carry a timestamp instead of a "live" badge. The summary tiles filter the list; "live right now" toggles the live-only filter.</p>
+      </div>
+      <div class="btnrow">
+        <button id="refreshSensitive" class="btn ghost small">⟳ Refresh</button>
+      </div>
+    </div>
+    <div id="sensitiveSummary" class="permission-summary"></div>
+    <div class="permission-toolbar">
+      <input id="sensitiveSearch" type="search" placeholder="Search apps, paths, or devices" aria-label="Search live access">
+      <select id="sensitiveApp" aria-label="Filter by app">
+        <option value="">All apps</option>
+      </select>
+      <select id="sensitiveKind" aria-label="Filter by access kind">
+        <option value="">All kinds</option>
+        <option value="camera">Camera</option>
+        <option value="microphone">Microphone</option>
+        <option value="password_manager">Password managers</option>
+        <option value="sensitive_file">Sensitive files</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="sensitiveLiveOnly"> live only</label>
+      <button id="toggleSensitiveGroups" class="btn ghost small" type="button" disabled>Expand all</button>
+      <button id="clearSensitiveFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="sensitiveNotes" class="permission-warnings"></div>
+    <div id="sensitiveList" class="permission-list"><p class="muted">Select Live Access to scan.</p></div>
+    <p class="removal-note muted small">
+      <strong>What this shows:</strong> every app currently holding a capture device
+      (/dev/video*, ALSA/OSS audio), a password-manager store (1Password, Bitwarden,
+      KeePass, pass, Kwallet, keyrings…), or an open file under your
+      <code>sensitive_paths</code> rules — plus per-app camera/mic recent use from macOS
+      TCC timestamps and the Windows CapabilityAccessManager consent store (including
+      apps that keep asking while Windows answers "Deny").
+      <br>
+      <strong>Who gets alerted:</strong> camera/mic use (higher when the same app holds a
+      public outbound connection), password-manager data read by anything outside the
+      manager family, and sensitive files held alongside a public connection. Browsers and
+      updaters (<code>quiet_apps</code>) and system indexers/backup services are listed
+      but not alerted. Windows has no supported per-app open-file enumeration —
+      file/password-manager rows there need AppScope Monitor file events.
+    </p>
+  </section>
+
+  <section id="exclusionsView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>Exclusions</h2>
+        <p class="muted small">Per-app silences. <strong>Watchdog</strong> stops that app's alerts and notifications entirely (they are never recorded); <strong>Auto-ack</strong> keeps recording the app's alerts (history + hit counts) but lands them pre-acked — no popup, hidden by "hide acked"; <strong>Live Access</strong> and <strong>App Access</strong> hide the app from those tabs. Matching is case-insensitive by name, so "zcode" also covers "ZCode Helper". Apps with unacked watchdog alerts are listed first with a <strong>watchdog firing</strong> badge — each alert row also has <strong>🔕 exclude</strong> and <strong>🤫 auto-ack</strong> buttons that silence its app in one click. Below an app you'll also find its <strong>per-target</strong> exclusions (one file of that app only — set from Live Access's popup button). Rows for apps no current scan sees — probably uninstalled — are hidden from this list (their exclusions keep working; the row returns if the app shows up in a scan again); the <strong>Not seen (uninstalled)</strong> state filter reveals them for review, and <strong>Remove not-installed</strong> purges them for good.</p>
+      </div>
+      <div class="btnrow">
+        <button id="refreshExclusions" class="btn ghost small">⟳ Refresh</button>
+      </div>
+    </div>
+    <div class="permission-toolbar">
+      <input id="exclusionSearch" type="search" placeholder="Search apps" aria-label="Search exclusion apps">
+      <select id="exclusionScope" aria-label="Filter by exclusion scope">
+        <option value="">All scopes</option>
+        <option value="watchdog">Watchdog on</option>
+        <option value="auto_ack">Auto-ack on</option>
+        <option value="live">Live Access on</option>
+        <option value="app_access">App Access on</option>
+        <option value="none">Nothing ticked</option>
+      </select>
+      <select id="exclusionState" aria-label="Filter by app state">
+        <option value="">All states</option>
+        <option value="firing">Watchdog firing</option>
+        <option value="excluded">Excluded</option>
+        <option value="unexcluded">Not excluded</option>
+        <option value="notseen">Not seen (uninstalled)</option>
+      </select>
+      <button id="clearExclusionFilters" class="btn ghost small" type="button" disabled>Clear filters</button>
+      <button id="exclusionCleanup" class="btn ghost small" type="button" disabled title="No exclusion rows for apps that current scans can't see.">🗑 Remove not-installed</button>
+    </div>
+    <div id="exclusionList" class="permission-list"><p class="muted">Select Exclusions to load apps.</p></div>
+  </section>
+
+  <section id="firewallView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>Firewall Rules</h2>
+        <p class="muted small">Firewall profiles, app rules, and their current status. Available actions depend on the platform.</p>
+      </div>
+      <div class="btnrow">
+        <button class="btn ghost small guardrail-toggle" aria-pressed="true"
+          title="When on, Sentinel refuses firewall changes for macOS system software (/System, /usr, /bin, /sbin, /private/var/db). Turn off only if you know exactly what you are doing.">🛡 Guardrails on</button>
+        <button id="refreshFirewall" class="btn ghost small">⟳ Refresh</button>
+      </div>
+    </div>
+    <div id="firewallWarnings" class="permission-warnings"></div>
+    <div class="permission-toolbar">
+      <input id="firewallSearch" type="search" placeholder="Search apps, rules, or paths" aria-label="Search firewall rules">
+      <select id="firewallStatus" aria-label="Filter by firewall status">
+        <option value="">All statuses</option>
+      </select>
+      <select id="firewallSource" aria-label="Filter by firewall source">
+        <option value="">All sources</option>
+      </select>
+      <select id="firewallDirection" aria-label="Filter by direction">
+        <option value="">All directions</option>
+        <option value="in">Incoming</option>
+        <option value="out">Outgoing</option>
+      </select>
+      <button id="clearFirewallFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="firewallList" class="permission-list"><p class="muted">Select Firewall Rules to load inventory.</p></div>
+    <details id="removalHelp" class="removal-help">
+      <summary>Can't manage from here, or prefer the terminal? Manual commands</summary>
+      <pre id="removalHelpBody" class="mono"></pre>
+    </details>
+  </section>
+</main>
+
+<dialog id="rulesDlg">
+  <h2>rules.user.json</h2>
+  <p class="muted small">Overlay on defaults — omit fields to keep them. See README for the schema.</p>
+  <textarea id="rulesText" class="mono" rows="22" spellcheck="false"></textarea>
+  <div class="btnrow">
+    <button id="rulesSave" class="btn">Save</button>
+    <button id="rulesClose" class="btn ghost">Close</button>
+  </div>
+</dialog>
+
+<footer>
+  <span class="muted">Sentinel detects &amp; alerts — it does not block. Pair with AppScope Monitor's enforcement for that.</span>
+</footer>
+
+<script src="/web/app.js"></script>
+</body>
+</html>
