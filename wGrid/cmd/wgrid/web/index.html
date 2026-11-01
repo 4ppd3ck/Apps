@@ -74,8 +74,8 @@
 <div class="sub">Known-IP intelligence — publishes provider network ranges to wHawk over loopback. wGrid is the only part of the pair that talks to the internet.</div>
 
 <div class="row">
-  <span id="peerSentinel" class="pill" title="wHawk — the consumer of this intel"><span class="dot"></span><span class="lbl">wHawk</span></span>
-  <span id="peerDescale" class="pill" title="wPurge — installed-apps inventory"><span class="dot"></span><span class="lbl">wPurge</span></span>
+  <span id="peerWhawk" class="pill" title="wHawk — the consumer of this intel"><span class="dot"></span><span class="lbl">wHawk</span></span>
+  <span id="peerWpurge" class="pill" title="wPurge — installed-apps inventory"><span class="dot"></span><span class="lbl">wPurge</span></span>
   <button id="theme" title="Appearance: auto → light → dark">🌓 auto</button>
   <button id="refresh">⟳ Refresh now</button>
   <span id="meta" class="muted">loading…</span>
@@ -356,8 +356,8 @@ function setPeer(id, p) {
 async function loadWired() {
   try {
     const r = await (await fetch("/api/wired")).json();
-    setPeer("#peerSentinel", r.sentinel);
-    setPeer("#peerDescale", r.descale);
+    setPeer("#peerWhawk", r.whawk);
+    setPeer("#peerWpurge", r.wpurge);
   } catch (e) { /* pills stay red until the API answers */ }
 }
 setInterval(loadWired, 30000);
