@@ -1,0 +1,6 @@
+network,owner,note
+# comment rows (first cell starts with #) are skipped entirely
+192.0.2.0/24,TEST-NET-1,documentation range
+198.51.100.7,TEST-NET-2,bare IPs are normalised to /32
+203.0.113.128/25,TEST-NET-3,plain CIDR
+2001:db8:1::/48,TEST-NET-4,IPv6 works too

@@ -1,0 +1,21 @@
+{
+  "apiVersion": 1,
+  "id": "whawk",
+  "name": "wHawk",
+  "icon": "🚨",
+  "desc": "Host watchdog — alerts on intrusions and data theft",
+  "category": "Security",
+  "port": 24509,
+  "urlPath": "/",
+  "network": false,
+  "binary": "whawk",
+  "args": [
+    "--port",
+    "{port}"
+  ],
+  "version": "1.0",
+  "env": {
+    "WTOWER_URL": "http://127.0.0.1:8765",
+    "WGRID_URL": "http://127.0.0.1:24504"
+  }
+}

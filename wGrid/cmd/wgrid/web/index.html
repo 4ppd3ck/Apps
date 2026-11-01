@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wGrid 🚔 · known-IP intelligence</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fcfcfd; --fg: #1b1d21; --muted: rgba(27,29,33,.55);
+    --border: rgba(27,29,33,.16); --card: rgba(27,29,33,.05);
+    --accent: #2f6fbf; --ok: #1f8a4c; --err: #c0392b;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #15171b; --fg: #e9eaec; --muted: rgba(233,234,236,.55);
+    --border: rgba(233,234,236,.18); --card: rgba(233,234,236,.07);
+    --accent: #6aa9e9; --ok: #4cc07d; --err: #e07063;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #15171b; --fg: #e9eaec; --muted: rgba(233,234,236,.55);
+      --border: rgba(233,234,236,.18); --card: rgba(233,234,236,.07);
+      --accent: #6aa9e9; --ok: #4cc07d; --err: #e07063;
+    }
+  }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif;
+         max-width: 880px; margin: 32px auto; padding: 0 16px; }
+  h1 { font-size: 22px; display: flex; align-items: center; gap: 12px; }
+  h2 { font-size: 16px; margin: 30px 0 6px; }
+  .sub { opacity: .7; font-size: 13px; margin-bottom: 20px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
+  td.loc { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tag { font-size: 11px; border: 1px solid var(--border); border-radius: 999px;
+         padding: 2px 9px; white-space: nowrap; }
+  .ok { color: var(--ok); border-color: var(--ok); }
+  .err { color: var(--err); border-color: var(--err); }
+  button { font: inherit; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--border); background: transparent; color: var(--fg); }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { border: none; font-size: 12px; opacity: .8; padding: 2px 6px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .lookup { display: flex; gap: 8px; margin: 16px 0; }
+  input, select { font: inherit; padding: 6px 10px; border-radius: 8px;
+          border: 1px solid var(--border); background: transparent; color: var(--fg);
+          min-width: 240px; }
+  .muted { opacity: .7; font-size: 12px; }
+  pre { background: var(--card); padding: 10px; border-radius: 8px;
+        font-size: 12px; overflow-x: auto; }
+  .grid { display: grid; grid-template-columns: 150px minmax(240px, 420px);
+          gap: 10px 12px; align-items: center; margin: 14px 0; }
+  .grid label { font-size: 12px; opacity: .75; }
+  .msg { border: 1px solid var(--err); color: var(--err); border-radius: 8px;
+         padding: 8px 12px; margin: 10px 0; font-size: 13px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+          border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; }
+  .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); }
+  .pill.up .dot { background: var(--ok); }
+  .pill.up { color: var(--ok); border-color: var(--ok); }
+  .pill.down { color: var(--err); border-color: var(--err); }
+  h2 { display: flex; align-items: center; gap: 10px; }
+  h2 .muted { font-weight: normal; font-size: 12px; }
+  .hidden { display: none; }
+  details { margin: 10px 0; }
+  summary { cursor: pointer; font-size: 13px; opacity: .85; }
+</style>
+</head>
+<body>
+<h1>🚔 wGrid</h1>
+<div class="sub">Known-IP intelligence — publishes provider network ranges to wHawk over loopback. wGrid is the only part of the pair that talks to the internet.</div>
+
+<div class="row">
+  <span id="peerSentinel" class="pill" title="wHawk — the consumer of this intel"><span class="dot"></span><span class="lbl">wHawk</span></span>
+  <span id="peerDescale" class="pill" title="wPurge — installed-apps inventory"><span class="dot"></span><span class="lbl">wPurge</span></span>
+  <button id="theme" title="Appearance: auto → light → dark">🌓 auto</button>
+  <button id="refresh">⟳ Refresh now</button>
+  <span id="meta" class="muted">loading…</span>
+</div>
+
+<h2>Providers</h2>
+<table>
+  <thead><tr><th>Provider</th><th>Networks</th><th>Origin</th><th>Updated</th><th>Status</th></tr></thead>
+  <tbody id="provRows"><tr><td colspan="5" class="muted">loading…</td></tr></tbody>
+</table>
+
+<h2>Look up an IP</h2>
+<div class="lookup">
+  <input id="ip" placeholder="Look up an IP, e.g. 8.8.8.8">
+  <button id="lookupBtn">Look up</button>
+  <span id="lookupOut" class="muted"></span>
+</div>
+
+<h2>Databases</h2>
+<p class="muted">Sources feeding the provider table. Sources sharing a <b>name</b> merge into one
+provider — e.g. a YouTube CSV and the Google feed both named “Google &amp; YouTube” combine
+their networks. Deleting a source removes it from the config; if it was the provider’s last
+source, its data is deactivated immediately. Built-in defaults can be deleted too and stay
+deleted across restarts (re-adding them restores them). Sample feeds live in
+<code>samples/</code> — see <code>samples/GUIDE.md</code>.</p>
+
+<details>
+  <summary>Add a database</summary>
+  <form id="addForm" class="grid">
+    <label for="f_name">Provider name</label>
+    <input id="f_name" placeholder="e.g. YouTube (same name merges with an existing provider)">
+    <label for="f_type">Type</label>
+    <select id="f_type">
+      <option value="http">http(s) feed</option>
+      <option value="git">git repository</option>
+      <option value="file">local file</option>
+    </select>
+    <label id="l_url" for="f_url">Feed URL</label>
+    <input id="f_url" placeholder="https://…/ranges.json">
+    <label id="l_path" for="f_path">File inside repo</label>
+    <input id="f_path" placeholder="lists/ranges.txt">
+    <label id="l_branch" for="f_branch">Branch (optional)</label>
+    <input id="f_branch" placeholder="main">
+    <label for="f_format">Format</label>
+    <select id="f_format">
+      <option value="text">text — one CIDR per line</option>
+      <option value="goog">goog — Google ipranges JSON</option>
+      <option value="aws">aws — AWS ip-ranges JSON</option>
+      <option value="csv">csv — network column</option>
+      <option value="ms365">ms365 — Microsoft 365 endpoints</option>
+      <option value="github-meta">github-meta — api.github.com/meta</option>
+      <option value="fastly">fastly — public-ip-list</option>
+    </select>
+    <label id="l_col" for="f_col">CSV column</label>
+    <input id="f_col" placeholder="header name (network) or 1-based index">
+    <span></span>
+    <button type="submit">Add &amp; download</button>
+  </form>
+  <div id="addMsg" class="muted"></div>
+</details>
+
+<table>
+  <thead><tr><th>Name</th><th>Type</th><th>Format</th><th>Location</th><th>Status</th><th></th></tr></thead>
+  <tbody id="srcRows"><tr><td colspan="6" class="muted">loading…</td></tr></tbody>
+</table>
+<div id="srcMsg" class="muted"></div>
+
+<h2>Installed apps <span class="muted">· via wPurge</span></h2>
+<p class="muted">Scans the apps wPurge reports installed and matches them against a catalog of
+official vendor IP databases. Install one to feed its ranges to wHawk; unmatched apps have no
+known official database.</p>
+<div class="row">
+  <button id="scanApps">🔎 Scan installed apps</button>
+  <span id="appsMeta" class="muted"></span>
+</div>
+<div id="appsErr" class="msg hidden"></div>
+<table>
+  <thead><tr><th>Vendor</th><th>Installed apps</th><th>Database</th><th>Status</th><th></th></tr></thead>
+  <tbody id="appsRows"><tr><td colspan="5" class="muted">not scanned yet</td></tr></tbody>
+</table>
+<p id="unmatched" class="muted"></p>
+
+<div class="muted" style="margin-top:28px">
+  Feeds are configured here or in <code>data/sources.json</code> (types: http, git, file ·
+  formats: text, goog, aws, csv, ms365, github-meta, fastly). Seeds are bundled snapshots
+  (Apple, Meta) and refresh never overwrites a fetched provider with them. Cloud-hosting ranges
+  (AWS/Azure customer space) are deliberately not defaults — see the README before adding them.
+</div>
+<pre id="sources">…</pre>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const timeOf = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---- theme: auto → light → dark, persisted locally ---- */
+const themeBtn = $("#theme");
+function applyTheme(t) {
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  themeBtn.textContent = t === "auto" ? "🌓 auto" : t === "light" ? "☀️ light" : "🌙 dark";
+}
+let theme = localStorage.getItem("wgrid-theme") || "auto";
+applyTheme(theme);
+themeBtn.addEventListener("click", () => {
+  theme = theme === "auto" ? "light" : theme === "light" ? "dark" : "auto";
+  localStorage.setItem("wgrid-theme", theme);
+  applyTheme(theme);
+});
+
+/* ---- providers + status ---- */
+async function load() {
+  try {
+    const st = await (await fetch("/api/status")).json();
+    $("#meta").textContent = `${Object.keys(st.providers || {}).length} providers · ${st.networks} networks · updated ${timeOf(st.updated_at)}`;
+    const byProv = {};
+    for (const [name, nets] of Object.entries(st.providers || {})) {
+      byProv[name] = byProv[name] || { nets: 0, updated: 0, origin: "fetch", error: "" };
+      byProv[name].nets += nets;
+    }
+    const provs = await (await fetch("/api/networks")).json();
+    for (const p of provs.providers || []) {
+      const e = byProv[p.name] || (byProv[p.name] = { nets: 0, updated: 0 });
+      e.updated = Math.max(e.updated || 0, p.updated_at || 0);
+      e.origin = p.origin;
+      e.error = p.error || e.error;
+    }
+    $("#provRows").innerHTML = Object.entries(byProv).sort().map(([name, e]) => `
+      <tr><td>${esc(name)}</td><td>${e.nets}</td>
+      <td><span class="tag">${e.origin === "seed" ? "seed 🌱" : "feed"}</span></td>
+      <td>${timeOf(e.updated)}</td>
+      <td>${e.error ? `<span class="tag err" title="${esc(e.error)}">error</span>` : `<span class="tag ok">ok</span>`}</td></tr>`).join("");
+    $("#sources").textContent = "sources.json:\n" + JSON.stringify(st.sources || [], null, 2);
+  } catch (e) { $("#meta").textContent = "API unreachable: " + e.message; }
+}
+$("#refresh").addEventListener("click", async () => {
+  await fetch("/api/refresh", { method: "POST" });
+  $("#meta").textContent = "refreshing…";
+  setTimeout(load, 3000);
+});
+$("#lookupBtn").addEventListener("click", async () => {
+  const r = await (await fetch("/api/intel?ip=" + encodeURIComponent($("#ip").value.trim()))).json();
+  $("#lookupOut").textContent = r.known ? "known: " + r.provider : "not in any known range";
+});
+$("#ip").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#lookupBtn").click(); });
+
+/* ---- databases: list, delete, add ---- */
+async function loadSources() {
+  try {
+    const r = await (await fetch("/api/sources")).json();
+    const rows = (r.sources || []).map((s) => {
+      const loc = s.type === "git" ? `${s.url} · ${s.path}` : (s.url || s.path || "");
+      return `
+      <tr><td>${esc(s.name)}</td>
+      <td><span class="tag">${esc(s.type || "http")}</span></td>
+      <td><span class="tag">${esc(s.format)}</span></td>
+      <td class="loc" title="${esc(loc)}">${esc(loc)}</td>
+      <td>${s.error ? `<span class="tag err" title="${esc(s.error)}">error</span>` : `<span class="tag ok">ok</span>`}</td>
+      <td><button data-del='${esc(JSON.stringify(s))}' title="Delete this source${s.default ? " (built-in default — stays deleted across restarts)" : ""}">Delete</button></td></tr>`;
+    }).join("");
+    $("#srcRows").innerHTML = rows || `<tr><td colspan="6" class="muted">no sources configured</td></tr>`;
+    document.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true;
+      const res = await fetch("/api/sources/delete", { method: "POST", body: b.dataset.del });
+      const out = await res.json().catch(() => ({}));
+      $("#srcMsg").textContent = out.error || out.message || "";
+      loadSources();
+      setTimeout(load, 1500);
+    }));
+  } catch (e) { $("#srcMsg").textContent = "loading sources failed: " + e.message; }
+}
+
+function syncForm() {
+  const t = $("#f_type").value, f = $("#f_format").value;
+  const pf = navigator.userAgentData?.platform || navigator.platform || "";
+  const fileMgr = /mac/i.test(pf) ? "Finder" : /win/i.test(pf) ? "Explorer" : "file manager";
+  $("#l_url").textContent = t === "git" ? "Repository URL" : "Feed URL";
+  $("#f_url").placeholder = t === "git" ? "https://github.com/owner/repo" : "https://…/ranges.json";
+  $("#l_path").textContent = t === "git" ? "File inside repo" : "Path (" + fileMgr + ")";
+  $("#f_path").placeholder = t === "git" ? "lists/ranges.txt" : "/path/to/ranges.csv";
+  $("#l_url").style.display = t === "file" ? "none" : "";
+  $("#f_url").style.display = t === "file" ? "none" : "";
+  $("#l_branch").style.display = t === "git" ? "" : "none";
+  $("#f_branch").style.display = t === "git" ? "" : "none";
+  $("#l_path").style.display = t === "http" ? "none" : "";
+  $("#f_path").style.display = t === "http" ? "none" : "";
+  $("#l_col").style.display = f === "csv" ? "" : "none";
+  $("#f_col").style.display = f === "csv" ? "" : "none";
+}
+$("#f_type").addEventListener("change", syncForm);
+$("#f_format").addEventListener("change", syncForm);
+syncForm();
+
+$("#addForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    name: $("#f_name").value.trim(),
+    type: $("#f_type").value,
+    url: $("#f_url").value.trim(),
+    path: $("#f_path").value.trim(),
+    branch: $("#f_branch").value.trim(),
+    format: $("#f_format").value,
+    csv_column: $("#f_col").value.trim(),
+  };
+  const res = await fetch("/api/sources/add", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const out = await res.json().catch(() => ({}));
+  $("#addMsg").textContent = out.error || out.message || "";
+  if (!out.error) {
+    $("#addForm").reset();
+    syncForm();
+    loadSources();
+    setTimeout(load, 2500);
+  }
+});
+
+/* ---- installed apps via wPurge ---- */
+async function scanApps() {
+  $("#appsMeta").textContent = "scanning…";
+  $("#appsErr").classList.add("hidden");
+  try {
+    const r = await (await fetch("/api/apps")).json();
+    if (!r.reachable) {
+      $("#appsErr").textContent = "wPurge unreachable: " + (r.error || "is it running?") +
+        " — default " + "http://127.0.0.1:8212, override with --wpurge-url";
+      $("#appsErr").classList.remove("hidden");
+      $("#appsRows").innerHTML = `<tr><td colspan="5" class="muted">wPurge unreachable</td></tr>`;
+      $("#appsMeta").textContent = "";
+      return;
+    }
+    $("#appsMeta").textContent = `${r.apps_count} installed apps · scanned ${new Date().toLocaleTimeString()}`;
+    const entries = r.entries || [];
+    $("#appsRows").innerHTML = entries.map((e) => {
+      const apps = (e.apps || []).map((a) => esc(a.name)).join(", ");
+      const status = e.active ? `<span class="tag ok">active</span>`
+                   : e.seed_only ? `<span class="tag">seed 🌱</span>`
+                   : `<span class="tag">available</span>`;
+      const action = e.active || e.seed_only || !e.source ? `<span class="muted">—</span>`
+                   : `<button data-add='${esc(JSON.stringify(e.source))}'>Add &amp; download</button>`;
+      return `<tr><td>${esc(e.vendor)}</td>
+        <td>${apps || `<span class="muted">not installed</span>`}</td>
+        <td>${esc(e.provider)}${e.note ? `<div class="muted">${esc(e.note)}</div>` : ""}</td>
+        <td>${status}</td><td>${action}</td></tr>`;
+    }).join("");
+    document.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", async () => {
+      b.disabled = true;
+      const res = await fetch("/api/sources/add", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: b.dataset.add,
+      });
+      const out = await res.json().catch(() => ({}));
+      $("#appsMeta").textContent = out.error || out.message || "";
+      loadSources();
+      setTimeout(load, 2500);
+      setTimeout(scanApps, 4000);
+    }));
+    const un = r.unmatched || [];
+    $("#unmatched").textContent = un.length
+      ? `No known IP database for ${un.length} app(s): ${un.slice(0, 12).map((a) => a.name).join(", ")}${un.length > 12 ? "…" : ""}`
+      : "";
+  } catch (e) { $("#appsMeta").textContent = "scan failed: " + e.message; }
+}
+$("#scanApps").addEventListener("click", scanApps);
+
+/* ---- peer wiring: wHawk + wPurge status pills ---- */
+function setPeer(id, p) {
+  const el = $(id);
+  if (!p) { return; }
+  el.classList.toggle("up", !!p.running);
+  el.classList.toggle("down", !p.running);
+  el.querySelector(".lbl").textContent = p.running ? p.name : p.name + ": offline";
+  el.title = p.running ? `${p.name} running at ${p.url}` :
+    `${p.name} offline${p.error ? " — " + p.error : ""}`;
+}
+async function loadWired() {
+  try {
+    const r = await (await fetch("/api/wired")).json();
+    setPeer("#peerSentinel", r.sentinel);
+    setPeer("#peerDescale", r.descale);
+  } catch (e) { /* pills stay red until the API answers */ }
+}
+setInterval(loadWired, 30000);
+
+load();
+loadSources();
+loadWired();
+</script>
+</body>
+</html>

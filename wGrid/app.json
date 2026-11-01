@@ -1,0 +1,21 @@
+{
+  "apiVersion": 1,
+  "id": "wgrid",
+  "name": "wGrid",
+  "icon": "🚔",
+  "desc": "Known-IP intel feed for wHawk",
+  "category": "Security",
+  "port": 24504,
+  "urlPath": "/",
+  "network": true,
+  "binary": "wgrid",
+  "args": [
+    "--port",
+    "{port}"
+  ],
+  "version": "1.0",
+  "env": {
+    "WHAWK_URL": "http://127.0.0.1:24509",
+    "WPURGE_URL": "http://127.0.0.1:8212"
+  }
+}

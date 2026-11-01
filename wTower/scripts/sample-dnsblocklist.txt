@@ -1,0 +1,13 @@
+# Sample domain list for the DNS shield (data/dnsblocklists/).
+#
+# Both formats parse: HOSTS-style lines ("0.0.0.0 domain") and bare
+# domains, one per line. Lines starting with # or ; are comments.
+# A file named allow-*.txt is an allowlist and always wins over every
+# blocklist — use it to carve exceptions out of a broad list.
+#
+# Where to get lists: the MVPS HOSTS file (winhelp2002.mvps.org) and
+# StevenBlack/hosts on GitHub work as-is — paste them into the DNS panel
+# or drop the file into data/dnsblocklists/.
+0.0.0.0 ads.example.com
+tracker.example.net
+counter.junk-ads.example

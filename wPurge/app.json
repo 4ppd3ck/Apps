@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "wpurge",
+  "name": "wPurge",
+  "icon": "💧",
+  "desc": "Buildup cleaner, uninstaller and startup manager",
+  "category": "Tools",
+  "port": 8212,
+  "urlPath": "/",
+  "network": true,
+  "binary": "wpurge",
+  "args": [
+    "{port}"
+  ],
+  "version": "0.4.0"
+}

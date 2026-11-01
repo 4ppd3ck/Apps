@@ -1,8 +1,13 @@
 # AppDeck apps
 
-This folder is the deck: the apps that AppDeck discovers and starts. For a
-first run, keep `Apps/` beside the `Appdeck/` launcher folder, then start
-AppDeck with `go run .` from inside `Appdeck/`.
+This repository is the **deck**: the app collection AppDeck loads. Every
+folder here is one app that the
+[AppDeck launcher](https://github.com/4ppd3ck/Appdeck) discovers and runs —
+start AppDeck from its own folder next to this one and every app below
+appears on its dashboard.
+
+For a first run, keep `Apps/` beside the `Appdeck/` launcher folder, then
+start AppDeck with `go run .` from inside `Appdeck/`.
 
 ## The apps
 
@@ -20,6 +25,23 @@ AppScopeMonitor, Sentinel, Descale, SpaceLens and RepoLens are Go apps the
 launcher builds on first start; TokenReport and Wi-Fi Guard are static pages
 served by AppDeck itself, with no separate runtime.
 
+## Screenshots
+
+*All screenshots show synthetic, privacy-safe example data — no real
+workstation, network, or file details.*
+
+| | |
+|---|---|
+| ![AppScope Monitor activity dashboard](AppScopeMonitor/docs/screenshots/dashboard.png)<br>**AppScope Monitor** — device, privacy and network activity | ![Sentinel checks](Sentinel/docs/screenshots/checks.png)<br>**Sentinel** — host checks and alerts |
+| ![Descale home view](Descale/docs/screenshots/home.png)<br>**Descale** — cleanup candidates | ![SpaceLens sunburst view](SpaceLens/docs/screenshots/sunburst.png)<br>**SpaceLens** — sunburst disk map |
+| ![RepoLens results](RepoLens/docs/screenshots/results.png)<br>**RepoLens** — GitHub app search | ![Token Report dashboard](TokenReport/docs/screenshots/dashboard.png)<br>**Token Report** — AI-agent log analysis |
+| ![Wi-Fi Guard shared apps](WifiGuard/docs/screenshots/shared.png)<br>**Wi-Fi Guard** — apps shared on Wi-Fi | |
+
+More views are in each app's `docs/screenshots/` folder — Sentinel's alert
+feed, Descale's guardrails and batch uninstall, SpaceLens's treemap,
+RepoLens's search page, and AppScope Monitor's privacy, files and
+blocked-connections screens.
+
 ## Get AppDeck from the releases
 
 The launcher lives in its own repository —
@@ -30,8 +52,8 @@ binaries for Windows, macOS, and Linux in two flavors:
 - **AppDeck** (`v…` releases) — the launcher on its own. It discovers and
   starts apps from this folder, so use it alongside a checkout of `Apps/`.
 - **All in one** (`aio-v…` releases) — a single AppDeck executable with all
-  the apps in this folder already packed inside it. No Go toolchain and no
-  source checkout needed: download the zip for your platform, unzip, and
+  the apps in this repository already packed inside it. No Go toolchain and
+  no source checkout needed: download the zip for your platform, unzip, and
   run.
 
 Both flavors include per-platform zips plus a `SHA256SUMS` file; the
@@ -80,8 +102,8 @@ Good to know:
   persisted to `logs/imports.log` afterwards; a stuck import can be
   aborted with the dock's **■ Cancel** button.
 - To write your own app instead of importing one, see the launcher's
-  [AUTHORING.md](../Appdeck/AUTHORING.md) — `appdeck new "My App"`
-  scaffolds a working app into this folder.
+  [AUTHORING.md](https://github.com/4ppd3ck/Appdeck/blob/main/AUTHORING.md)
+  — `appdeck new "My App"` scaffolds a working app into this folder.
 
 ## Keep your data private
 

@@ -1,0 +1,1027 @@
+// Country-level (CIDR) block data: per-country IPv4 ranges consumed from
+// IPolice, the internet-facing companion app, over loopback — exactly the
+// Sentinel pattern (Sentinel/cmd/sentinel/intel.go): the monitor itself
+// never fetches feeds from the internet, IPolice does, and an offline
+// IPolice degrades to the last cached table ("queued" rules, never errors
+// that break the dashboard).
+//
+// The monitor auto-configures one IPolice source per blocked country on
+// first use: firehol's per-country netset (raw.githubusercontent.com, HTTPS)
+// — IPolice's `text` format parses those files natively. Ranges are cached
+// on disk under data/country-cidrs/ so restarts and IPolice outages keep
+// the last good table enforceable.
+//
+// Safety: loopback, RFC1918, link-local, multicast, bogon and broadcast
+// ranges are filtered out before anything reaches the firewall (again in
+// the privileged helpers), and the loopback API is never affected.
+//
+// The IPolice port is not stable: the launcher assigns it at start and has
+// reassigned it more than once, so a pinned IPOLICE_URL eventually refuses.
+// On refusal the source relocates (CountrySource.relocate): it asks the
+// AppDeck registry (/api/apps, the authoritative port book every app
+// receives APPDECK_LAUNCHER_URL for), then falls back to probing listening
+// loopback ports for IPolice's /api/networks signature, and persists the
+// winner under data/wgrid-endpoint.json.
+package wtower
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	// WGridDefaultURL is the loopback base URL of the IPolice companion
+	// app; override with the IPOLICE_URL env (the Sentinel contract).
+	WGridDefaultURL = "http://127.0.0.1:24504"
+
+	// launcherDefaultURL is the AppDeck dashboard, whose /api/apps registry
+	// is the authoritative port book for launcher-spawned peers — the same
+	// registry IPolice's wired.go consults to find Sentinel. Every app the
+	// launcher spawns also gets APPDECK_LAUNCHER_URL pointing here.
+	launcherDefaultURL = "http://127.0.0.1:9090"
+	launcherIpoliceID  = "ipolice"
+
+	countryProviderPrefix = "country/"
+	countryCacheTTL       = 7 * 24 * time.Hour
+	countryFetchTimeout   = 10 * time.Second
+	countryRefreshTimeout = 120 * time.Second // git-based feeds can be slow
+	ownCountryTTL         = time.Hour
+	ipoliceProbeTimeout   = 2 * time.Second
+	ipoliceRelocateGap    = 15 * time.Second // min spacing between relocations
+	// maxRemoteIPChars is the conservative netsh command-line budget for one
+	// rule's remoteip= list (Windows CL size is ~32k; 400 IPv4 CIDRs land
+	// far below both that and the firewall's per-rule entry limit).
+	maxRemoteIPChars = 8000
+	maxRemoteIPRules = 400 // hard cap of ranges per firewall rule
+)
+
+var (
+	ccRe    = regexp.MustCompile(`^[A-Za-z]{2}$`)
+	cidrRe  = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$`)
+	ownCCRe = regexp.MustCompile(`"countryCode"\s*:\s*"([A-Za-z]{2})"`)
+)
+
+// ValidCC checks an ISO-3166-1 alpha-2 country code.
+func ValidCC(cc string) bool { return ccRe.MatchString(cc) }
+
+// NormalizeCC upper-cases and trims a country code ("" when invalid).
+func NormalizeCC(cc string) string {
+	cc = strings.ToUpper(strings.TrimSpace(cc))
+	if !ValidCC(cc) {
+		return ""
+	}
+	return cc
+}
+
+// ParseCIDRLine validates one IPv4 CIDR ("203.0.113.0/24"); "" when invalid.
+func ParseCIDRLine(line string) string {
+	line = strings.TrimSpace(line)
+	if !cidrRe.MatchString(line) {
+		return ""
+	}
+	if _, _, err := net.ParseCIDR(line); err != nil {
+		return ""
+	}
+	prefix, err := strconv.Atoi(line[strings.LastIndex(line, "/")+1:])
+	if err != nil || prefix < 1 || prefix > 32 {
+		return ""
+	}
+	return line
+}
+
+// isProtectedCIDR reports ranges that must never be blocked: loopback,
+// RFC1918, link-local, 0/8, 240/4 (reserved), multicast, broadcast — the
+// machine's own subnets and the dashboard's loopback API live there.
+func isProtectedCIDR(cidr string) bool {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return true // unparsable: fail closed
+	}
+	if network.IP.To4() == nil {
+		return true // IPv4-only feature
+	}
+	return network.IP.IsLoopback() || network.IP.IsPrivate() ||
+		network.IP.IsLinkLocalUnicast() || network.IP.IsLinkLocalMulticast() ||
+		network.IP.IsUnspecified() || network.IP.IsMulticast() ||
+		network.Contains(net.IPv4bcast) ||
+		// CGNAT (100.64.0.0/10) is not IsPrivate but is carrier-owned
+		(network.IP[0] == 100 && network.IP[1] >= 64 && network.IP[1] <= 127)
+}
+
+// FilterSafeCIDRs keeps valid, non-protected IPv4 CIDRs, deduplicated and
+// sorted (stable output for tests and for firewall file diffs).
+func FilterSafeCIDRs(cidrs []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		c = ParseCIDRLine(c)
+		if c == "" || seen[c] || isProtectedCIDR(c) {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SanitizeLabel reduces a user-supplied name to the charset the firewall
+// helpers accept (lowercase alphanumerics, dash, underscore; max 32).
+func SanitizeLabel(label string) string {
+	var sb strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(label)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('-')
+		}
+	}
+	out := strings.Trim(sb.String(), "-")
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	return out
+}
+
+// ParseIPFile reads a user blocklist: one IPv4 CIDR or bare IP per line
+// (bare IPs become /32), `#` comments — full-line and inline — skipped,
+// protected ranges filtered. This is the `list` rule's data source; the
+// same file shape ships as scripts/sample-blocklist.txt.
+func ParseIPFile(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var raw []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "/") {
+			line += "/32" // bare IP: a single host
+		}
+		raw = append(raw, line)
+	}
+	return FilterSafeCIDRs(raw), nil
+}
+
+// EnsureListSource registers a user blocklist file as an IPolice `file`
+// source (IPolice re-reads it on every refresh), so the same ranges are
+// visible to IPolice's dashboard and to Sentinel — the "both" wiring:
+// the monitor enforces the file directly, IPolice mirrors it. Existing
+// registration is success.
+func (cs *CountrySource) EnsureListSource(label, path string) error {
+	if cs == nil {
+		return nil // no IPolice wiring without the client; direct still works
+	}
+	src := map[string]any{
+		"name":   "list/" + label,
+		"type":   "file",
+		"path":   path,
+		"format": "text",
+	}
+	if err := cs.postJSON("/api/sources/add", src); err != nil {
+		if strings.Contains(err.Error(), "already configured") {
+			return nil
+		}
+		return err
+	}
+	return cs.postJSON("/api/refresh", map[string]any{})
+}
+
+// ChunkCIDRs splits a CIDR list into groups whose joined remoteip= string
+// stays under maxChars and maxRules entries (netsh command-line budget).
+func ChunkCIDRs(cidrs []string, maxChars, maxRules int) [][]string {
+	var chunks [][]string
+	var cur []string
+	chars := 0
+	for _, c := range cidrs {
+		if len(cur) >= maxRules || (len(cur) > 0 && chars+len(c)+1 > maxChars) {
+			chunks = append(chunks, cur)
+			cur, chars = nil, 0
+		}
+		cur = append(cur, c)
+		chars += len(c) + 1
+	}
+	if len(cur) > 0 {
+		chunks = append(chunks, cur)
+	}
+	return chunks
+}
+
+type countryCacheFile struct {
+	Countries map[string]countryEntry `json:"countries"`
+}
+
+type countryEntry struct {
+	CC        string   `json:"cc"`
+	CIDRs     []string `json:"cidrs"`
+	FetchedAt float64  `json:"fetched_at"`
+}
+
+// CountrySource serves per-country CIDR lists from IPolice with a disk
+// cache. Nil-safe: a nil *CountrySource behaves like an absent IPolice.
+//
+// The IPolice endpoint is not fixed: the launcher assigns each app its port
+// at start and has reassigned IPolice more than once, so a pinned URL
+// eventually refuses. When that happens the source relocates (see
+// relocate): launcher registry first, then a signature-validated loopback
+// scan, keeping the winner in memory and on disk.
+type CountrySource struct {
+	home string // data dir root (relocation endpoint file lives here)
+	dir  string // data dir; cache lives in country-cidrs/
+
+	hc *http.Client
+
+	cfgURL      string       // configured endpoint (IPOLICE_URL or default)
+	launcherURL string       // AppDeck registry base ("" = disabled)
+	enumerate   func() []int // listening loopback ports; nil = platform scan
+	discover    bool         // relocation enabled (NewCountrySource: yes)
+
+	mu           sync.Mutex
+	base         string  // current endpoint; relocated on refusal
+	lastDiscover float64 // last relocate() attempt (Now())
+	discovering  bool    // single-flight relocation
+
+	cache       map[string]countryEntry
+	lastAttempt map[string]float64 // cc -> last fetch attempt (Now())
+	up          bool
+	lastErr     string
+
+	ownCountry   string
+	ownCountryAt time.Time
+	ownCountryFn func() (string, error) // overridable in tests
+}
+
+// NewCountrySource opens (or creates) the disk cache under dir/country-cidrs.
+func NewCountrySource(dir string) *CountrySource {
+	base := ipoliceBaseURL()
+	cs := &CountrySource{
+		home:        dir,
+		dir:         filepath.Join(dir, "country-cidrs"),
+		base:        base,
+		cfgURL:      base,
+		launcherURL: ipoliceLauncherURL(),
+		discover:    true,
+		hc:          &http.Client{Timeout: countryFetchTimeout},
+		cache:       map[string]countryEntry{},
+		lastAttempt: map[string]float64{},
+	}
+	cs.ownCountryFn = cs.fetchOwnCountry
+	cs.load()
+	return cs
+}
+
+func ipoliceBaseURL() string {
+	if v := os.Getenv("WGRID_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return WGridDefaultURL
+}
+
+// ipoliceLauncherURL resolves the AppDeck registry base for peer discovery:
+// the launcher hands every app it spawns an APPDECK_LAUNCHER_URL; the
+// well-known dashboard port is the fallback (IPolice's wired.go contract).
+func ipoliceLauncherURL() string {
+	if v := os.Getenv("APPDECK_LAUNCHER_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return launcherDefaultURL
+}
+
+// baseURL returns the endpoint requests currently go to.
+func (cs *CountrySource) baseURL() string {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.base
+}
+
+// -- endpoint relocation (autoscan) ---------------------------------------
+
+type ipoliceEndpoint struct {
+	URL string  `json:"url"`
+	At  float64 `json:"at"`
+}
+
+func (cs *CountrySource) endpointPath() string {
+	return filepath.Join(cs.home, "wgrid-endpoint.json")
+}
+
+// saveEndpoint records the relocated endpoint so a monitor restart starts
+// at the right port instead of failing first and rescanning.
+func (cs *CountrySource) saveEndpoint(url string) {
+	raw, err := json.Marshal(ipoliceEndpoint{URL: url, At: Now()})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(cs.endpointPath(), raw, 0o600); err != nil {
+		fmt.Printf("[ipolice] endpoint save error: %v\n", err)
+	}
+}
+
+// loadEndpoint returns the last relocated endpoint ("", none/saved).
+func (cs *CountrySource) loadEndpoint() string {
+	raw, err := os.ReadFile(cs.endpointPath())
+	if err != nil {
+		return ""
+	}
+	var ep ipoliceEndpoint
+	if json.Unmarshal(raw, &ep) != nil {
+		return ""
+	}
+	return strings.TrimRight(ep.URL, "/")
+}
+
+// isLoopbackURL gates discovered endpoints to this machine — a hand-edited
+// endpoint file or a tampered registry can't redirect provider traffic
+// off-host (the configured IPOLICE_URL stays exempt: it is operator-set).
+func isLoopbackURL(u string) bool {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// isConnRefused reports dial failures meaning "nothing listens there" —
+// the only condition worth relocating for. Timeouts and HTTP errors mean a
+// server answered, so the endpoint is right.
+func isConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+// relocate re-finds IPolice after the configured endpoint refused a
+// connection. The launcher assigns every app its port at start (and has
+// reassigned IPolice more than once), so a pinned URL goes stale whenever
+// the assignment changes. Candidates are probed in order — configured URL,
+// the manual-run default, the last relocated endpoint (persisted), the
+// launcher's /api/apps registry, then every listening loopback port — and
+// the first one serving IPolice's /api/networks signature wins. Cooldown-
+// gated and single-flight: a down IPolice costs one scan per gap, not one
+// per request. Returns the new base, or "" (nothing found / skipped).
+func (cs *CountrySource) relocate() string {
+	cs.mu.Lock()
+	if !cs.discover || cs.discovering ||
+		Now()-cs.lastDiscover < ipoliceRelocateGap.Seconds() {
+		cs.mu.Unlock()
+		return ""
+	}
+	cs.discovering = true
+	cs.lastDiscover = Now()
+	dead := cs.base
+	cs.mu.Unlock()
+	defer func() {
+		cs.mu.Lock()
+		cs.discovering = false
+		cs.mu.Unlock()
+	}()
+
+	tried := map[string]bool{dead: true} // the one that just refused us
+	for _, c := range cs.relocateCandidates() {
+		if tried[c] {
+			continue
+		}
+		tried[c] = true
+		if !cs.probeWGrid(c) {
+			continue
+		}
+		cs.mu.Lock()
+		cs.base = c
+		cs.mu.Unlock()
+		cs.saveEndpoint(c)
+		fmt.Printf("[ipolice] endpoint moved — relocated to %s\n", c)
+		return c
+	}
+	return ""
+}
+
+// relocateCandidates lists probe targets in preference order, deduped.
+func (cs *CountrySource) relocateCandidates() []string {
+	var out []string
+	add := func(u string) {
+		if u == "" {
+			return
+		}
+		u = strings.TrimRight(u, "/")
+		for _, seen := range out {
+			if seen == u {
+				return
+			}
+		}
+		out = append(out, u)
+	}
+	add(cs.cfgURL) // the configured contract first
+	add(WGridDefaultURL)
+	if u := cs.loadEndpoint(); isLoopbackURL(u) {
+		add(u) // last known good
+	}
+	if u := cs.launcherPeerURL(); isLoopbackURL(u) {
+		add(u) // AppDeck registry (authoritative while the launcher runs)
+	}
+	for _, p := range cs.scanPorts() { // listening-port scan (launcher down)
+		add(fmt.Sprintf("http://127.0.0.1:%d", p))
+	}
+	return out
+}
+
+// launcherPeerURL asks the AppDeck launcher — which spawned every app and
+// handed it its --port — where the ipolice app currently serves, the same
+// registry IPolice's wired.go uses to find Sentinel. "" when no launcher is
+// configured or reachable, or it reports no usable (non-zero) port.
+func (cs *CountrySource) launcherPeerURL() string {
+	if cs.launcherURL == "" {
+		return ""
+	}
+	hc := &http.Client{Timeout: ipoliceProbeTimeout}
+	resp, err := hc.Get(cs.launcherURL + "/api/apps")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var apps []struct {
+		ID   string `json:"id"`
+		Port int    `json:"port"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&apps) != nil {
+		return ""
+	}
+	for _, a := range apps {
+		if a.ID == launcherIpoliceID && a.Port != 0 {
+			return fmt.Sprintf("http://127.0.0.1:%d", a.Port)
+		}
+	}
+	return ""
+}
+
+func (cs *CountrySource) scanPorts() []int {
+	if cs.enumerate != nil {
+		return cs.enumerate()
+	}
+	return listeningLoopbackPorts()
+}
+
+// probeWGrid reports whether base serves IPolice's /api/networks
+// signature (HTTP 200 with a providers array) — how relocation candidates
+// are told apart from any other local server that happens to listen there.
+func (cs *CountrySource) probeWGrid(base string) bool {
+	hc := &http.Client{Timeout: ipoliceProbeTimeout}
+	resp, err := hc.Get(base + "/api/networks")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var payload struct {
+		Providers []json.RawMessage `json:"providers"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload) != nil {
+		return false
+	}
+	return payload.Providers != nil
+}
+
+func (cs *CountrySource) cachePath(cc string) string {
+	return filepath.Join(cs.dir, cc+".json")
+}
+
+func (cs *CountrySource) load() {
+	raw, err := os.ReadFile(filepath.Join(cs.dir, "index.json"))
+	if err != nil {
+		return
+	}
+	var file countryCacheFile
+	if json.Unmarshal(raw, &file) != nil || file.Countries == nil {
+		return
+	}
+	cutoff := Now() - countryCacheTTL.Seconds()
+	for cc, e := range file.Countries {
+		if e.FetchedAt >= cutoff {
+			cs.cache[cc] = e
+		}
+	}
+}
+
+func (cs *CountrySource) saveLocked() {
+	if err := os.MkdirAll(cs.dir, 0o755); err != nil {
+		return
+	}
+	raw, err := json.Marshal(countryCacheFile{Countries: cs.cache})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(cs.dir, "index.json"), raw, 0o600); err != nil {
+		fmt.Printf("[country] cache write error: %v\n", err)
+	}
+}
+
+// Cached returns the currently cached ranges for a cache key (a country
+// code, or an IPolice provider name for provider rules) — no I/O to
+// IPolice. ok=false when nothing is cached. Used by the dashboard and by
+// enforcer rebuild paths.
+func (cs *CountrySource) Cached(key string) ([]string, bool) {
+	if cs == nil {
+		return nil, false
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, false
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	e, ok := cs.cache[key]
+	if !ok {
+		return nil, false
+	}
+	// filtered: the count and any rebuild path should reflect what would
+	// actually be enforced
+	return FilterSafeCIDRs(e.CIDRs), true
+}
+
+// CachedCount returns the cached CIDR count for a country (0 when absent).
+func (cs *CountrySource) CachedCount(cc string) int {
+	cidrs, ok := cs.Cached(cc)
+	if !ok {
+		return 0
+	}
+	return len(cidrs)
+}
+
+// EnsureBackground is Ensure for cache-warming paths (block add, reconcile,
+// dashboard polls): one attempt per country per minute, failures silent —
+// IPolice's feed refresh runs concurrently and the next attempt catches it.
+func (cs *CountrySource) EnsureBackground(cc string) {
+	if cs == nil {
+		return
+	}
+	cc = NormalizeCC(cc)
+	if cc == "" {
+		return
+	}
+	cs.mu.Lock()
+	if Now()-cs.lastAttempt[cc] < 60 {
+		cs.mu.Unlock()
+		return
+	}
+	cs.mu.Unlock()
+	_, _ = cs.Ensure(cc)
+}
+
+// EnsureProvider fetches a user-managed IPolice provider's CIDRs — the
+// "upload a list in IPolice, block it in the monitor" path. Cache-first
+// with the same TTL as countries; the user manages the source in IPolice
+// (Databases UI or API), the monitor only consumes it.
+func (cs *CountrySource) EnsureProvider(name string) ([]string, error) {
+	if cs == nil {
+		return nil, fmt.Errorf("country data source unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("empty IPolice provider name")
+	}
+	cs.mu.Lock()
+	e, ok := cs.cache[name]
+	fresh := ok && Now()-e.FetchedAt < countryCacheTTL.Seconds()
+	cs.lastAttempt["provider:"+name] = Now()
+	cs.mu.Unlock()
+	if fresh {
+		return FilterSafeCIDRs(e.CIDRs), nil
+	}
+	cidrs, found, err := cs.providerCIDRs(name)
+	if err != nil {
+		if ok { // stale cache beats no data
+			return FilterSafeCIDRs(e.CIDRs), nil
+		}
+		return nil, fmt.Errorf("IPolice (%s) unreachable: %w", cs.baseURL(), err)
+	}
+	if !found {
+		if ok {
+			return FilterSafeCIDRs(e.CIDRs), nil
+		}
+		return nil, fmt.Errorf("IPolice has no provider %q — add it in "+
+			"IPolice first (Databases → add source)", name)
+	}
+	if len(cidrs) == 0 {
+		if ok {
+			return FilterSafeCIDRs(e.CIDRs), nil
+		}
+		return nil, fmt.Errorf("IPolice provider %q has no ranges", name)
+	}
+	cs.mu.Lock()
+	cs.cache[name] = countryEntry{CC: name, CIDRs: cidrs, FetchedAt: Now()}
+	cs.saveLocked()
+	cs.mu.Unlock()
+	return cidrs, nil
+}
+
+// EnsureProviderBackground is the debounced cache-warmer for provider rules.
+func (cs *CountrySource) EnsureProviderBackground(name string) {
+	if cs == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	cs.mu.Lock()
+	if Now()-cs.lastAttempt["provider:"+name] < 60 {
+		cs.mu.Unlock()
+		return
+	}
+	cs.mu.Unlock()
+	_, _ = cs.EnsureProvider(name)
+}
+
+// ProviderNames lists the IPolice providers the user manages themselves —
+// everything except the monitor-managed country/* and list/* feeds.
+func (cs *CountrySource) ProviderNames() ([]string, error) {
+	if cs == nil {
+		return nil, fmt.Errorf("country data source unavailable")
+	}
+	var payload struct {
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := cs.getJSON("/api/networks", &payload); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range payload.Providers {
+		if p.Name == "" ||
+			strings.HasPrefix(p.Name, countryProviderPrefix) ||
+			strings.HasPrefix(p.Name, "list/") {
+			continue
+		}
+		out = append(out, p.Name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Ensure returns the safe CIDR list for cc, refreshing from IPolice when
+// the cache is missing or stale. Errors carry a dashboard-ready reason.
+func (cs *CountrySource) Ensure(cc string) ([]string, error) {
+	if cs == nil {
+		return nil, fmt.Errorf("country data source unavailable")
+	}
+	cc = NormalizeCC(cc)
+	if cc == "" {
+		return nil, fmt.Errorf("invalid country code")
+	}
+	cs.mu.Lock()
+	cs.lastAttempt[cc] = Now()
+	cs.mu.Unlock()
+	cs.mu.Lock()
+	e, ok := cs.cache[cc]
+	fresh := ok && Now()-e.FetchedAt < countryCacheTTL.Seconds()
+	cs.mu.Unlock()
+	if fresh {
+		// cached entries are filtered too: defense in depth against a
+		// poisoned or hand-edited cache file
+		return FilterSafeCIDRs(e.CIDRs), nil
+	}
+
+	cidrs, err := cs.fetchFromIPolice(cc)
+	if err != nil {
+		if ok { // stale cache beats no data
+			return FilterSafeCIDRs(e.CIDRs), nil
+		}
+		return nil, err
+	}
+	if len(cidrs) == 0 {
+		if ok {
+			return append([]string(nil), e.CIDRs...), nil
+		}
+		return nil, fmt.Errorf("IPolice returned no ranges for country %s", cc)
+	}
+	cs.mu.Lock()
+	cs.cache[cc] = countryEntry{CC: cc, CIDRs: cidrs, FetchedAt: Now()}
+	cs.saveLocked()
+	cs.mu.Unlock()
+	return cidrs, nil
+}
+
+// countryRetryGap paces the post-registration polls: IPolice's feed refresh
+// runs concurrently with this function, so the provider may appear only
+// after a few seconds. Var so tests can shrink it.
+var countryRetryGap = 2500 * time.Millisecond
+
+// fetchFromIPolice pulls provider "country/<CC>" from IPolice, registering
+// the country feed as a source first when the provider is missing.
+func (cs *CountrySource) fetchFromIPolice(cc string) ([]string, error) {
+	cidrs, ok, err := cs.providerCIDRs(countryProviderPrefix + cc)
+	if err != nil {
+		return nil, fmt.Errorf("IPolice (%s) unreachable: %w", cs.baseURL(), err)
+	}
+	if ok {
+		return cidrs, nil
+	}
+	// The provider does not exist yet: register its feed in IPolice
+	// (persisted to sources.json there), refresh, and poll briefly — the
+	// feed fetch runs concurrently with these checks.
+	if err := cs.ensureIPoliceSource(cc); err != nil {
+		return nil, fmt.Errorf("IPolice has no country/%s feed and registering "+
+			"it failed: %w", cc, err)
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		time.Sleep(countryRetryGap)
+		cidrs, ok, err = cs.providerCIDRs(countryProviderPrefix + cc)
+		if err != nil {
+			return nil, fmt.Errorf("IPolice (%s) unreachable after source add: %w",
+				cs.baseURL(), err)
+		}
+		if ok {
+			return cidrs, nil
+		}
+	}
+	return nil, fmt.Errorf("IPolice has no ranges for country/%s yet — "+
+		"its feed is still refreshing; try again shortly", cc)
+}
+
+// providerCIDRs GETs /api/networks and extracts one provider's CIDRs.
+func (cs *CountrySource) providerCIDRs(provider string) ([]string, bool, error) {
+	var payload struct {
+		Providers []struct {
+			Name  string   `json:"name"`
+			Cidrs []string `json:"cidrs"`
+		} `json:"providers"`
+	}
+	if err := cs.getJSON("/api/networks", &payload); err != nil {
+		return nil, false, err
+	}
+	cs.mu.Lock()
+	cs.up = true
+	cs.lastErr = ""
+	cs.mu.Unlock()
+	for _, p := range payload.Providers {
+		if p.Name == provider {
+			return FilterSafeCIDRs(p.Cidrs), true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// ProviderRawLines returns one provider's lines exactly as IPolice serves
+// them — not CIDR-filtered. The DNS shield consumes these: for a `text`
+// source IPolice stores every feed line verbatim, so a list of domains
+// rides in the same field the CIDR lists use. found=false when IPolice is
+// reachable but has no such provider.
+func (cs *CountrySource) ProviderRawLines(name string) ([]string, bool, error) {
+	if cs == nil {
+		return nil, false, fmt.Errorf("country data source unavailable")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false, fmt.Errorf("empty IPolice provider name")
+	}
+	var payload struct {
+		Providers []struct {
+			Name  string   `json:"name"`
+			Cidrs []string `json:"cidrs"`
+		} `json:"providers"`
+	}
+	if err := cs.getJSON("/api/networks", &payload); err != nil {
+		return nil, false, err
+	}
+	cs.mu.Lock()
+	cs.up = true
+	cs.lastErr = ""
+	cs.mu.Unlock()
+	for _, p := range payload.Providers {
+		if p.Name == name {
+			return p.Cidrs, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// ensureIPoliceSource registers a per-country zone as an IPolice source
+// (ipdeny.com's published country ranges, fetched by IPolice over HTTPS —
+// it is the internet-facing half of the pair). "already configured" is
+// success.
+func (cs *CountrySource) ensureIPoliceSource(cc string) error {
+	lcc := strings.ToLower(cc)
+	src := map[string]any{
+		"name":   countryProviderPrefix + cc,
+		"type":   "http",
+		"url":    "https://www.ipdeny.com/ipblocks/data/countries/" + lcc + ".zone",
+		"format": "text",
+	}
+	if err := cs.postJSON("/api/sources/add", src); err != nil {
+		if strings.Contains(err.Error(), "already configured") {
+			return nil
+		}
+		return err
+	}
+	// sources/add activates the source; refresh pulls the feed now.
+	if err := cs.postJSON("/api/refresh", map[string]any{}); err != nil {
+		return fmt.Errorf("IPolice refresh failed: %w", err)
+	}
+	return nil
+}
+
+func (cs *CountrySource) getJSON(path string, out any) error {
+	base := cs.baseURL()
+	err := cs.getJSONAt(base, path, out)
+	if err != nil && isConnRefused(err) {
+		// nothing listens there anymore — IPolice was reassigned; find it
+		// and retry the request once against the new endpoint
+		if nb := cs.relocate(); nb != "" {
+			return cs.getJSONAt(nb, path, out)
+		}
+	}
+	return err
+}
+
+func (cs *CountrySource) getJSONAt(base, path string, out any) error {
+	resp, err := cs.hc.Get(base + path)
+	if err != nil {
+		cs.markDown(err)
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		cs.markDown(fmt.Errorf("%s -> %d", path, resp.StatusCode))
+		return fmt.Errorf("IPolice %s -> %d", path, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		cs.markDown(err)
+		return err
+	}
+	cs.markUp()
+	return nil
+}
+
+func (cs *CountrySource) postJSON(path string, body any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	hc := &http.Client{Timeout: countryRefreshTimeout}
+	doPost := func(base string) error {
+		resp, err := hc.Post(base+path, "application/json",
+			strings.NewReader(string(raw)))
+		if err != nil {
+			cs.markDown(err)
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			var payload struct {
+				Error string `json:"error"`
+			}
+			msg := fmt.Sprintf("%s -> %d", path, resp.StatusCode)
+			if json.NewDecoder(resp.Body).Decode(&payload) == nil && payload.Error != "" {
+				msg = payload.Error
+			}
+			err := fmt.Errorf("IPolice %s", msg)
+			cs.markDown(err)
+			return err
+		}
+		cs.markUp()
+		return nil
+	}
+	base := cs.baseURL()
+	err = doPost(base)
+	if err != nil && isConnRefused(err) {
+		// refused before reaching any server: the POST never landed, so a
+		// single retry at the relocated endpoint cannot double-apply it
+		if nb := cs.relocate(); nb != "" {
+			return doPost(nb)
+		}
+	}
+	return err
+}
+
+func (cs *CountrySource) markDown(err error) {
+	cs.mu.Lock()
+	cs.up = false
+	cs.lastErr = err.Error()
+	cs.mu.Unlock()
+}
+
+// markUp clears the down state after any successful request — including
+// the relocated retry of the very request that discovered the refusal,
+// so Status never reports a stale outage next to the working endpoint.
+func (cs *CountrySource) markUp() {
+	cs.mu.Lock()
+	cs.up = true
+	cs.lastErr = ""
+	cs.mu.Unlock()
+}
+
+// Status summarizes the IPolice link for the dashboard. Read-only: it must
+// never trigger a fetch (only blockAdd resolves the own country on demand).
+func (cs *CountrySource) Status() map[string]any {
+	if cs == nil {
+		return map[string]any{"available": false, "reason": "country source unavailable"}
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	out := map[string]any{
+		"url":       cs.base,
+		"up":        cs.up,
+		"available": cs.up,
+		// true once the endpoint was re-found after a refusal (the
+		// configured IPOLICE_URL/default no longer matches where IPolice is)
+		"discovered": cs.base != cs.cfgURL,
+	}
+	if cs.lastErr != "" {
+		out["last_error"] = cs.lastErr
+		out["reason"] = cs.lastErr
+	}
+	if cs.ownCountry != "" && time.Since(cs.ownCountryAt) < ownCountryTTL {
+		out["own_country"] = cs.ownCountry
+	}
+	return out
+}
+
+// OwnCountry best-effort resolves the machine's own country (via ip-api,
+// the same plain-HTTP posture as the geo enrichment) and caches it for an
+// hour. "" when unknown — the own-country guardrail then degrades to the
+// UI confirmation only.
+func (cs *CountrySource) OwnCountry() string {
+	if cs == nil {
+		return ""
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.ownCountryLocked()
+}
+
+func (cs *CountrySource) ownCountryLocked() string {
+	if cs.ownCountry != "" && time.Since(cs.ownCountryAt) < ownCountryTTL {
+		return cs.ownCountry
+	}
+	if cs.ownCountryFn == nil {
+		return ""
+	}
+	cc, err := cs.ownCountryFn()
+	if err != nil || cc == "" {
+		return ""
+	}
+	cs.ownCountry = cc
+	cs.ownCountryAt = time.Now()
+	return cc
+}
+
+// fetchOwnCountry asks ip-api for this machine's public-IP country. Plain
+// HTTP on purpose: identical posture to geo.go's ip-api batch calls (the
+// app.json network flag documents the posture; see README).
+func (cs *CountrySource) fetchOwnCountry() (string, error) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Get("http://ip-api.com/json/?fields=status,countryCode")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("ip-api -> %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	m := ownCCRe.FindSubmatch(raw)
+	if m == nil {
+		return "", fmt.Errorf("ip-api: no countryCode in response")
+	}
+	return strings.ToUpper(string(m[1])), nil
+}

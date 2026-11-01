@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>wTower</title>
+<link rel="icon" type="image/png" href="/web/icon.png">
+<link rel="apple-touch-icon" href="/web/icon.png">
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">&#9678;</span>
+    <div>
+      <h1>wTower</h1>
+      <div class="hostline" id="hostline">connecting&hellip;</div>
+    </div>
+  </div>
+  <div class="status-wrap">
+    <div class="status" id="status-chips"></div>
+    <button id="master-toggle" class="master-btn" title="turn all monitoring on or off">
+      &#9724; pause all
+    </button>
+  </div>
+</header>
+
+<div class="toolbar">
+  <label>History
+    <select id="hist-range" class="filter">
+      <option value="5">5 min</option>
+      <option value="15">15 min</option>
+      <option value="30">30 min</option>
+      <option value="60" selected>1 hr</option>
+      <option value="720">12 hrs</option>
+      <option value="1440">24 hrs</option>
+    </select>
+  </label>
+  <span class="toolbar-sep"></span>
+  <label for="theme-select">Theme</label>
+  <select id="theme-select" class="filter" title="select dashboard theme"></select>
+  <span id="theme-msg" role="status"></span>
+  <label for="table-menu">Panels</label>
+  <details class="visibility-menu">
+    <summary id="table-menu" class="purge-btn">Select</summary>
+    <div id="table-visibility-options" class="visibility-options"></div>
+  </details>
+  <button id="layout-lock-all" class="purge-btn" type="button" aria-pressed="false"
+          title="lock all dashboard arrangements">Lock layout</button>
+  <button id="layout-default" class="purge-btn" type="button"
+          title="restore the default dashboard arrangement">Default arrangement</button>
+  <span id="visibility-msg" role="status"></span>
+  <span class="toolbar-sep"></span>
+  <label for="retention-days" title="automatic purge window — events older than this are deleted in the background">Auto-purge after</label>
+  <select id="retention-days" class="filter" title="how long events are kept before the automatic purge removes them">
+    <option value="1">1 day</option>
+    <option value="7">7 days</option>
+    <option value="30">30 days</option>
+    <option value="90">90 days</option>
+    <option value="365">1 year</option>
+    <option value="0">forever</option>
+  </select>
+  <label>Purge now older than
+    <select id="purge-range" class="filter">
+      <option value="1">1 hour</option>
+      <option value="6">6 hours</option>
+      <option value="24">24 hours</option>
+      <option value="168">7 days</option>
+      <option value="all">everything</option>
+    </select>
+  </label>
+  <button id="purge-btn" class="purge-btn" title="permanently delete stored events">&#128465; delete</button>
+  <span id="purge-msg"></span>
+</div>
+
+<section class="cards">
+  <div class="card">
+    <div class="label">Camera / Mic</div>
+    <div class="value" id="card-privacy">&ndash;</div>
+    <div class="sub" id="card-privacy-sub">no recent access</div>
+  </div>
+  <div class="card">
+    <div class="label">Active connections</div>
+    <div class="value" id="card-conns">&ndash;</div>
+    <div class="sub">current TCP/UDP endpoints</div>
+  </div>
+  <div class="card">
+    <div class="label">Download</div>
+    <div class="value" id="card-rx">&ndash;</div>
+    <div class="sub">current receive rate · all interfaces</div>
+  </div>
+  <div class="card">
+    <div class="label">Upload</div>
+    <div class="value" id="card-tx">&ndash;</div>
+    <div class="sub">current transmit rate · all interfaces</div>
+  </div>
+  <div class="card">
+    <div class="label" id="card-events-label">Events (last 1 hr)</div>
+    <div class="value" id="card-events">&ndash;</div>
+    <div class="sub" id="card-events-sub">privacy + files + network</div>
+  </div>
+</section>
+
+<main id="dashboard-layout" class="dashboard-layout">
+<section class="panel" id="traffic-totals-panel">
+  <div class="panel-head">
+    <h2>Data transferred</h2>
+    <label class="head-controls">period
+      <select id="traffic-range" class="filter" title="traffic total period">
+        <option value="hour">Last hour</option>
+        <option value="six_hours">Last 6 hours</option>
+        <option value="day">Last 24 hours</option>
+        <option value="since_boot">Since boot</option>
+        <option value="session" selected>Since this session</option>
+        <option value="retained">All recorded</option>
+      </select>
+    </label>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-traffic-totals">
+      <thead><tr><th>Period</th><th>Downloaded</th><th>Uploaded</th><th>Coverage</th></tr></thead>
+      <tbody id="traffic-totals-body"><tr><td colspan="4" class="dim">collecting counter baseline&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="traffic-panel">
+  <div class="panel-head">
+    <h2>Traffic (all interfaces)</h2>
+  </div>
+  <canvas id="chart" height="130"></canvas>
+</section>
+
+<section class="panel" id="live-connections-panel">
+  <div class="panel-head">
+    <h2>Live connections</h2>
+    <div class="head-controls">
+      <select id="live-group" class="filter" title="group rows by app or list one row per connection">
+        <option value="app" selected>Group by app</option>
+        <option value="flat">Flat list</option>
+      </select>
+      <select id="app-live-conns" class="filter" title="filter live connections by app">
+        <option value="">All apps</option>
+      </select>
+      <select id="scope-live-conns" class="filter" title="filter live connections by scope">
+        <option value="">All connections</option>
+        <option value="internal">Internal</option>
+        <option value="external">External</option>
+      </select>
+      <select id="geo-live-conns" class="filter" title="filter live connections by country">
+        <option value="">All countries</option>
+      </select>
+      <select id="geo-city-live-conns" class="filter" title="filter live connections by city">
+        <option value="">All cities</option>
+      </select>
+      <select id="state-live-conns" class="filter" title="filter live connections by state">
+        <option value="">All states</option>
+      </select>
+      <input class="filter" id="filter-live-conns" placeholder="filter&hellip;">
+      <button id="clear-live-connection-filters" class="purge-btn clear-filters-btn"
+              type="button" title="clear live connection filters">Clear filters</button>
+      <button id="live-expand-all" class="purge-btn group-toggle" type="button"
+              title="expand every app group">Expand all</button>
+      <button id="live-collapse-all" class="purge-btn group-toggle" type="button"
+              title="collapse every app group">Collapse all</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-live-conns">
+      <thead><tr>
+        <th class="sortable" data-sort="app">App</th>
+        <th class="sortable" data-sort="pid">PID</th>
+        <th class="sortable" data-sort="user">User</th>
+        <th class="sortable" data-sort="proto">Protocol</th>
+        <th class="sortable" data-sort="remote">Remote</th>
+        <th class="sortable" data-sort="service">Service / Host</th>
+        <th class="sortable" data-sort="local">Local</th>
+        <th class="sortable" data-sort="geo">Geo</th>
+        <th class="sortable" data-sort="duration">Duration</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="state">State</th>
+        <th>Block</th></tr></thead>
+      <tbody><tr><td colspan="13" class="dim">waiting for connection data&hellip;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel-foot">geo: ip-api.com &middot; cached</div>
+</section>
+
+<section class="panel" id="geo-countries-panel">
+  <div class="panel-head">
+    <h2>Connections by country <span class="panel-count" id="geo-countries-count"></span></h2>
+    <div class="head-controls">
+      <select id="geo-countries-mode" class="filter" title="group rows by country or list one row per IP">
+        <option value="country">Group by country</option>
+        <option value="flat">Flat list</option>
+      </select>
+      <select id="geo-countries-country" class="filter" title="filter by country">
+        <option value="">All countries</option>
+      </select>
+      <select id="geo-countries-app" class="filter" title="filter by app">
+        <option value="">All apps</option>
+      </select>
+      <label class="active-toggle" title="only destinations with open connections">
+        <input type="checkbox" id="geo-countries-active"> active
+      </label>
+      <input class="filter" id="filter-geo-countries" placeholder="filter&hellip;">
+      <button id="clear-geo-countries-filters" class="purge-btn clear-filters-btn"
+              type="button" title="clear country filters">Clear filters</button>
+      <button id="geo-expand-all" class="purge-btn group-toggle" type="button"
+              title="expand every country group">Expand all</button>
+      <button id="geo-collapse-all" class="purge-btn group-toggle" type="button"
+              title="collapse every country group">Collapse all</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-geo-countries">
+      <thead><tr>
+        <th class="sortable" data-sort="name">Country</th>
+        <th class="sortable" data-sort="ip">Remote IP</th>
+        <th class="sortable" data-sort="apps">Apps</th>
+        <th class="sortable" data-sort="connections">Connections</th>
+        <th class="sortable" data-sort="open">Active</th>
+        <th class="sortable" data-sort="seconds">Time connected</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="last_seen">Last seen</th>
+      </tr></thead>
+      <tbody><tr><td colspan="9" class="dim">waiting for destination data&hellip;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel-foot">from connection history &middot; geo: ip-api.com &middot; cached</div>
+</section>
+
+<section class="panel" id="sites-panel">
+  <div class="panel-head">
+    <h2>Sites &amp; apps <span class="panel-count" id="sites-count"></span></h2>
+    <div class="head-controls">
+      <select id="sites-group" class="filter" title="group rows by site or by app, or one flat row per app + site">
+        <option value="site">Group by site</option>
+        <option value="app">Group by app</option>
+        <option value="flat">Flat list</option>
+      </select>
+      <select id="sites-app" class="filter" title="filter by app">
+        <option value="">All apps</option>
+      </select>
+      <label class="active-toggle" title="only destinations with open connections">
+        <input type="checkbox" id="sites-active"> active
+      </label>
+      <input class="filter" id="filter-sites" placeholder="filter&hellip;">
+      <button id="clear-sites-filters" class="purge-btn clear-filters-btn"
+              type="button" title="clear site filters">Clear filters</button>
+      <button id="sites-expand-all" class="purge-btn group-toggle" type="button"
+              title="expand every group">Expand all</button>
+      <button id="sites-collapse-all" class="purge-btn group-toggle" type="button"
+              title="collapse every group">Collapse all</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-sites">
+      <thead><tr>
+        <th class="sortable" data-sort="name">Site / app</th>
+        <th class="sortable" data-sort="apps">Apps / sites</th>
+        <th class="sortable" data-sort="ips">IPs</th>
+        <th class="sortable" data-sort="connections">Connections</th>
+        <th class="sortable" data-sort="open">Active</th>
+        <th class="sortable" data-sort="seconds">Time connected</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="last_seen">Last seen</th>
+      </tr></thead>
+      <tbody><tr><td colspan="9" class="dim">waiting for destination data&hellip;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel-foot">time: connection history &middot; site bytes: per-socket TCP &middot; app totals: per-process (TCP+UDP)</div>
+</section>
+
+  <section class="panel" id="connections-panel">
+    <div class="panel-head">
+      <div class="connection-history-title">
+        <h2>Connection history</h2>
+        <span class="tag tag-net">saved observations · not live</span>
+        <span id="connections-summary-count" class="connection-summary-count"></span>
+      </div>
+      <div class="head-controls">
+        <select id="connections-range" class="filter" title="connection observation period">
+          <option value="5">Last 5 min</option>
+          <option value="15" selected>Last 15 min</option>
+          <option value="30">Last 30 min</option>
+          <option value="60">Last hour</option>
+          <option value="180">Last 3 hours</option>
+          <option value="360">Last 6 hours</option>
+          <option value="720">Last 12 hours</option>
+          <option value="1440">Last 24 hours</option>
+        </select>
+        <select id="app-conns" class="filter" title="filter history by app">
+          <option value="">All apps</option>
+        </select>
+        <select id="scope-conns" class="filter" title="filter history by connection scope">
+          <option value="">All connections</option>
+          <option value="internal">Internal</option>
+          <option value="external">External</option>
+        </select>
+        <select id="protocol-conns" class="filter" title="filter history by protocol">
+          <option value="">All protocols</option>
+          <option value="TCP">TCP</option>
+          <option value="UDP">UDP</option>
+        </select>
+        <select id="status-conns" class="filter" title="filter history by status">
+          <option value="">All statuses</option>
+          <option value="established">Established</option>
+          <option value="ok">OK / listening</option>
+          <option value="info">Info</option>
+          <option value="closed">Closed</option>
+        </select>
+        <input class="filter" id="filter-conns" placeholder="filter&hellip;">
+        <button id="clear-connection-filters" class="purge-btn clear-filters-btn"
+                type="button" title="clear connection history filters">Clear filters</button>
+        <button id="refresh-conns-btn" class="purge-btn" title="refresh saved connection history">refresh</button>
+        <button id="history-expand-all" class="purge-btn group-toggle" type="button"
+                title="expand every process group">Expand all</button>
+        <button id="history-collapse-all" class="purge-btn group-toggle" type="button"
+                title="collapse every process group">Collapse all</button>
+      </div>
+    </div>
+    <div id="connections-list" class="connections-list"><div class="empty">loading saved connection history&hellip;</div></div>
+  </section>
+<section class="panel" id="top-apps-panel">
+  <div class="panel-head"><h2>Top apps by traffic</h2></div>
+  <div id="top-apps" class="top-apps"><div class="empty">waiting for data&hellip;</div></div>
+</section>
+<section class="panel" id="connection-summary-panel">
+  <div class="panel-head"><h2>Connections by protocol &amp; state</h2></div>
+  <div class="tbl-wrap summary-table-wrap">
+    <table id="tbl-connection-summary">
+      <thead><tr>
+        <th class="sortable" data-sort="proto">Protocol</th>
+        <th class="sortable" data-sort="state">State</th>
+        <th class="sortable" data-sort="count">Active endpoints</th>
+      </tr></thead>
+      <tbody><tr><td colspan="3" class="dim">waiting for connection data&hellip;</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="heatmap-panel">
+  <div class="panel-head">
+    <h2>Activity by hour</h2>
+    <label class="head-controls">window
+      <select id="heatmap-range" class="filter" title="how far back the heatmap aggregates">
+        <option value="24" selected>Last 24 hours</option>
+        <option value="72">Last 3 days</option>
+        <option value="168">Last 7 days</option>
+      </select>
+    </label>
+  </div>
+  <div id="heatmap" class="heatmap-grid"><div class="empty">waiting for connection history&hellip;</div></div>
+  <div class="heatmap-legend">quieter
+    <i style="background:var(--inset)"></i>
+    <i style="background:color-mix(in srgb, var(--accent) 25%, var(--inset))"></i>
+    <i style="background:color-mix(in srgb, var(--accent) 55%, var(--inset))"></i>
+    <i style="background:color-mix(in srgb, var(--accent) 85%, var(--inset))"></i>
+    busier &middot; external connections per local hour
+  </div>
+</section>
+
+<section class="panel" id="visits-panel">
+  <div class="panel-head">
+    <h2>Site visits</h2>
+    <div class="head-controls">
+      <select id="visits-range" class="filter" title="how far back visits are reconstructed">
+        <option value="1">Last hour</option>
+        <option value="6">Last 6 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="72">Last 3 days</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <label class="active-toggle" title="sockets to the same site closer together than this are one visit">
+        merge gap
+        <select id="visits-gap" class="filter" title="idle gap under which back-to-back sockets count as one visit">
+          <option value="120">2 min</option>
+          <option value="300" selected>5 min</option>
+          <option value="600">10 min</option>
+          <option value="1800">30 min</option>
+        </select>
+      </label>
+      <select id="visits-app" class="filter" title="filter visits by app">
+        <option value="">All apps</option>
+      </select>
+      <select id="visits-site" class="filter" title="filter visits by site">
+        <option value="">All sites</option>
+      </select>
+      <input class="filter" id="filter-visits" placeholder="filter&hellip;">
+      <button id="clear-visits-filters" class="purge-btn clear-filters-btn"
+              type="button" title="clear visit filters">Clear filters</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-visits">
+      <thead><tr>
+        <th class="sortable" data-sort="domain">Site</th>
+        <th class="sortable" data-sort="app">App</th>
+        <th class="sortable" data-sort="vstarted">Started</th>
+        <th class="sortable" data-sort="vended">Closed</th>
+        <th class="sortable" data-sort="span">Span</th>
+        <th class="sortable" data-sort="active">Active</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="connections">Conns</th>
+      </tr></thead>
+      <tbody><tr><td colspan="9" class="dim">waiting for connection history&hellip;</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel-foot">a visit = one app's sockets to one site, merged when &lt; the gap apart &middot;
+    closed when the last connection ends (network, not browser tab) &middot;
+    bytes: per-connection counters (exact per visit; unavailable on some platforms)</div>
+</section>
+
+<section class="panel" id="battery-panel" style="display:none">
+  <div class="panel-head">
+    <h2>Battery &amp; power</h2>
+    <div class="head-controls">
+      <select id="gauge-style" class="filter" title="gauge style">
+        <option value="gauges-solid">Solid</option>
+        <option value="gauges-gradient" selected>Gradient</option>
+        <option value="gauges-segmented">Segmented</option>
+        <option value="gauges-neon">Neon</option>
+      </select>
+      <span id="battery-summary" class="dim"></span>
+    </div>
+  </div>
+  <div id="thermal-alert" class="thermal-alert" hidden></div>
+  <div class="battery-grid">
+    <div class="battery-side">
+      <div class="vgauges gauges-gradient" id="vgauges">
+        <div class="vgauge" id="vg-batt" title="battery charge">
+          <div class="vbar"><div class="vfill" id="g-batt"></div></div>
+          <span class="vlabel">batt</span><span class="vval" id="g-batt-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-cpu" title="system CPU usage">
+          <div class="vbar"><div class="vfill" id="g-cpu"></div></div>
+          <span class="vlabel">cpu</span><span class="vval" id="g-cpu-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-mem" title="memory (RAM) in use">
+          <div class="vbar"><div class="vfill" id="g-mem"></div></div>
+          <span class="vlabel">mem</span><span class="vval" id="g-mem-v">&ndash;</span>
+        </div>
+        <div class="vgauge" id="vg-disk" title="root volume space used">
+          <div class="vbar"><div class="vfill" id="g-disk"></div></div>
+          <span class="vlabel">disk</span><span class="vval" id="g-disk-v">&ndash;</span>
+        </div>
+      </div>
+      <div class="vitals-detail">
+        <div><span>battery</span><b id="vd-batt">&ndash;</b></div>
+        <div><span>temp</span><b id="vd-temp">&ndash;</b></div>
+        <div><span>ram</span><b id="vd-ram">&ndash;</b></div>
+        <div><span>disk</span><b id="vd-disk">&ndash;</b></div>
+      </div>
+      <div class="volumes-block">
+        <div class="volumes-head">volumes</div>
+        <div id="volumes-list"></div>
+      </div>
+      <div id="battery-assertions" class="assertions"></div>
+    </div>
+    <div class="tbl-wrap">
+      <table id="tbl-power">
+        <thead><tr><th>App</th><th>CPU %</th><th>Runtime</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="dim" style="padding:5px 10px; font-size:11px">CPU% is the
+        available power proxy (no kernel power API needed); runtime = process age.</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" id="privacy-panel">
+  <div class="panel-head">
+    <div class="panel-title">
+      <h2>Privacy events</h2>
+      <span class="tag tag-priv">camera &middot; mic &middot; permissions</span>
+    </div>
+    <div class="head-controls" id="fc-privacy">
+      <input class="filter" id="filter-privacy" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-privacy">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Device</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="files-panel">
+  <div class="panel-head">
+    <h2>File access <span class="tag tag-file">watched dirs</span></h2>
+    <div class="head-controls" id="fc-file">
+      <button id="file-lock-btn" class="purge-btn" style="display:none" data-installed="0"
+              title="file tracing privilege">&#128274;</button>
+      <input class="filter" id="detail-file" placeholder="detail&hellip;"
+             title="filter rows by the detail column only">
+      <input class="filter" id="filter-file" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-file">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Path</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="network-panel">
+  <div class="panel-head">
+    <div class="panel-title">
+      <h2>Network events</h2>
+      <span class="tag tag-net">TCP/UDP endpoints &middot; per-app traffic</span>
+    </div>
+    <div class="head-controls" id="fc-network">
+      <select id="scope-network" class="filter" title="filter by connection scope">
+        <option value="">All connections</option>
+        <option value="internal">Internal</option>
+        <option value="external">External</option>
+      </select>
+      <input class="filter" id="detail-network" placeholder="detail&hellip;"
+             title="filter rows by the detail column only">
+      <input class="filter" id="filter-network" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-network">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Protocol</th><th>Remote</th><th>Scope</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="system-panel">
+  <div class="panel-head">
+    <h2>System &amp; devices <span class="tag tag-sys">usb &middot; mounts &middot; logins &middot; app switches</span></h2>
+    <div class="head-controls" id="fc-system">
+      <input class="filter" id="filter-system" placeholder="filter&hellip;">
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-system">
+      <thead><tr><th>Time</th><th>Kind</th><th>App</th><th>User</th>
+      <th>Device</th><th>Detail</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="blocks-panel">
+  <div class="panel-head">
+    <h2>Firewall rules <span class="tag tag-net" id="blocks-status">checking&hellip;</span></h2>
+    <div class="head-controls">
+      <button id="block-pause-btn" class="purge-btn" title="lift every enforced rule at once">&#9208; pause blocking</button>
+      <button id="block-lock-btn" class="purge-btn" style="display:none" data-enforcing="0"
+              title="blocking state">&#128275;</button>
+      <select id="block-action" class="filter" title="rule action — an allow rule is an exception that overrides broader block rules">
+        <option value="block" selected>&#9940; block</option>
+        <option value="allow">&#9989; allow (exception)</option>
+      </select>
+      <select id="block-type" class="filter" title="what to block">
+        <option value="ip">IP address</option>
+        <option value="connection">IP + port</option>
+        <option value="country">Country (all its IPs)</option>
+        <option value="list">Blocklist file</option>
+        <option value="provider">WGrid list</option>
+        <option value="paste">Paste IP list</option>
+        <option value="app">App (path)</option>
+      </select>
+      <input class="filter" id="block-ip" placeholder="IPv4, e.g. 203.0.113.7">
+      <input class="filter" id="block-port" placeholder="port" style="display:none">
+      <select id="block-country" class="filter" title="country to block" style="display:none">
+        <option value="">— pick a country —</option>
+      </select>
+      <input class="filter" id="block-list" placeholder="/path/to/blocklist.txt" style="display:none"
+             title="one IPv4/CIDR per line — see sample-blocklist.txt in the config scripts folder">
+      <select id="block-provider" class="filter" title="WGrid list (provider) to block" style="display:none">
+        <option value="">— loading WGrid lists… —</option>
+      </select>
+      <input class="filter" id="block-paste-name" placeholder="list name, e.g. my-list" style="display:none">
+      <textarea id="block-paste" class="filter" rows="2" style="display:none"
+        placeholder="one IPv4/CIDR per line&#10;203.0.113.10&#10;198.51.100.0/24"></textarea>
+      <input class="filter" id="block-app" placeholder="/path/to/executable" style="display:none">
+      <button id="block-add" class="purge-btn" title="add a firewall block rule">&#9940; block</button>
+      <button id="block-reapply" class="purge-btn" title="retry applying queued blocks">re-apply</button>
+      <button id="block-helper-update" class="purge-btn group-toggle" type="button" style="display:none"
+              title="reinstall the firewall helper so allow rules can enforce (password once)">update helper</button>
+    </div>
+  </div>
+  <div class="tbl-wrap tall">
+    <table id="tbl-blocks">
+      <thead><tr>
+        <th class="sortable" data-sort="ts">Added</th>
+        <th class="sortable" data-sort="action">Action</th>
+        <th class="sortable" data-sort="type">Type</th>
+        <th class="sortable" data-sort="target">Target</th>
+        <th class="sortable" data-sort="status">Status</th>
+        <th class="sortable" data-sort="detail">Detail</th>
+        <th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="dns-panel">
+  <div class="panel-head">
+    <h2>DNS shield <span class="tag tag-net" id="dns-status-tag">off</span></h2>
+    <div class="head-controls">
+      <button id="dns-toggle" class="purge-btn" title="start or stop the local filtering resolver">start</button>
+      <select id="dns-route-mode" class="filter" title="auto: the helper points system DNS at the shield and restores it on unroute &mdash; never edit System Settings. manual: you set system DNS to 127.0.0.1 yourself." style="display:none">
+        <option value="auto">auto-managed</option>
+        <option value="manual">manual (I set DNS)</option>
+      </select>
+      <button id="dns-route-btn" class="purge-btn" style="display:none"
+              title="route system DNS through the shield (loopback port 53 via the pf helper)">route system DNS</button>
+      <button id="dns-log-btn" class="purge-btn" title="log queried domain names (memory only, wiped when turned off)">&#128221; log queries</button>
+      <select id="dns-rule-action" class="filter" title="block the target, or carve an allow exception out of a block">
+        <option value="block">&#9940; block</option>
+        <option value="allow">allow (exception)</option>
+      </select>
+      <select id="dns-rule-type" class="filter" title="domain: one name &middot; list: a file of domains &middot; provider: a domain list managed in WGrid">
+        <option value="domain">domain</option>
+        <option value="list">list (file)</option>
+        <option value="provider">WGrid list</option>
+      </select>
+      <input class="filter" id="dns-rule-domain" placeholder="domain, e.g. 4life.com" style="width:13em">
+      <input class="filter" id="dns-rule-list" placeholder="/path/to/domains.txt" style="width:15em;display:none">
+      <select id="dns-rule-provider" class="filter" title="WGrid list (provider) whose domains to block" style="display:none">
+        <option value="">&mdash; loading WGrid lists&hellip; &mdash;</option>
+      </select>
+      <button id="dns-rule-add" class="purge-btn" title="add the rule (applies immediately)">add rule</button>
+      <input class="filter" id="dns-list-name" placeholder="list name, e.g. mvps" style="width:11em">
+      <textarea id="dns-list-text" class="filter" rows="2" style="display:none;width:22em"
+        placeholder="paste domains: one per line, or a HOSTS file (0.0.0.0 ads.example.com)"></textarea>
+      <button id="dns-add-list" class="purge-btn" title="add a domain blocklist (allow-* names become allowlists)">add list</button>
+    </div>
+  </div>
+  <div id="dns-banner" class="panel-foot" style="display:none"></div>
+  <div id="dns-stats" class="panel-foot"><span class="dim">shield is off</span></div>
+  <div class="tbl-wrap">
+    <table id="tbl-dns-rules">
+      <thead><tr>
+        <th class="sortable" data-sort="ts">Added</th>
+        <th class="sortable" data-sort="action">Action</th>
+        <th class="sortable" data-sort="type">Type</th>
+        <th class="sortable" data-sort="value">Target</th>
+        <th class="sortable" data-sort="domains">Domains</th>
+        <th class="sortable" data-sort="detail">Detail</th>
+        <th></th></tr></thead>
+      <tbody><tr><td colspan="7" class="dim">no DNS rules yet &mdash; add one above, or paste a bulk list below</td></tr></tbody>
+    </table>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-dns-lists">
+      <thead><tr>
+        <th>List</th><th>Kind</th><th>Domains</th><th></th>
+      </tr></thead>
+      <tbody><tr><td colspan="4" class="dim">no bulk domain lists yet &mdash; paste one above (the MVPS HOSTS file works as-is)</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel-foot" id="dns-hint">ads are refused at the name layer: no IP snapshots, no shared-CDN collateral &middot; auto mode: the helper manages system DNS for you &mdash; never edit it in System Settings while routed</div>
+</section>
+ </main>
+
+<footer>
+  <span id="sse-state" class="dot dot-off"></span>
+  <span id="footer-text">starting&hellip;</span>
+  <span class="spacer"></span>
+  <label class="pause"><input type="checkbox" id="pause"> pause live updates</label>
+</footer>
+
+<script src="/web/app.js"></script>
+</body>
+</html>
