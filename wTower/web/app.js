@@ -36,7 +36,6 @@ const state = {
   panelMinutes: {},    // per event panel override
   scopeConns: "",
   scopeNetwork: "",
-  appConns: "",        // app-name filter for saved connection history
   protocolConns: "",
   statusConns: "",
   liveConnections: [],
@@ -92,13 +91,151 @@ const FILTER_TABLES = ["privacy", "file", "network", "system"];
 // network: time,kind,app,user,protocol,remote,scope,detail).
 const DETAIL_FILTER_COLS = { file: 5, network: 7 };
 
+/* ---- multi-select checkbox filters ---------------------------------------
+   Categorical filters whose option lists grow with the data (apps, states,
+   countries, cities) use a checkbox popover instead of a <select>: several
+   values can be picked at once, and an empty checked set means "no filter",
+   the role the old empty <option> played. The summary button mirrors the
+   pick: "All apps", the single chosen value, or "N selected". */
+const multiFilters = {};   // id → instance; refresh and clear functions use these
+
+document.addEventListener("click", (event) => {
+  for (const open of document.querySelectorAll("details.filter-multi[open]")) {
+    if (!open.contains(event.target)) open.open = false;
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  for (const open of document.querySelectorAll("details.filter-multi[open]")) {
+    open.open = false;
+  }
+});
+
+/* Builds one checkbox filter. When an element with `id` exists it is replaced
+   in place (static filter bars in index.html); without one the caller appends
+   the returned root manually (event-table bars are built entirely in JS). */
+function createMultiFilter(id, { allLabel, onChange, live }) {
+  const root = document.createElement("details");
+  root.className = "filter-multi";
+  root.dataset.multiId = id;
+  root.innerHTML =
+    `<summary class="filter" title="filter by ` +
+    `${esc(allLabel.replace(/^All /, "").toLowerCase())} — several allowed">` +
+      `<span class="filter-multi-label">${esc(allLabel)}</span>` +
+      `<span class="filter-multi-caret">▾</span></summary>` +
+    `<div class="filter-multi-options">` +
+      `<label class="filter-multi-all" title="select every value">` +
+        `<input type="checkbox"><span>All</span></label>` +
+      `<input class="filter filter-multi-search" placeholder="search&hellip;">` +
+      `<div class="filter-multi-list"></div>` +
+    `</div>`;
+  const mount = document.getElementById(id);
+  if (mount) mount.replaceWith(root);
+
+  const allBox = root.querySelector(".filter-multi-all input");
+  const search = root.querySelector(".filter-multi-search");
+  const list = root.querySelector(".filter-multi-list");
+  const label = root.querySelector(".filter-multi-label");
+  const checked = new Set();
+  let options = [];    // [{value, label}]
+  let deferred = null; // options that arrived while the popover was open
+
+  const labelOf = (value) =>
+    (options.find((o) => o.value === value) || { label: value }).label;
+
+  function syncHeader() {
+    search.style.display = options.length > 8 ? "" : "none";
+    allBox.checked = checked.size === 0;
+    allBox.indeterminate = checked.size > 0 && checked.size < options.length;
+    label.textContent = checked.size === 0 ? allLabel
+      : checked.size === 1 ? labelOf([...checked][0])
+      : `${checked.size} selected`;
+  }
+
+  function renderList(filterText = "") {
+    const q = filterText.trim().toLowerCase();
+    const shown = q
+      ? options.filter((o) => o.label.toLowerCase().includes(q) ||
+          o.value.toLowerCase().includes(q))
+      : options;
+    list.innerHTML = shown.map((o) =>
+      `<label class="filter-multi-item${o.stale ? " filter-multi-stale" : ""}" ` +
+      `title="${esc(o.label)}${o.stale ? " — no longer in the live connections" : ""}">` +
+        `<input type="checkbox" value="${esc(o.value)}"` +
+        `${checked.has(o.value) ? " checked" : ""}>` +
+        `<span>${esc(o.label)}</span>` +
+        `${o.stale ? '<span class="filter-multi-gone">0 live</span>' : ""}</label>`).join("") ||
+      '<div class="dim filter-multi-empty">no matches</div>';
+    syncHeader();
+  }
+
+  // All: from an empty set it selects every value (so a few can be unchecked);
+  // otherwise it falls back to "no filter".
+  allBox.addEventListener("change", () => {
+    if (checked.size === 0) {
+      for (const o of options) checked.add(o.value);
+    } else {
+      checked.clear();
+    }
+    renderList(search.value);
+    if (onChange) onChange();
+  });
+  list.addEventListener("change", (event) => {
+    const box = event.target;
+    if (box.tagName !== "INPUT") return;
+    if (box.checked) checked.add(box.value); else checked.delete(box.value);
+    syncHeader();
+    if (onChange) onChange();
+  });
+  search.addEventListener("input", () => renderList(search.value));
+  // reopening replays the search and bakes in options that arrived meanwhile
+  root.addEventListener("toggle", () => {
+    if (!root.open) return;
+    if (deferred) { options = deferred; deferred = null; }
+    search.value = "";
+    renderList("");
+  });
+
+  return {
+    root, checked,
+    /* merge the new values with still-checked ones that have left the data, so
+       a stale pick stays visible and can be unchecked; while the popover is
+       open the rebuild waits for the next open (keeps scroll/search stable).
+       With `live`, stale picks are marked "0 live" (a checked country whose
+       connections all dropped must not read as current data); datasets that
+       span the past (history, destinations) omit the flag — an option absent
+       from the current window still exists in the past. */
+    setOptions(next) {
+      const merged = [...next];
+      const present = new Set(merged.map((o) => o.value));
+      for (const value of checked) {
+        if (!present.has(value)) merged.push({ value, label: value, stale: live });
+      }
+      if (root.open) { deferred = merged; return; }
+      options = merged;
+      renderList(search.value);
+    },
+    clear() { checked.clear(); syncHeader(); },
+  };
+}
+
+/* country checkbox lists shared by the live-connections and destination
+   views: "CC — Name" labels, optional "No geo / pending" sentinel last */
+function countryOptionList(countries, sentinel) {
+  const opts = [...countries.entries()]
+    .sort(([aCc, aName], [bCc, bName]) => (aName || aCc).localeCompare(bName || bCc))
+    .map(([cc, name]) => ({ value: cc, label: cc + (name ? ` — ${name}` : "") }));
+  if (sentinel) opts.push({ value: sentinel, label: "No geo / pending" });
+  return opts;
+}
+
 function panelMinutes(t) {
   return state.panelMinutes[t] || state.histMinutes;
 }
 
 function initFilterSelects() {
   for (const t of FILTER_TABLES) {
-    state.filters[t] = { app: "", kind: "", user: "" };
+    state.filters[t] = { app: new Set(), kind: new Set(), user: new Set() };
     const holder = $("fc-" + t);
     if (!holder) continue;
     const hist = document.createElement("select");
@@ -113,16 +250,16 @@ function initFilterSelects() {
     });
     holder.prepend(hist);
     for (const def of FILTER_DEFS.slice().reverse()) {
-      const sel = document.createElement("select");
-      sel.className = "filter";
-      sel.id = `f-${t}-${def.key}`;
-      sel.title = `filter by ${def.key}`;
-      sel.innerHTML = `<option value="">${def.label}</option>`;
-      sel.addEventListener("change", () => {
-        state.filters[t][def.key] = sel.value;
-        for (const tr of $(`tbl-${t}`).tBodies[0].rows) applyFilter(`tbl-${t}`, tr);
+      const multi = createMultiFilter(`f-${t}-${def.key}`, {
+        allLabel: def.label,
+        onChange: () => {
+          for (const tr of $(`tbl-${t}`).tBodies[0].rows) applyFilter(`tbl-${t}`, tr);
+        },
       });
-      holder.prepend(sel);
+      // the filter state IS the instance's checked set (one shared Set)
+      state.filters[t][def.key] = multi.checked;
+      multiFilters[`f-${t}-${def.key}`] = multi;
+      holder.prepend(multi.root);
     }
     addClearFiltersButton(holder, () => clearEventTableFilters(t));
   }
@@ -139,10 +276,9 @@ function addClearFiltersButton(holder, onClear) {
 }
 
 function clearEventTableFilters(table) {
-  state.filters[table] = { app: "", kind: "", user: "" };
   for (const definition of FILTER_DEFS) {
-    const select = $(`f-${table}-${definition.key}`);
-    if (select) select.value = "";
+    const multi = multiFilters[`f-${table}-${definition.key}`];
+    if (multi) multi.clear();
   }
   const query = $(`filter-${table}`);
   if (query) query.value = "";
@@ -161,20 +297,17 @@ function refreshFilterOptions() {
     const tbody = $(`tbl-${t}`)?.tBodies[0];
     if (!tbody) continue;
     for (const def of FILTER_DEFS) {
-      const sel = $(`f-${t}-${def.key}`);
-      if (!sel) continue;
+      const multi = multiFilters[`f-${t}-${def.key}`];
+      if (!multi) continue;
       const values = new Set();
       for (const tr of tbody.rows) {
         const v = tr.children[def.col] ? tr.children[def.col].textContent.trim() : "";
         if (v && v !== "–" && v !== "-") values.add(v);
         if (values.size > 200) break;
       }
-      const current = state.filters[t][def.key];
-      if (current) values.add(current);
-      const sorted = [...values].sort((a, b) => a.localeCompare(b));
-      sel.innerHTML = `<option value="">${def.label}</option>` +
-        sorted.map((v) =>
-          `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(v)}</option>`).join("");
+      // checked values that left the table stay visible via setOptions' merge
+      multi.setOptions([...values].sort((a, b) => a.localeCompare(b))
+        .map((v) => ({ value: v, label: v })));
     }
   }
 }
@@ -732,7 +865,8 @@ function applyFilter(tblId, tr) {
     if (f) {
       for (const def of FILTER_DEFS) {
         const want = f[def.key];
-        if (want && tr.children[def.col].textContent.trim() !== want) {
+        if (want && want.size &&
+            !want.has(tr.children[def.col].textContent.trim())) {
           ok = false;
           break;
         }
@@ -1103,8 +1237,9 @@ function renderConnectionHistory() {
     groups.get(key).connections.push(connection);
   }
   const query = $("filter-conns").value.trim().toLowerCase();
+  const appSel = multiFilters["app-conns"].checked;
   const visibleGroups = [...groups.values()].filter((group) => {
-    if (state.appConns && group.app !== state.appConns) return false;
+    if (appSel.size && !appSel.has(group.app)) return false;
     group.visibleConnections = group.connections.filter((connection) => {
       if (state.scopeConns && connection.scope !== state.scopeConns) return false;
       if (state.protocolConns &&
@@ -1215,28 +1350,23 @@ function connectionStatus(connection) {
 }
 
 function refreshConnectionAppOptions() {
-  const sel = $("app-conns");
-  if (!sel) return;
+  const multi = multiFilters["app-conns"];
+  if (!multi) return;
   const apps = [...new Set(state.connectionHistory.map((c) => c.app).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  if (state.appConns && !apps.includes(state.appConns)) {
-    apps.push(state.appConns);   // keep the chosen app visible even if idle
-  }
-  sel.innerHTML = '<option value="">All apps</option>' +
-    apps.slice(0, 200).map((a) =>
-      `<option value="${esc(a)}"${a === state.appConns ? " selected" : ""}>` +
-      `${esc(a)}</option>`).join("");
+  // apps picked but idle in this window stay listed (setOptions merge) so the
+  // choice can be seen and unchecked
+  multi.setOptions(apps.map((a) => ({ value: a, label: a })));
 }
 
 $("filter-conns").addEventListener("input", renderConnectionHistory);
 $("connections-range").addEventListener("change", loadConnectionHistory);
 $("refresh-conns-btn").addEventListener("click", loadConnectionHistory);
 $("clear-connection-filters").addEventListener("click", () => {
-  state.appConns = "";
+  multiFilters["app-conns"].clear();
   state.scopeConns = "";
   state.protocolConns = "";
   state.statusConns = "";
-  $("app-conns").value = "";
   $("scope-conns").value = "";
   $("protocol-conns").value = "";
   $("status-conns").value = "";
@@ -1247,10 +1377,8 @@ $("scope-conns").addEventListener("change", (e) => {
   state.scopeConns = e.target.value;
   renderConnectionHistory();
 });
-$("app-conns").addEventListener("change", (e) => {
-  state.appConns = e.target.value;
-  renderConnectionHistory();
-});
+multiFilters["app-conns"] = createMultiFilter("app-conns", {
+  allLabel: "All apps", onChange: renderConnectionHistory });
 $("protocol-conns").addEventListener("change", (e) => {
   state.protocolConns = e.target.value;
   renderConnectionHistory();
@@ -1276,21 +1404,25 @@ $("tbl-live-conns").addEventListener("click", (event) => {
   }
   renderLiveConnections();
 });
-$("app-live-conns").addEventListener("change", renderLiveConnections);
+multiFilters["app-live-conns"] = createMultiFilter("app-live-conns", {
+  allLabel: "All apps", live: true, onChange: renderLiveConnections });
 $("scope-live-conns").addEventListener("change", renderLiveConnections);
-$("geo-live-conns").addEventListener("change", () => {
-  refreshLiveCityOptions();
-  renderLiveConnections();
-});
-$("geo-city-live-conns").addEventListener("change", renderLiveConnections);
-$("state-live-conns").addEventListener("change", renderLiveConnections);
-$("geo-countries-country").addEventListener("change", renderGeoCountries);
+multiFilters["geo-live-conns"] = createMultiFilter("geo-live-conns", {
+  allLabel: "All countries", live: true,
+  onChange: () => { refreshLiveCityOptions(); renderLiveConnections(); } });
+multiFilters["geo-city-live-conns"] = createMultiFilter("geo-city-live-conns", {
+  allLabel: "All cities", live: true, onChange: renderLiveConnections });
+multiFilters["state-live-conns"] = createMultiFilter("state-live-conns", {
+  allLabel: "All states", live: true, onChange: renderLiveConnections });
+multiFilters["geo-countries-country"] = createMultiFilter("geo-countries-country", {
+  allLabel: "All countries", onChange: renderGeoCountries });
 $("geo-countries-mode").addEventListener("change", () => {
   state.countriesMode =
     $("geo-countries-mode").value === "flat" ? "flat" : "country";
   renderGeoCountries();
 });
-$("geo-countries-app").addEventListener("change", renderGeoCountries);
+multiFilters["geo-countries-app"] = createMultiFilter("geo-countries-app", {
+  allLabel: "All apps", onChange: renderGeoCountries });
 $("geo-countries-active").addEventListener("change", renderGeoCountries);
 $("filter-geo-countries").addEventListener("input", renderGeoCountries);
 $("tbl-geo-countries").addEventListener("click", (event) => {
@@ -1362,8 +1494,8 @@ applySortIndicators("tbl-geo-countries", state.sortGeo);
 applySortIndicators("tbl-sites", state.sortSites);
 applySortIndicators("tbl-blocks", state.sortBlocks);
 $("clear-geo-countries-filters").addEventListener("click", () => {
-  $("geo-countries-country").value = "";
-  $("geo-countries-app").value = "";
+  multiFilters["geo-countries-country"].clear();
+  multiFilters["geo-countries-app"].clear();
   $("geo-countries-active").checked = false;
   $("filter-geo-countries").value = "";
   renderGeoCountries();
@@ -1375,7 +1507,8 @@ $("sites-group").addEventListener("change", () => {
     value === "app" || value === "flat" ? value : "site";
   renderSites();
 });
-$("sites-app").addEventListener("change", renderSites);
+multiFilters["sites-app"] = createMultiFilter("sites-app", {
+  allLabel: "All apps", onChange: renderSites });
 $("sites-active").addEventListener("change", renderSites);
 clickSort("tbl-sites", state.sortSites, renderSites);
 $("tbl-sites").addEventListener("click", (event) => {
@@ -1390,17 +1523,18 @@ $("tbl-sites").addEventListener("click", (event) => {
   renderSites();
 });
 $("clear-sites-filters").addEventListener("click", () => {
-  $("sites-app").value = "";
+  multiFilters["sites-app"].clear();
   $("sites-active").checked = false;
   $("filter-sites").value = "";
   renderSites();
 });
 $("clear-live-connection-filters").addEventListener("click", () => {
   $("filter-live-conns").value = "";
-  $("app-live-conns").value = "";
   $("scope-live-conns").value = "";
-  $("geo-live-conns").value = "";
-  $("geo-city-live-conns").value = "";
+  for (const id of ["app-live-conns", "geo-live-conns",
+                    "geo-city-live-conns", "state-live-conns"]) {
+    multiFilters[id].clear();
+  }
   refreshLiveCityOptions();
   renderLiveConnections();
 });
@@ -1449,79 +1583,47 @@ function renderConnectionSummary() {
 }
 
 function refreshLiveAppOptions() {
-  const select = $("app-live-conns");
   const apps = [...new Set((state.liveConnections || []).map((c) => c.app).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const selected = select.value;
-  select.innerHTML = '<option value="">All apps</option>' +
-    apps.map((app) => `<option value="${esc(app)}">${esc(app)}</option>`).join("");
-  if (apps.includes(selected)) select.value = selected;
+  multiFilters["app-live-conns"].setOptions(apps.map((a) => ({ value: a, label: a })));
 }
 
 function refreshLiveStateOptions() {
-  const select = $("state-live-conns");
   const states = [...new Set((state.liveConnections || [])
     .map((c) => NormalizeLiveConnState(c)).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
-  const selected = select.value;
-  select.innerHTML = '<option value="">All states</option>' +
-    states.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
-  if (states.includes(selected)) select.value = selected;
+  multiFilters["state-live-conns"].setOptions(
+    states.map((s) => ({ value: s, label: s })));
 }
 
-/* Geo dropdowns list the countries/cities currently present on live rows and
-   keep the selection across refetches while it still applies. The geo cache
-   resolves asynchronously, so options appear as lookups land; liveNoGeo
-   catches rows without a resolved country (pending lookup or not external).
-   City options narrow to the chosen country when one is picked. */
+/* Geo checkbox filters list the countries/cities currently present on live
+   rows and keep the checked set across refetches while it still applies. The
+   geo cache resolves asynchronously, so options appear as lookups land;
+   liveNoGeo catches rows without a resolved country (pending lookup or not
+   external). City options list the union of the countries picked — or all
+   cities when none is picked. */
 const liveNoGeo = "__nogeo__";
 
-/* Shared country <option> list (flag + ISO code + name) and selection
-   keeper for the dropdowns that rebuild while a filter is picked. */
-function countryOptionsHTML(countries) {
-  return [...countries.entries()]
-    .sort(([aCc, aName], [bCc, bName]) => (aName || aCc).localeCompare(bName || bCc))
-    .map(([cc, name]) => {
-      // No flag glyphs in <option>s: HTML is not rendered there, and on
-      // Windows the emoji pair degrades to letters ("CN CN …").
-      const label = cc + (name ? ` — ${name}` : "");
-      return `<option value="${esc(cc)}">${esc(label)}</option>`;
-    }).join("");
-}
-
-function keepSelectSelection(select, rebuild) {
-  const selected = select.value;
-  rebuild();
-  if ([...select.options].some((o) => o.value === selected)) select.value = selected;
-}
-
 function refreshLiveGeoOptions() {
-  const select = $("geo-live-conns");
   const countries = new Map();
   for (const connection of state.liveConnections || []) {
     if (connection.geo_cc && !countries.has(connection.geo_cc)) {
       countries.set(connection.geo_cc, connection.geo_country || "");
     }
   }
-  keepSelectSelection(select, () => {
-    select.innerHTML = '<option value="">All countries</option>' +
-      countryOptionsHTML(countries) +
-      `<option value="${liveNoGeo}">No geo / pending</option>`;
-  });
+  multiFilters["geo-live-conns"].setOptions(countryOptionList(countries, liveNoGeo));
   refreshLiveCityOptions();
 }
 
 function refreshLiveCityOptions() {
-  const select = $("geo-city-live-conns");
-  const country = $("geo-live-conns").value;
+  const countries = multiFilters["geo-live-conns"].checked;
   const cities = [...new Set((state.liveConnections || [])
-    .filter((c) => c.geo_city && (!country || c.geo_cc === country))
+    .filter((c) => c.geo_city &&
+      (!countries.size || countries.has(c.geo_cc)))
     .map((c) => c.geo_city))]
     .sort((a, b) => a.localeCompare(b));
-  const selected = select.value;
-  select.innerHTML = '<option value="">All cities</option>' +
-    cities.map((city) => `<option value="${esc(city)}">${esc(city)}</option>`).join("");
-  if (cities.includes(selected)) select.value = selected;
+  multiFilters["geo-city-live-conns"].setOptions(
+    cities.map((city) => ({ value: city, label: city })));
 }
 
 /* ---- Connections by country / Sites & apps --------------------------------
@@ -1554,39 +1656,29 @@ async function loadDestinations() {
 }
 
 function refreshGeoCountriesCountryOptions() {
-  const select = $("geo-countries-country");
   const countries = new Map();
   for (const row of state.destinations.countries) {
     if (row.cc && !countries.has(row.cc)) countries.set(row.cc, row.country || "");
   }
-  keepSelectSelection(select, () => {
-    select.innerHTML = '<option value="">All countries</option>' +
-      countryOptionsHTML(countries) +
-      `<option value="${liveNoGeo}">No geo / pending</option>`;
-  });
+  multiFilters["geo-countries-country"].setOptions(
+    countryOptionList(countries, liveNoGeo));
 }
 
 function refreshGeoCountriesAppOptions() {
-  const select = $("geo-countries-app");
   const apps = new Set();
   for (const row of state.destinations.countries) {
     (row.apps || []).forEach((a) => apps.add(a));
   }
-  keepSelectSelection(select, () => {
-    select.innerHTML = '<option value="">All apps</option>' +
-      [...apps].sort((a, b) => a.localeCompare(b))
-        .map((a) => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
-  });
+  multiFilters["geo-countries-app"].setOptions(
+    [...apps].sort((a, b) => a.localeCompare(b))
+      .map((a) => ({ value: a, label: a })));
 }
 
 function refreshSitesAppOptions() {
-  const select = $("sites-app");
   const apps = [...new Set((state.destinations.apps || [])
     .map((a) => a.app))].sort((a, b) => a.localeCompare(b));
-  keepSelectSelection(select, () => {
-    select.innerHTML = '<option value="">All apps</option>' +
-      apps.map((a) => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
-  });
+  multiFilters["sites-app"].setOptions(
+    apps.map((a) => ({ value: a, label: a })));
 }
 
 /* ---- column sorting (click a header: numeric columns start descending,
@@ -1831,17 +1923,16 @@ function ipSubRowHTML(row) {
 }
 
 function renderGeoCountries() {
-  const country = $("geo-countries-country").value;
-  const app = $("geo-countries-app").value;
+  const countrySel = multiFilters["geo-countries-country"].checked;
+  const appSel = multiFilters["geo-countries-app"].checked;
   const activeOnly = $("geo-countries-active").checked;
   const query = $("filter-geo-countries").value.trim().toLowerCase();
   const rows = (state.destinations.countries || []).filter((row) => {
-    if (country === liveNoGeo) {
-      if (row.cc) return false;
-    } else if (country && row.cc !== country) {
+    if (countrySel.size &&
+        !(row.cc ? countrySel.has(row.cc) : countrySel.has(liveNoGeo))) {
       return false;
     }
-    if (app && !(row.apps || []).includes(app)) return false;
+    if (appSel.size && !(row.apps || []).some((a) => appSel.has(a))) return false;
     if (activeOnly && !row.open) return false;
     return !query || JSON.stringify(row).toLowerCase().includes(query);
   });
@@ -1939,7 +2030,7 @@ function siteNameHTML(group) {
 
 function renderSites() {
   const groupBy = state.sitesGroupBy; // site | app | flat
-  const appFilter = $("sites-app").value;
+  const appSel = multiFilters["sites-app"].checked;
   const activeOnly = $("sites-active").checked;
   const query = $("filter-sites").value.trim().toLowerCase();
   const matches = (text) => !query || String(text).toLowerCase().includes(query);
@@ -1964,7 +2055,7 @@ function renderSites() {
       }
     }
     rows = rows.filter((row) => {
-      if (appFilter && row.app !== appFilter) return false;
+      if (appSel.size && !appSel.has(row.app)) return false;
       if (activeOnly && !row.open) return false;
       return !query || matches(row.host) || matches(row.label) || matches(row.app);
     });
@@ -1985,7 +2076,7 @@ function renderSites() {
     const groups = [];
     for (const site of state.destinations.sites || []) {
       if (groupBy !== "site") continue;
-      if (appFilter && !(site.apps || []).includes(appFilter)) continue;
+      if (appSel.size && !(site.apps || []).some((a) => appSel.has(a))) continue;
       if (activeOnly && !site.open) continue;
       const children = (site.ip_rows || []).filter((row) =>
         matches(row.ip) || matches((row.apps || []).join(" ")) || matches(site.host));
@@ -2002,7 +2093,7 @@ function renderSites() {
     }
     for (const app of state.destinations.apps || []) {
       if (groupBy !== "app") continue;
-      if (appFilter && app.app !== appFilter) continue;
+      if (appSel.size && !appSel.has(app.app)) continue;
       if (activeOnly && !app.open) continue;
       const children = (app.sites || []).filter((site) =>
         matches(site.host) || matches(site.label) || matches(app.app));
@@ -2166,21 +2257,22 @@ function appBlockBtnHTML(group) {
 
 function renderLiveConnections() {
   const query = $("filter-live-conns").value.trim().toLowerCase();
-  const app = $("app-live-conns").value;
+  const appSel = multiFilters["app-live-conns"].checked;
   const scope = $("scope-live-conns").value;
-  const geoCountry = $("geo-live-conns").value;
-  const geoCity = $("geo-city-live-conns").value;
-  const stateFilter = $("state-live-conns").value;
+  const geoSel = multiFilters["geo-live-conns"].checked;
+  const citySel = multiFilters["geo-city-live-conns"].checked;
+  const stateSel = multiFilters["state-live-conns"].checked;
   const rows = (state.liveConnections || []).filter((connection) => {
-    if (app && connection.app !== app) return false;
+    if (appSel.size && !appSel.has(connection.app)) return false;
     if (scope && connectionScope(connection) !== scope) return false;
-    if (geoCountry === liveNoGeo) {
-      if (connection.geo_cc) return false;
-    } else if (geoCountry && connection.geo_cc !== geoCountry) {
+    if (geoSel.size &&
+        !(connection.geo_cc ? geoSel.has(connection.geo_cc)
+                            : geoSel.has(liveNoGeo))) {
       return false;
     }
-    if (geoCity && connection.geo_city !== geoCity) return false;
-    if (stateFilter && NormalizeLiveConnState(connection) !== stateFilter) return false;
+    if (citySel.size && !citySel.has(connection.geo_city)) return false;
+    if (stateSel.size &&
+        !stateSel.has(NormalizeLiveConnState(connection))) return false;
     return !query || JSON.stringify(connection).toLowerCase().includes(query);
   });
   const body = $("tbl-live-conns").tBodies[0];
@@ -3535,6 +3627,14 @@ async function loadVisits() {
   state.visits = d.visits || [];
   refreshVisitsOptions();
   renderVisits();
+}
+
+/* rebuild a plain <select>, keeping the current selection while it still
+   applies (visits panel dropdowns stay single-select) */
+function keepSelectSelection(select, rebuild) {
+  const selected = select.value;
+  rebuild();
+  if ([...select.options].some((o) => o.value === selected)) select.value = selected;
 }
 
 /* app + site dropdowns for the visits panel, rebuilt from the loaded data

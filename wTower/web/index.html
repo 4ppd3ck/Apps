@@ -139,23 +139,15 @@
         <option value="app" selected>Group by app</option>
         <option value="flat">Flat list</option>
       </select>
-      <select id="app-live-conns" class="filter" title="filter live connections by app">
-        <option value="">All apps</option>
-      </select>
+      <span id="app-live-conns"></span>
       <select id="scope-live-conns" class="filter" title="filter live connections by scope">
         <option value="">All connections</option>
         <option value="internal">Internal</option>
         <option value="external">External</option>
       </select>
-      <select id="geo-live-conns" class="filter" title="filter live connections by country">
-        <option value="">All countries</option>
-      </select>
-      <select id="geo-city-live-conns" class="filter" title="filter live connections by city">
-        <option value="">All cities</option>
-      </select>
-      <select id="state-live-conns" class="filter" title="filter live connections by state">
-        <option value="">All states</option>
-      </select>
+      <span id="geo-live-conns"></span>
+      <span id="geo-city-live-conns"></span>
+      <span id="state-live-conns"></span>
       <input class="filter" id="filter-live-conns" placeholder="filter&hellip;">
       <button id="clear-live-connection-filters" class="purge-btn clear-filters-btn"
               type="button" title="clear live connection filters">Clear filters</button>
@@ -195,12 +187,8 @@
         <option value="country">Group by country</option>
         <option value="flat">Flat list</option>
       </select>
-      <select id="geo-countries-country" class="filter" title="filter by country">
-        <option value="">All countries</option>
-      </select>
-      <select id="geo-countries-app" class="filter" title="filter by app">
-        <option value="">All apps</option>
-      </select>
+      <span id="geo-countries-country"></span>
+      <span id="geo-countries-app"></span>
       <label class="active-toggle" title="only destinations with open connections">
         <input type="checkbox" id="geo-countries-active"> active
       </label>
@@ -241,9 +229,7 @@
         <option value="app">Group by app</option>
         <option value="flat">Flat list</option>
       </select>
-      <select id="sites-app" class="filter" title="filter by app">
-        <option value="">All apps</option>
-      </select>
+      <span id="sites-app"></span>
       <label class="active-toggle" title="only destinations with open connections">
         <input type="checkbox" id="sites-active"> active
       </label>
@@ -293,9 +279,7 @@
           <option value="720">Last 12 hours</option>
           <option value="1440">Last 24 hours</option>
         </select>
-        <select id="app-conns" class="filter" title="filter history by app">
-          <option value="">All apps</option>
-        </select>
+        <span id="app-conns"></span>
         <select id="scope-conns" class="filter" title="filter history by connection scope">
           <option value="">All connections</option>
           <option value="internal">Internal</option>

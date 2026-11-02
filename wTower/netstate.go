@@ -137,12 +137,22 @@ func NormalizeConnState(state string) string {
 // UpdateConnections replaces the connection table. Rows are normalised in
 // place (collectors hand over freshly built per-poll maps), so the snapshot
 // and the connection events emitted afterwards share one state spelling.
+// Sockets the OS already reports as CLOSED are dropped here: a dead socket
+// is not a live connection, and keeping it out lets the store's
+// missed-snapshot logic end its history lifecycle instead of resetting the
+// counter every poll.
 func (n *NetState) UpdateConnections(conns []map[string]any) {
+	live := conns[:0]
 	for _, conn := range conns {
 		if state, ok := conn["state"].(string); ok {
 			conn["state"] = NormalizeConnState(state)
 		}
+		if StrOf(conn["state"]) == "CLOSED" {
+			continue
+		}
+		live = append(live, conn)
 	}
+	conns = live
 	n.mu.Lock()
 	n.connections = conns
 	ts := Now()

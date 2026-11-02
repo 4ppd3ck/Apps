@@ -39,3 +39,9 @@ AppScopeMonitor/monitor-*
 Sentinel/sentinel-*
 Descale/descale-*
 RepoLens/repolens-*
+
+# wGrid Windows build output (rebuildable, never ship)
+wGrid/wgrid.exe
+
+# Local agent state
+.zcode/

@@ -100,6 +100,10 @@ header { display: flex; align-items: center; justify-content: space-between; fle
 #visibility-msg { color: var(--red); font-size: 12px; }
 .head-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .head-controls select { width: auto; }
+/* filter-bar text inputs run narrower than the global .filter width so the
+   dense bars (files/network event panels) keep Clear filters on the same
+   row instead of wrapping it alone onto a second one */
+.head-controls input.filter { width: 140px; }
 .clear-filters-btn { white-space: nowrap; }
 .visibility-menu { position: relative; }
 .visibility-menu summary { list-style: none; }
@@ -113,6 +117,44 @@ header { display: flex; align-items: center; justify-content: space-between; fle
 .visibility-options .visibility-all { padding-bottom: 6px; border-bottom: 1px solid var(--line); font-weight: 700; }
 .visibility-options label { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .visibility-options input { accent-color: var(--accent); }
+
+/* multi-select checkbox filters (states, countries, apps…): a button that
+   looks like the other .filter controls opening a checkbox popover */
+.filter-multi { position: relative; display: inline-block; }
+.filter-multi summary { list-style: none; cursor: pointer; user-select: none;
+  display: inline-flex; align-items: center; gap: 7px;
+  /* content-sized like the selects beside it (.filter's fixed 180px would
+     widen the bar until the last button wraps onto its own row) */
+  width: auto; min-width: 92px; }
+.filter-multi summary::-webkit-details-marker { display: none; }
+.filter-multi summary .filter-multi-caret { font-size: 9px; color: var(--dim); }
+.filter-multi[open] summary { border-color: var(--accent); }
+.filter-multi-label { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-multi-options {
+  position: absolute; left: 0; top: calc(100% + 5px); z-index: 30;
+  display: flex; flex-direction: column; gap: 6px; min-width: 210px;
+  max-width: calc(100vw - 32px); /* never spill past the viewport edge */
+  padding: 10px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; box-shadow: 0 8px 24px var(--shadow); color: var(--text);
+}
+.filter-multi-all { display: flex; align-items: center; gap: 7px;
+  font-weight: 700; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+  white-space: nowrap; cursor: pointer; }
+.filter-multi-search { width: 100%; }
+.filter-multi-list { display: flex; flex-direction: column; gap: 2px;
+  max-height: 260px; overflow-y: auto; min-width: 190px; }
+.filter-multi-item { display: flex; align-items: center; gap: 7px;
+  white-space: nowrap; cursor: pointer; padding: 2px 0; }
+.filter-multi-item span { overflow: hidden; text-overflow: ellipsis; max-width: 230px; }
+/* live-panel dropdowns: a checked pick whose connections all dropped stays
+   listed (so it can be unchecked) but reads as not current */
+.filter-multi-stale { opacity: .55; }
+.filter-multi-stale span { text-decoration: line-through; }
+.filter-multi-gone { flex: none; margin-left: 6px; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--dim);
+  text-decoration: none; }
+.filter-multi-item input, .filter-multi-all input { accent-color: var(--accent); flex: none; }
+.filter-multi-empty { padding: 4px 0; }
 
 /* battery & power */
 .battery-grid { display: grid; grid-template-columns: 1fr 1.6fr; gap: 12px; padding: 12px 14px; }
