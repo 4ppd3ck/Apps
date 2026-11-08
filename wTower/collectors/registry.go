@@ -25,7 +25,8 @@ func enabledFor(ctx *wtower.Ctx, category string) bool {
 
 // BuildCollectors mirrors build_collectors. The three platform collectors
 // (privacy/files/network) are provided by build-tagged files:
-// *_windows.go, *_linux.go, *_darwin.go.
+// *_windows.go, *_linux.go, *_darwin.go. (The host watchdog lives in the
+// wHawk app since the split; wTower runs the monitoring collectors only.)
 func BuildCollectors(ctx *wtower.Ctx) []wtower.Collector {
 	candidates := []wtower.Collector{
 		newPrivacyCollector(ctx),

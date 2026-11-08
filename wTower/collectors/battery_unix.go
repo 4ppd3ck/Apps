@@ -20,6 +20,99 @@ import (
 	"wtower"
 )
 
+// reLoadNums picks the three load numbers out of `sysctl -n vm.loadavg`
+// ("{ 1.52 2.31 2.80 }"); reBootSec picks the epoch second out of
+// `sysctl -n kern.boottime` ("... sec = 1699..., usecs = ... }").
+var (
+	reLoadNums = regexp.MustCompile(`\d+(?:\.\d+)?`)
+	reBootSec  = regexp.MustCompile(`sec = (\d+)`)
+)
+
+// addSystemVitals rounds out the machine-level gauges on the battery panel:
+// load average (1/5/15 min), uptime, process count and core count — the
+// former Pulse app's live-dashboard numbers, folded into the vitals payload.
+// macOS asks sysctl/ps, Linux reads /proc; Windows omits the fields and the
+// panel renders its usual dashes. Each gauge degrades independently: a
+// collector that fails simply leaves its field out of the payload.
+func addSystemVitals(info map[string]any) {
+	info["cores"] = runtime.NumCPU()
+	switch runtime.GOOS {
+	case "darwin":
+		if _, out, _ := wtower.Run([]string{"sysctl", "-n", "vm.loadavg"},
+			3*time.Second); out != "" {
+			nums := reLoadNums.FindAllString(out, 3)
+			if len(nums) == 3 {
+				load := make([]float64, 3)
+				ok := true
+				for i, s := range nums {
+					v, err := strconv.ParseFloat(s, 64)
+					if err != nil {
+						ok = false
+						break
+					}
+					load[i] = v
+				}
+				if ok {
+					info["load_avg"] = load
+				}
+			}
+		}
+		if _, out, _ := wtower.Run([]string{"sysctl", "-n", "kern.boottime"},
+			3*time.Second); out != "" {
+			if m := reBootSec.FindStringSubmatch(out); m != nil {
+				if sec, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+					info["uptime_sec"] = int64(time.Now().Unix()) - sec
+				}
+			}
+		}
+		if _, out, _ := wtower.Run([]string{"ps", "-A", "-o", "pid="},
+			3*time.Second); out != "" {
+			n := 0
+			for _, line := range strings.Split(out, "\n") {
+				if strings.TrimSpace(line) != "" {
+					n++
+				}
+			}
+			info["procs"] = n
+		}
+	case "linux":
+		if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+			fields := strings.Fields(string(data))
+			if len(fields) >= 3 {
+				load := make([]float64, 3)
+				ok := true
+				for i := 0; i < 3; i++ {
+					v, err := strconv.ParseFloat(fields[i], 64)
+					if err != nil {
+						ok = false
+						break
+					}
+					load[i] = v
+				}
+				if ok {
+					info["load_avg"] = load
+				}
+			}
+		}
+		if data, err := os.ReadFile("/proc/uptime"); err == nil {
+			if f := strings.Fields(string(data)); len(f) > 0 {
+				if up, err := strconv.ParseFloat(f[0], 64); err == nil {
+					info["uptime_sec"] = int64(up)
+				}
+			}
+		}
+		if ents, err := os.ReadDir("/proc"); err == nil {
+			n := 0
+			for _, e := range ents {
+				if e.IsDir() && e.Name()[0] >= '0' && e.Name()[0] <= '9' {
+					n++
+				}
+			}
+			info["procs"] = n
+		}
+	}
+}
+
 func (c *BatteryCollector) runPosix(interval float64) {
 	c.SetStatus("active", "")
 	for !c.Stopped() {
@@ -65,6 +158,7 @@ var (
 func (c *BatteryCollector) collectMacOS() map[string]any {
 	info := map[string]any{}
 	info["thermal"] = c.collectThermalDarwin()
+	addSystemVitals(info)
 	// system CPU% (two `top` samples -> real instantaneous usage)
 	_, topOut, _ := wtower.Run([]string{"top", "-l", "2", "-n", "0", "-s", "1"},
 		25*time.Second)
@@ -273,6 +367,7 @@ func (c *BatteryCollector) collectLinux() map[string]any {
 	bat := linuxBatteryDir()
 	info := map[string]any{}
 	info["thermal"] = c.collectThermalLinux()
+	addSystemVitals(info)
 	// system CPU% from /proc/stat deltas between polls
 	if data, err := os.ReadFile("/proc/stat"); err == nil {
 		first := strings.Fields(strings.SplitN(string(data), "\n", 2)[0])

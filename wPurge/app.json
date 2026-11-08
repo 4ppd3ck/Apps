@@ -3,14 +3,14 @@
   "id": "wpurge",
   "name": "wPurge",
   "icon": "💧",
-  "desc": "Buildup cleaner, uninstaller and startup manager",
+  "desc": "Buildup cleaner, app uninstaller and startup manager",
   "category": "Tools",
   "port": 8212,
   "urlPath": "/",
-  "network": true,
+  "network": false,
   "binary": "wpurge",
   "args": [
     "{port}"
   ],
-  "version": "0.4.0"
+  "version": "0.7.0"
 }

@@ -20,6 +20,8 @@ var defaultPoll = map[string]any{
 
 // DefaultCollectors mirrors the DEFAULTS["collectors"] section.
 // "auto" (android only) -> enabled when adb + a device are present.
+// (The host watchdog is the wHawk app since the split; its category
+// toggle lives there.)
 var DefaultCollectors = map[string]any{
 	"privacy": true, "files": true, "network": true, "devices": true,
 	"logins": true, "appfocus": true, "battery": true, "android": "auto",
@@ -145,8 +147,15 @@ func (c *Config) GetBool(key string, def bool) bool {
 	return def
 }
 
-// Host returns the bind address.
-func (c *Config) Host() string { return c.GetString("host", "127.0.0.1") }
+// Host returns the bind address. APPDECK_HOST (the launcher's bind contract)
+// wins over everything; config.json's "host" is the fallback and loopback the
+// final default.
+func (c *Config) Host() string {
+	if h := os.Getenv("APPDECK_HOST"); h != "" {
+		return h
+	}
+	return c.GetString("host", "127.0.0.1")
+}
 
 // Port returns the bind port.
 func (c *Config) Port() int { return IntOr(c.Data["port"], 8765) }

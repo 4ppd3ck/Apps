@@ -188,6 +188,19 @@ code { color: var(--teal); }
 .tbl-wrap td.actions .btn + .btn { margin-left: 6px; }
 .btn.icon { padding: 4px 8px; line-height: 1.2; }
 
+/* Excel-style column resize for the traces/exclusions tables: a drag
+   handle on every header's right edge. Columns keep the fixed layout +
+   ellipsis by default; dragging one wider grows the table past the panel
+   and .tbl-wrap's horizontal scrollbar reveals the hidden text. (th is
+   position: sticky — sticky counts as positioned, so the absolute handle
+   anchors to its th.) */
+.col-resizer { position: absolute; top: 0; right: 0; width: 12px; height: 100%;
+  cursor: col-resize; touch-action: none; z-index: 2; }
+.col-resizer::after { content: ''; position: absolute; top: 22%; bottom: 22%; right: 5px;
+  width: 2px; border-radius: 2px; background: transparent; transition: background .15s; }
+.col-resizer:hover::after { background: var(--teal); }
+body.col-resizing { cursor: col-resize; -webkit-user-select: none; user-select: none; }
+
 /* sub-tabs inside the Traces tab (Cleanup / Exclusions) */
 .subtabs { display: flex; gap: 4px; margin: 2px 0 14px; border-bottom: 1px solid var(--line); }
 .subtabs button { background: none; border: none; color: var(--dim); padding: 8px 14px; font-weight: 700; cursor: pointer; font-size: 13.5px; border-radius: 8px 8px 0 0; transition: color .15s, background .15s; }

@@ -16,6 +16,9 @@ straight to deletion). Every session is journalled and restorable.
 
 ## What you get
 
+- **🗺️ wGauge companion** — the disk space explorer (sunburst, treemap,
+  bars) is its own app again; its 🧹 Hand to Clean opens wPurge with the
+  scanned path and points you at the matching rule below.
 - **💧 Buildup report** — regenerable caches (browser, app, cargo, brew…), logs, crash
   reports, orphaned downloads — grouped, sized, and separated from *your data*.
 - **🗑️ App uninstaller — one app or a whole batch** — pick an app (or check

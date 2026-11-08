@@ -17,6 +17,16 @@
       <div class="hostline" id="hostline">connecting&hellip;</div>
     </div>
   </div>
+  <nav class="view-switch" id="view-switch" aria-label="Main views">
+    <button id="view-dashboard" class="view-btn active" type="button"
+            aria-pressed="true" title="Live at-a-glance traffic view">Dashboard</button>
+    <button id="view-tables" class="view-btn" type="button"
+            aria-pressed="false" title="Detail and event tables">Tables</button>
+    <button id="view-system" class="view-btn" type="button"
+            aria-pressed="false" title="Battery, power and system vitals">System</button>
+    <button id="view-report" class="view-btn" type="button"
+            aria-pressed="false" title="Usage report">Report</button>
+  </nav>
   <div class="status-wrap">
     <div class="status" id="status-chips"></div>
     <button id="master-toggle" class="master-btn" title="turn all monitoring on or off">
@@ -439,6 +449,8 @@
         <div><span>temp</span><b id="vd-temp">&ndash;</b></div>
         <div><span>ram</span><b id="vd-ram">&ndash;</b></div>
         <div><span>disk</span><b id="vd-disk">&ndash;</b></div>
+        <div><span>load</span><b id="vd-load">&ndash;</b></div>
+        <div><span>system</span><b id="vd-sys">&ndash;</b></div>
       </div>
       <div class="volumes-block">
         <div class="volumes-head">volumes</div>
@@ -652,6 +664,194 @@
   <div class="panel-foot" id="dns-hint">ads are refused at the name layer: no IP snapshots, no shared-CDN collateral &middot; auto mode: the helper manages system DNS for you &mdash; never edit it in System Settings while routed</div>
 </section>
  </main>
+
+<main id="report-view" class="report-view" hidden>
+<section class="panel report-period-panel">
+  <div class="panel-head"><h2>Usage report</h2>
+    <div class="head-inline">
+      <button id="report-lock-all" class="purge-btn" type="button" aria-pressed="false"
+              title="lock the report arrangement">Lock layout</button>
+      <details class="visibility-menu">
+        <summary id="report-section-menu" class="purge-btn"
+                 title="choose which report sections are shown">Sections</summary>
+        <div id="report-section-options" class="visibility-options"></div>
+      </details>
+    </div>
+  </div>
+  <div class="report-controls">
+    <label>Period
+      <select id="report-period" class="filter">
+        <option value="1" selected>Today</option>
+        <option value="h1">Last hour</option>
+        <option value="h3">Last 3 hours</option>
+        <option value="h6">Last 6 hours</option>
+        <option value="h12">Last 12 hours</option>
+        <option value="7">7 days</option>
+        <option value="30">30 days</option>
+        <option value="custom">Custom range&hellip;</option>
+      </select>
+    </label>
+    <input type="datetime-local" id="report-from" class="filter" hidden
+           title="custom range start">
+    <span id="report-range-sep" class="dim" hidden>&rarr;</span>
+    <input type="datetime-local" id="report-to" class="filter" hidden
+           title="custom range end">
+    <span class="report-window dim" id="report-window"></span>
+    <span class="spacer"></span>
+    <button id="report-csv-apps" class="purge-btn" type="button"
+            title="download the screen-time table as CSV">export apps CSV</button>
+    <button id="report-csv-domains" class="purge-btn" type="button"
+            title="download the site-time table as CSV">export sites CSV</button>
+    <button id="report-csv-daily" class="purge-btn" type="button"
+            title="download the daily data-usage table as CSV">export daily CSV</button>
+  </div>
+  <div class="panel-foot">screen time comes from the appfocus collector's app switches;
+    site time is network presence, not reading time &mdash; exact domain names need
+    DNS logging; the daily data-usage chart fills from the moment this version
+    starts recording (older totals live in the sites table)</div>
+</section>
+
+<section class="panel" id="report-screen-panel" data-section="screen">
+  <div class="panel-head"><h2>Screen time by app <span class="dim">(foreground usage)</span></h2>
+    <div class="head-controls">
+      <input id="report-filter-screen" class="filter report-filter"
+             placeholder="filter apps&hellip;" title="filter the app rows">
+      <button type="button" class="filter-x" data-filter-clear="screen" title="reset filter">&times;</button>
+    </div>
+  </div>
+  <div class="report-body" style="--cols: 2">
+    <div class="report-donut" id="report-donut-screen"></div>
+    <div class="report-charts">
+      <div id="report-screen-bars" class="top-apps"><div class="empty">waiting for data&hellip;</div></div>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-report-screen">
+      <thead><tr>
+        <th class="sortable" data-sort="name">App</th>
+        <th class="sortable" data-sort="seconds">Foreground</th>
+        <th class="sortable" data-sort="sessions">Switches</th>
+        <th>Share</th>
+      </tr></thead>
+      <tbody><tr><td colspan="4" class="dim">no app_switch events in this window &mdash; is the appfocus collector active?</td></tr></tbody>
+    </table>
+  </div>
+  <div class="report-table-foot" id="report-foot-screen"></div>
+  <div class="panel-foot" id="report-screen-idle"></div>
+</section>
+
+<section class="panel" id="report-protos-panel" data-section="protos">
+  <div class="panel-head"><h2>Traffic types</h2>
+    <div class="head-controls">
+      <input id="report-filter-protos" class="filter report-filter"
+             placeholder="filter&hellip;" title="filter the protocol rows">
+      <button type="button" class="filter-x" data-filter-clear="protos" title="reset filter">&times;</button>
+    </div>
+  </div>
+  <div class="report-body" style="--cols: 2">
+    <div class="report-donut" id="report-donut-protos"></div>
+    <div class="tbl-wrap">
+      <table id="tbl-report-protos">
+        <thead><tr>
+          <th class="sortable" data-sort="name">Protocol</th>
+          <th class="sortable" data-sort="connections">Connections</th>
+          <th class="sortable" data-sort="seconds">Time connected</th>
+          <th class="sortable" data-sort="bytes_total">Data</th>
+        </tr></thead>
+        <tbody><tr><td colspan="4" class="dim">no external connections in this window</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="report-table-foot" id="report-foot-protos"></div>
+  <div class="panel-foot">bytes come from per-socket counters &mdash; UDP (QUIC) often has none, so the TCP share leads</div>
+</section>
+
+<section class="panel" id="report-sites-panel" data-section="sites">
+  <div class="panel-head"><h2>Site time <span class="dim">(network presence)</span></h2>
+    <div class="head-controls">
+      <span class="chip-toggle" id="report-site-donut-mode">
+        <button type="button" data-mode="time" title="colour the site donut by time connected">time</button><button
+          type="button" data-mode="data" class="active" title="colour the site donut by data consumed">data</button>
+      </span>
+      <input id="report-filter-sites" class="filter report-filter"
+             placeholder="filter sites&hellip;" title="filter the site rows">
+      <button type="button" class="filter-x" data-filter-clear="sites" title="reset filter">&times;</button>
+    </div>
+  </div>
+  <div class="report-body" style="--cols: 3">
+    <div class="report-donut" id="report-donut-sites"></div>
+    <div class="report-donut" id="report-donut-countries"></div>
+    <div class="report-charts">
+      <div id="report-site-bars" class="top-apps"><div class="empty">waiting for data&hellip;</div></div>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-report-sites">
+      <thead><tr>
+        <th class="sortable" data-sort="name">Site</th>
+        <th class="sortable" data-sort="seconds">Time connected</th>
+        <th class="sortable" data-sort="connections">Connections</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th>Main apps</th>
+      </tr></thead>
+      <tbody><tr><td colspan="6" class="dim">no external connections in this window</td></tr></tbody>
+    </table>
+  </div>
+  <div class="report-table-foot" id="report-foot-sites"></div>
+</section>
+
+<section class="panel" id="report-usage-panel" data-section="usage">
+  <div class="panel-head"><h2>Data usage per day <span class="dim" id="report-usage-total"></span></h2>
+    <div class="head-controls">
+      <input id="report-filter-daily" class="filter report-filter"
+             placeholder="filter days&hellip;" title="filter the day rows">
+      <button type="button" class="filter-x" data-filter-clear="daily" title="reset filter">&times;</button>
+    </div>
+  </div>
+  <canvas id="report-usage-chart" height="150"></canvas>
+  <div class="tbl-wrap">
+    <table id="tbl-report-usage">
+      <thead><tr>
+        <th class="sortable" data-sort="day">Day</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="bytes_total">Total</th>
+      </tr></thead>
+      <tbody><tr><td colspan="4" class="dim">the daily rollup fills as the monitor records traffic</td></tr></tbody>
+    </table>
+  </div>
+  <div class="report-table-foot" id="report-foot-usage"></div>
+</section>
+
+<section class="panel" id="report-byapp-panel" data-section="byapp">
+  <div class="panel-head"><h2>Data by app</h2>
+    <div class="head-controls">
+      <input id="report-filter-byapp" class="filter report-filter"
+             placeholder="filter apps&hellip;" title="filter the app rows">
+      <button type="button" class="filter-x" data-filter-clear="byapp" title="reset filter">&times;</button>
+    </div>
+  </div>
+  <div class="report-body" style="--cols: 2">
+    <div class="report-donut" id="report-donut-byapp"></div>
+    <div class="report-charts">
+      <div id="report-usage-apps" class="top-apps"><div class="empty">waiting for data&hellip;</div></div>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table id="tbl-report-byapp">
+      <thead><tr>
+        <th class="sortable" data-sort="name">App</th>
+        <th class="sortable" data-sort="bytes_in">&darr; In</th>
+        <th class="sortable" data-sort="bytes_out">&uarr; Out</th>
+        <th class="sortable" data-sort="bytes_total">Total</th>
+      </tr></thead>
+      <tbody><tr><td colspan="4" class="dim">the daily rollup fills as the monitor records traffic</td></tr></tbody>
+    </table>
+  </div>
+  <div class="report-table-foot" id="report-foot-byapp"></div>
+</section>
+</main>
 
 <footer>
   <span id="sse-state" class="dot dot-off"></span>

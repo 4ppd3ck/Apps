@@ -21,7 +21,7 @@
       <span class="logo">💧</span>
       <div>
         <h1>wPurge</h1>
-        <p class="sub">Buildup report · app uninstaller · startup manager. Nothing is touched without your confirmation.</p>
+        <p class="sub">Buildup cleaner · app uninstaller · startup manager. Nothing is touched without your confirmation.</p>
       </div>
     </div>
     <div class="machine" id="machine"></div>
@@ -48,6 +48,7 @@
 
   <!-- ============ Buildup tab ============ -->
   <section id="tab-buildup">
+    <div id="handoffNote" class="note" hidden></div>
     <section class="stats" id="stats" hidden></section>
     <div class="toolbar">
       <button id="scanBtn" class="btn primary">🔍 Scan this machine</button>
@@ -142,6 +143,17 @@
     <div id="uaList"></div>
     <h2>System-wide (read-only)</h2>
     <div id="saList"></div>
+  </section>
+
+      <aside class="an-side">
+        <div class="an-crumbs" id="an-crumbs"></div>
+        <div class="an-sel" id="an-sel">
+          <p class="muted" id="an-selEmpty">Scan a folder, then click any segment to zoom in; click the middle to go back up.</p>
+        </div>
+        <h3>Biggest files <span class="muted small" id="an-bigMeta"></span></h3>
+        <div id="an-bigList" class="an-big-list"></div>
+      </aside>
+    </div>
   </section>
 
   <footer>

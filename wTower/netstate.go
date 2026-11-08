@@ -77,6 +77,11 @@ type NetState struct {
 	// only source that captures it.
 	appPending   map[string][2]int64
 	lastAppBytes map[string][2]int64
+
+	// report rollup: the same flush feeds the per-day usage_daily buckets.
+	// usageNamer turns a remote IP into its registrable domain at flush
+	// time (cache-only lookups — see WireReportRollup); nil = IP literals.
+	usageNamer func(ip string) string
 }
 
 // NewNetState creates the shared network state.
@@ -314,6 +319,58 @@ func ConnBytesKey(proto, local, remote string) string {
 // at most this window of byte deltas.
 const destFlushInterval = 30.0 // seconds
 
+// SetUsageNamer installs the IP -> registrable-domain resolver used when
+// flushing the daily usage rollup. Contract: cache-only (DNS-answer map,
+// geo/rDNS caches) — never a blocking lookup; empty return keeps the IP.
+func (n *NetState) SetUsageNamer(fn func(ip string) string) {
+	n.mu.Lock()
+	n.usageNamer = fn
+	n.mu.Unlock()
+}
+
+// usageDailyDeltas converts flushed byte batches into per-day rollup rows:
+// 'app' rows from the per-process totals (the once-counted trend source)
+// and 'domain' rows from the socket-attributed destination deltas.
+func usageDailyDeltas(day string, namerOf func(string) string,
+	appBatch, destBatch []DestinationDelta) []UsageDailyDelta {
+	out := make([]UsageDailyDelta, 0, len(appBatch)+len(destBatch))
+	for _, d := range appBatch {
+		if d.App == "" {
+			continue
+		}
+		out = append(out, UsageDailyDelta{
+			Day: day, Kind: "app", Key: d.App,
+			BytesIn: d.BytesIn, BytesOut: d.BytesOut,
+		})
+	}
+	for _, d := range destBatch {
+		key := d.RemoteIP
+		if namerOf != nil {
+			if dom := namerOf(d.RemoteIP); dom != "" {
+				key = dom
+			}
+		}
+		out = append(out, UsageDailyDelta{
+			Day: day, Kind: "domain", Key: key,
+			BytesIn: d.BytesIn, BytesOut: d.BytesOut,
+		})
+	}
+	return out
+}
+
+// flushUsageDaily persists the rollup rows alongside the traffic flush; the
+// namer is snapshotted under the store lock at the call site.
+func (n *NetState) flushUsageDaily(namerOf func(string) string,
+	appBatch, destBatch []DestinationDelta, ts float64) {
+	deltas := usageDailyDeltas(LocalDay(ts), namerOf, appBatch, destBatch)
+	if len(deltas) == 0 {
+		return
+	}
+	if err := n.store.AddUsageDaily(deltas); err != nil {
+		fmt.Printf("[network] usage rollup error: %v\n", err)
+	}
+}
+
 // UpdateConnBytes replaces the best-effort per-connection byte counters
 // (cumulative since socket creation; macOS nettop per-socket output). A nil
 // map clears the previous counters. Counters are diffed against the previous
@@ -400,6 +457,7 @@ func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
 		}
 		n.appPending = map[string][2]int64{}
 	}
+	namer := n.usageNamer
 	n.mu.Unlock()
 
 	if flushDest {
@@ -411,6 +469,9 @@ func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
 		if err := n.store.AddAppTraffic(appBatch, now); err != nil {
 			fmt.Printf("[network] app traffic error: %v\n", err)
 		}
+	}
+	if flushDest || flushApp {
+		n.flushUsageDaily(namer, appBatch, batch, now)
 	}
 }
 
@@ -495,6 +556,7 @@ func (n *NetState) FlushDestinationBytes() {
 	ts := Now()
 	n.lastDestFlush = ts
 	store := n.store
+	namer := n.usageNamer
 	n.mu.Unlock()
 	if len(batch) > 0 {
 		if err := store.AddDestinationBytes(batch, ts); err != nil {
@@ -506,6 +568,7 @@ func (n *NetState) FlushDestinationBytes() {
 			fmt.Printf("[network] app traffic error: %v\n", err)
 		}
 	}
+	n.flushUsageDaily(namer, appBatch, batch, ts)
 }
 
 // Snapshot returns the enriched view served to the dashboard.

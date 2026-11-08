@@ -76,6 +76,14 @@ CREATE TABLE IF NOT EXISTS app_traffic (
     first_seen REAL NOT NULL,
     last_seen REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage_daily (
+    day TEXT NOT NULL,           -- local calendar day "2026-11-06"
+    kind TEXT NOT NULL,          -- 'app' (per-process totals) | 'domain' (socket-attributed)
+    key TEXT NOT NULL,           -- app name / registrable domain (IP-literal fallback)
+    bytes_in INTEGER NOT NULL DEFAULT 0,
+    bytes_out INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, kind, key)
+);
 CREATE TABLE IF NOT EXISTS blocks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -92,7 +100,7 @@ CREATE TABLE IF NOT EXISTS dns_rules (
     ts REAL NOT NULL,
     type TEXT NOT NULL,          -- domain | list | provider
     action TEXT NOT NULL DEFAULT 'block', -- block | allow (allow = exception)
-    value TEXT NOT NULL,         -- domain | file path | IPolice provider name
+    value TEXT NOT NULL,         -- domain | file path | wGrid provider name
     detail TEXT
 );
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
@@ -316,6 +324,11 @@ func (s *Store) runRetentionPass() {
 	if _, err := s.DeleteBefore(cutoff); err != nil {
 		fmt.Printf("[store] retention error: %v\n", err)
 	}
+	// the usage rollup keeps its own, longer horizon so the report's
+	// 30-day view survives a short event-retention window
+	if err := s.pruneUsageDaily(days); err != nil {
+		fmt.Printf("[store] usage rollup retention error: %v\n", err)
+	}
 }
 
 // SetRetention updates the retention window (days) live; the loop picks it
@@ -468,7 +481,10 @@ func (s *Store) Counts(since float64) (map[string]map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// DeleteBefore removes retained events and network-history samples before cutoff.
+// DeleteBefore removes retained events and network-history samples before
+// cutoff. usage_daily is NOT pruned here — it is the report's long-term
+// memory and outlives the event tables (see runRetentionPass); only the
+// explicit "delete everything" purge wipes it (DeleteUsageDailyAll).
 func (s *Store) DeleteBefore(cutoff float64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -494,6 +510,31 @@ func (s *Store) DeleteBefore(cutoff float64) (int64, error) {
 		return 0, err
 	}
 	return affected, nil
+}
+
+// usageRollupMinDays is the floor for usage_daily retention: the report's
+// 30-day view must survive the default 7-day event window.
+const usageRollupMinDays = 35
+
+// DeleteUsageDailyAll wipes the report rollup (the "delete everything" purge).
+func (s *Store) DeleteUsageDailyAll() error {
+	_, err := s.db.Exec("DELETE FROM usage_daily")
+	return err
+}
+
+// pruneUsageDaily drops rollup days older than max(days, usageRollupMinDays).
+// Called from the retention pass only — with auto-purge disabled
+// (retention_days <= 0) the rollup grows like every other table.
+func (s *Store) pruneUsageDaily(days int) error {
+	if days <= 0 {
+		return nil
+	}
+	if days < usageRollupMinDays {
+		days = usageRollupMinDays
+	}
+	_, err := s.db.Exec("DELETE FROM usage_daily WHERE day < ?",
+		LocalDay(Now()-float64(days)*86400))
+	return err
 }
 
 // DestinationFirstSeen maps each remote IP to the oldest moment any app was
@@ -852,6 +893,208 @@ type DestinationSpan struct {
 	Open        int64
 	Seconds     float64
 	LastSeen    float64
+}
+
+// UsageDailyDelta is one per-day byte accumulation for the report rollup:
+// the local day bucket, a kind ('app' or 'domain'), the key, and the byte
+// deltas to add.
+type UsageDailyDelta struct {
+	Day      string
+	Kind     string
+	Key      string
+	BytesIn  int64
+	BytesOut int64
+}
+
+// UsageDailyRow is one aggregated usage_daily row — either per day (trend)
+// or per key (apps / domains).
+type UsageDailyRow struct {
+	Day      string `json:"day,omitempty"`
+	Key      string `json:"key"`
+	BytesIn  int64  `json:"bytes_in"`
+	BytesOut int64  `json:"bytes_out"`
+}
+
+// AddUsageDaily accumulates per-day byte deltas into the report rollup
+// (UPSERT per (day, kind, key)). The daily trend reads kind='app' only —
+// per-process totals count TCP+UDP exactly once; 'domain' rows are
+// socket-attributed shares of the same bytes and must never be summed with
+// them.
+func (s *Store) AddUsageDaily(deltas []UsageDailyDelta) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, d := range deltas {
+		if d.Day == "" || d.Kind == "" || d.Key == "" {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO usage_daily (day, kind, key, bytes_in, bytes_out)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(day, kind, key) DO UPDATE SET
+			     bytes_in = bytes_in + excluded.bytes_in,
+			     bytes_out = bytes_out + excluded.bytes_out`,
+			d.Day, d.Kind, d.Key, d.BytesIn, d.BytesOut); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// UsageDailyTrend sums the per-process ('app') rollup per day over the
+// inclusive local-day range — the once-counted byte source for the daily
+// trend chart.
+func (s *Store) UsageDailyTrend(sinceDay, untilDay string) ([]UsageDailyRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT day, SUM(bytes_in), SUM(bytes_out) FROM usage_daily
+		 WHERE kind = 'app' AND day >= ? AND day <= ?
+		 GROUP BY day ORDER BY day ASC`, sinceDay, untilDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageDailyRow
+	for rows.Next() {
+		var r UsageDailyRow
+		if err := rows.Scan(&r.Day, &r.BytesIn, &r.BytesOut); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// UsageDailyKeys sums the rollup per key for one kind over the inclusive
+// local-day range, heaviest total first.
+func (s *Store) UsageDailyKeys(kind, sinceDay, untilDay string) ([]UsageDailyRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT key, SUM(bytes_in), SUM(bytes_out) FROM usage_daily
+		 WHERE kind = ? AND day >= ? AND day <= ?
+		 GROUP BY key ORDER BY SUM(bytes_in) + SUM(bytes_out) DESC`,
+		kind, sinceDay, untilDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageDailyRow
+	for rows.Next() {
+		var r UsageDailyRow
+		if err := rows.Scan(&r.Key, &r.BytesIn, &r.BytesOut); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AppSwitchRow is one foreground-app switch event — the screen-time raw
+// material. Seed rows (exactly one per device, ts < since) carry the app
+// that held the foreground when the window opened.
+type AppSwitchRow struct {
+	Ts     float64
+	App    string
+	Device string
+	Seed   bool
+}
+
+// AppSwitchSpans returns the app_switch events in [since, until] oldest
+// first, plus one seed row per device carrying the last switch before the
+// window (the report's diffing needs to know what was foreground at `since`).
+func (s *Store) AppSwitchSpans(since, until float64) (seeds, rows []AppSwitchRow, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// SQLite's bare-column-with-MAX rule returns the row carrying each
+	// device's most recent pre-window switch.
+	seedRows, err := s.db.Query(
+		`SELECT ts, app, COALESCE(device, ''), MAX(id) FROM events
+		 WHERE kind = 'app_switch' AND ts < ?
+		 GROUP BY COALESCE(device, '')`, since)
+	if err != nil {
+		return nil, nil, err
+	}
+	for seedRows.Next() {
+		var r AppSwitchRow
+		var app sql.NullString
+		if err := seedRows.Scan(&r.Ts, &app, &r.Device, new(int64)); err != nil {
+			seedRows.Close()
+			return nil, nil, err
+		}
+		r.App = app.String
+		r.Seed = true
+		seeds = append(seeds, r)
+	}
+	seedRows.Close()
+	if err := seedRows.Err(); err != nil {
+		return nil, nil, err
+	}
+	winRows, err := s.db.Query(
+		`SELECT ts, app, COALESCE(device, '') FROM events
+		 WHERE kind = 'app_switch' AND ts >= ? AND ts <= ?
+		 ORDER BY ts ASC LIMIT 200000`, since, until)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer winRows.Close()
+	for winRows.Next() {
+		var r AppSwitchRow
+		var app sql.NullString
+		if err := winRows.Scan(&r.Ts, &app, &r.Device); err != nil {
+			return nil, nil, err
+		}
+		r.App = app.String
+		rows = append(rows, r)
+	}
+	return seeds, rows, winRows.Err()
+}
+
+// ProtoSpan is one per-protocol rollup of external connection lifecycles
+// (the report's traffic-type lens). Bytes are the per-socket counters —
+// TCP-heavy, since UDP sockets often have no observable counters.
+type ProtoSpan struct {
+	Proto       string  `json:"proto"`
+	Connections int64   `json:"connections"`
+	Seconds     float64 `json:"seconds"`
+	BytesIn     int64   `json:"bytes_in"`
+	BytesOut    int64   `json:"bytes_out"`
+}
+
+// ProtoSpans aggregates external connection lifecycles by protocol over the
+// window (connection_history rows still visible at `since`).
+func (s *Store) ProtoSpans(since float64) ([]ProtoSpan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT COALESCE(NULLIF(proto, ''), '?'), COUNT(*),
+		        SUM(COALESCE(ended_at, last_seen) - started_at),
+		        SUM(bytes_in), SUM(bytes_out)
+		 FROM connection_history
+		 WHERE scope = 'external' AND last_seen >= ?
+		 GROUP BY 1 ORDER BY 4 + 5 DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProtoSpan
+	for rows.Next() {
+		var p ProtoSpan
+		if err := rows.Scan(&p.Proto, &p.Connections, &p.Seconds,
+			&p.BytesIn, &p.BytesOut); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // AddDestinationBytes accumulates per-destination byte deltas (UPSERT).
@@ -1302,4 +1545,35 @@ func (b *EventBus) Publish(ev *Event) *Event {
 		}
 	}
 	return ev
+}
+
+// PublishRaw fans a non-event payload out to SSE subscribers without
+// persisting it (live dashboard messages that are not store events). The
+// envelope is the caller's.
+func (b *EventBus) PublishRaw(v any) {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	subs := make([]chan string, 0, len(b.subs))
+	for q := range b.subs {
+		subs = append(subs, q)
+	}
+	b.mu.Unlock()
+	for _, q := range subs {
+		select {
+		case q <- string(payload):
+		default:
+			// drop oldest, keep stream live
+			select {
+			case <-q:
+			default:
+			}
+			select {
+			case q <- string(payload):
+			default:
+			}
+		}
+	}
 }

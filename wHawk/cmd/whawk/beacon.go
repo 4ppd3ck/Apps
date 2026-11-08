@@ -55,7 +55,7 @@ func splitRemote(remote string) (string, int) {
 // TrackEndpoints processes connection events (ID-ordered ascending, already
 // filtered to ID > cursor) and returns findings plus the updated endpoint map.
 // learnUntil suppresses new-endpoint low alerts while the baseline is young.
-// intel (may be nil — IPolice offline) classifies first-seen endpoints against
+// intel (may be nil — wGrid offline) classifies first-seen endpoints against
 // known provider ranges; rules.IntelMatch decides label/suppress/autoack.
 func TrackEndpoints(rules *Rules, events []MonitorEvent, endpoints map[string]any,
 	learnUntil float64, now float64, intel *Intel) ([]Finding, map[string]any) {

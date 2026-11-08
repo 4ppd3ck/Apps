@@ -2,8 +2,8 @@
 
 package wtower
 
-// Listening-port enumeration for IPolice endpoint relocation (see
-// ipoliceport_darwin.go): /proc/net/tcp{,6} lists every LISTEN socket
+// Listening-port enumeration for wGrid endpoint relocation (see
+// wgridport_darwin.go): /proc/net/tcp{,6} lists every LISTEN socket
 // without external tools or connect attempts. Local address is hex
 // "IP:PORT"; state 0A is LISTEN. Wildcard binds are included — they answer
 // on 127.0.0.1 too.

@@ -79,16 +79,16 @@ type DNSShield struct {
 	routeKnown string // "on" | "off" | "unknown" — helper rdr state cache
 
 	// rules overlay: dns_rules table rows applied on top of the *.txt lists
-	// at every reload. Provider rules fetch their raw lines from IPolice
+	// at every reload. Provider rules fetch their raw lines from wGrid
 	// (CountrySource.ProviderRawLines) and cache them here — the cache
-	// survives IPolice outages ("stale cache beats no data").
+	// survives wGrid outages ("stale cache beats no data").
 	providerDomains map[string][]string
 	providerSyncAt  map[string]float64 // provider -> last successful sync
 	providerErr     map[string]string  // provider -> last sync error
 	ruleCounts      map[int64]int      // rule id -> parsed domains
 	ruleErr         map[int64]string   // rule id -> load error (missing file…)
 
-	// system-DNS routing: mode (auto-managed vs manual), the watchdog's
+	// system-DNS routing: mode (auto-managed vs manual), and the canary's
 	// consecutive-failure count, and the auto-revert record the dashboard
 	// banners until the next successful route.
 	routeMode    string // "auto" (default) | "manual" — config dns_route_mode
@@ -128,12 +128,12 @@ const (
 	dnsAnswerCap = 8192 // resolved-IP -> name entries kept in memory
 
 	dnsProviderTTL   = 5 * time.Minute // provider rule re-sync cadence
-	dnsWatchdogFails = 3               // consecutive canary failures → auto-revert
+	dnsCanaryFails = 3               // consecutive canary failures → auto-revert
 
 	// dnsCanaryNames rotates per probe: any single fixed name can be
 	// filtered or broken by a particular resolver (one ISP router here
 	// blackholes example.com specifically), and a canary that only some
-	// networks answer would trip the watchdog spuriously. Any response —
+	// networks answer would trip the canary spuriously. Any response —
 	// NXDOMAIN, SERVFAIL, anything — counts as "the path answers".
 	dnsCanaryNames = "google.com,cloudflare.com,github.com,apple.com"
 	// dnsCanaryDeadline outlives the shield's worst-case local answer: with
@@ -150,7 +150,7 @@ func canaryName() string {
 	return names[int(canaryIdx.Add(1)-1)%len(names)]
 }
 
-// dnsAutoRevert records one watchdog auto-unroute (dashboard banner).
+// dnsAutoRevert records one canary auto-unroute (dashboard banner).
 type dnsAutoRevert struct {
 	Ts     float64 `json:"ts"`
 	Reason string  `json:"reason"`
@@ -375,7 +375,7 @@ func (d *DNSShield) Port() int {
 // Stop shuts the listeners down (idempotent). While the system DNS route
 // is on, the redirect is lifted FIRST and best-effort: a stopped shield
 // behind a live rdr blackholes every system lookup — the exact outage the
-// watchdog guards between ticks.
+// canary guards between ticks.
 func (d *DNSShield) Stop() {
 	d.mu.RLock()
 	wasRunning := d.running
@@ -937,8 +937,8 @@ func tcpRoundTrip(up string, query []byte) ([]byte, bool) {
 
 // housekeeping refreshes the upstream list (network changes rewrite
 // resolv.conf), re-loads the lists when files change on disk, re-syncs
-// provider rules from IPolice on their TTL, and runs the routed-health
-// watchdog.
+// provider rules from wGrid on their TTL, and runs the routed-health
+// canary.
 func (d *DNSShield) housekeeping() {
 	defer d.wg.Done()
 	dir := d.listsDir()
@@ -959,18 +959,18 @@ func (d *DNSShield) housekeeping() {
 			if d.syncProviderRules() {
 				d.Reload()
 			}
-			d.watchdogTick()
+			d.canaryTick()
 		}
 	}
 }
 
-// watchdogTick guards the routed state: while system DNS rides the loopback
+// canaryTick guards the routed state: while system DNS rides the loopback
 // redirect, a wedged shield or broken rdr blackholes every lookup. After
-// dnsWatchdogFails consecutive canary failures the route is lifted
+// dnsCanaryFails consecutive canary failures the route is lifted
 // automatically — auto mode also restores the previous system DNS servers
 // (the helper recorded them) — and the revert is surfaced in the status
 // payload for the dashboard banner.
-func (d *DNSShield) watchdogTick() {
+func (d *DNSShield) canaryTick() {
 	d.routeMu.Lock()
 	known := d.routeKnown
 	d.routeMu.Unlock()
@@ -990,7 +990,7 @@ func (d *DNSShield) watchdogTick() {
 	d.watchFails++
 	fails := d.watchFails
 	d.mu.Unlock()
-	if fails < dnsWatchdogFails {
+	if fails < dnsCanaryFails {
 		return
 	}
 	mode := d.RouteMode()
@@ -1000,7 +1000,7 @@ func (d *DNSShield) watchdogTick() {
 		reason += " and the previous DNS servers were restored"
 	}
 	if err := d.routeOff(); err != nil {
-		fmt.Printf("[dns] watchdog: %s, but lifting the route failed: %v\n",
+		fmt.Printf("[dns] canary: %s, but lifting the route failed: %v\n",
 			reason, err)
 		return
 	}
@@ -1008,7 +1008,7 @@ func (d *DNSShield) watchdogTick() {
 	d.watchFails = 0
 	d.autoReverted = &dnsAutoRevert{Ts: Now(), Reason: reason}
 	d.mu.Unlock()
-	fmt.Printf("[dns] watchdog: %s\n", reason)
+	fmt.Printf("[dns] canary: %s\n", reason)
 }
 
 func dirMtime(dir string) time.Time {
@@ -1220,7 +1220,7 @@ func (d *DNSShield) RouteSystem(enable bool) error {
 
 // routeOff lifts the route (helper dns off) — in auto mode the helper also
 // restores the DNS servers it recorded per network service. Shared by the
-// unroute button, Stop, and the watchdog.
+// unroute button, Stop, and the canary.
 func (d *DNSShield) routeOff() error {
 	helper := HelperMac
 	if runtime.GOOS == "linux" {
@@ -1495,7 +1495,7 @@ func (d *DNSShield) AddRule(rtype, action, value string) (int64, error) {
 			return 0, fmt.Errorf("empty WGrid provider name")
 		}
 		detail = "WGrid list — domains synced every " +
-			dnsProviderTTL.String() + " (offline IPolice keeps the last set)"
+			dnsProviderTTL.String() + " (offline wGrid keeps the last set)"
 	default:
 		return 0, fmt.Errorf("type must be domain, list or provider")
 	}
@@ -1553,7 +1553,7 @@ func (d *DNSShield) RulesStatus() []map[string]any {
 	return out
 }
 
-// syncProviderRules refreshes every provider rule from IPolice when its
+// syncProviderRules refreshes every provider rule from wGrid when its
 // cached copy is older than dnsProviderTTL; reports whether any cached set
 // changed (the caller reloads then). Network I/O happens without the shield
 // lock; only the cache swap takes it. A failed sync keeps the cached
@@ -1585,7 +1585,7 @@ func (d *DNSShield) syncProviderRules() bool {
 	return changed
 }
 
-// syncOneProvider pulls one provider's raw lines from IPolice and parses
+// syncOneProvider pulls one provider's raw lines from wGrid and parses
 // them into domains (CIDR/IP lines are skipped by parseDomainLine — a mixed
 // list feeds both the firewall's CIDR half and this DNS half). Reports
 // whether the cached set changed.
@@ -1607,14 +1607,14 @@ func (d *DNSShield) syncOneProvider(name string) bool {
 	old := d.providerDomains[name]
 	switch {
 	case err != nil:
-		d.providerErr[name] = truncate("IPolice unreachable: "+err.Error(), 200)
+		d.providerErr[name] = truncate("wGrid unreachable: "+err.Error(), 200)
 		if len(old) > 0 && Now()-d.providerSyncAt[name] < 24*3600 {
 			return false // keep serving the last good set; error still surfaced
 		}
 		delete(d.providerDomains, name)
 		return len(old) > 0
 	case !found:
-		d.providerErr[name] = "IPolice has no provider " + name
+		d.providerErr[name] = "wGrid has no provider " + name
 		delete(d.providerDomains, name)
 		return len(old) > 0
 	default:
@@ -1678,7 +1678,7 @@ func defaultCanaryProbe(addr string) bool {
 	return err == nil && n >= 12
 }
 
-// dnsSystemAddr is the address the routed-health watchdog probes: loopback
+// dnsSystemAddr is the address the routed-health routed-health canary probes: loopback
 // :53, the pf rdr target — the exact path system lookups take once routed.
 const dnsSystemAddr = "127.0.0.1:53"
 

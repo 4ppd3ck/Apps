@@ -1,26 +1,26 @@
 // Country-level (CIDR) block data: per-country IPv4 ranges consumed from
-// IPolice, the internet-facing companion app, over loopback — exactly the
-// Sentinel pattern (Sentinel/cmd/sentinel/intel.go): the monitor itself
-// never fetches feeds from the internet, IPolice does, and an offline
-// IPolice degrades to the last cached table ("queued" rules, never errors
+// wGrid, the internet-facing companion app, over loopback — exactly the
+// wHawk pattern (wHawk/cmd/sentinel/intel.go): the monitor itself
+// never fetches feeds from the internet, wGrid does, and an offline
+// wGrid degrades to the last cached table ("queued" rules, never errors
 // that break the dashboard).
 //
-// The monitor auto-configures one IPolice source per blocked country on
+// The monitor auto-configures one wGrid source per blocked country on
 // first use: firehol's per-country netset (raw.githubusercontent.com, HTTPS)
-// — IPolice's `text` format parses those files natively. Ranges are cached
-// on disk under data/country-cidrs/ so restarts and IPolice outages keep
+// — wGrid's `text` format parses those files natively. Ranges are cached
+// on disk under data/country-cidrs/ so restarts and wGrid outages keep
 // the last good table enforceable.
 //
 // Safety: loopback, RFC1918, link-local, multicast, bogon and broadcast
 // ranges are filtered out before anything reaches the firewall (again in
 // the privileged helpers), and the loopback API is never affected.
 //
-// The IPolice port is not stable: the launcher assigns it at start and has
+// The wGrid port is not stable: the launcher assigns it at start and has
 // reassigned it more than once, so a pinned IPOLICE_URL eventually refuses.
 // On refusal the source relocates (CountrySource.relocate): it asks the
 // AppDeck registry (/api/apps, the authoritative port book every app
 // receives APPDECK_LAUNCHER_URL for), then falls back to probing listening
-// loopback ports for IPolice's /api/networks signature, and persists the
+// loopback ports for wGrid's /api/networks signature, and persists the
 // winner under data/wgrid-endpoint.json.
 package wtower
 
@@ -44,24 +44,24 @@ import (
 )
 
 const (
-	// WGridDefaultURL is the loopback base URL of the IPolice companion
-	// app; override with the IPOLICE_URL env (the Sentinel contract).
+	// WGridDefaultURL is the loopback base URL of the wGrid companion
+	// app; override with the IPOLICE_URL env (the wHawk contract).
 	WGridDefaultURL = "http://127.0.0.1:24504"
 
 	// launcherDefaultURL is the AppDeck dashboard, whose /api/apps registry
 	// is the authoritative port book for launcher-spawned peers — the same
-	// registry IPolice's wired.go consults to find Sentinel. Every app the
+	// registry wGrid's wired.go consults to find wHawk. Every app the
 	// launcher spawns also gets APPDECK_LAUNCHER_URL pointing here.
 	launcherDefaultURL = "http://127.0.0.1:9090"
-	launcherIpoliceID  = "ipolice"
+	launcherWGridID    = "wgrid"
 
 	countryProviderPrefix = "country/"
 	countryCacheTTL       = 7 * 24 * time.Hour
 	countryFetchTimeout   = 10 * time.Second
 	countryRefreshTimeout = 120 * time.Second // git-based feeds can be slow
 	ownCountryTTL         = time.Hour
-	ipoliceProbeTimeout   = 2 * time.Second
-	ipoliceRelocateGap    = 15 * time.Second // min spacing between relocations
+	wgridProbeTimeout   = 2 * time.Second
+	wgridRelocateGap    = 15 * time.Second // min spacing between relocations
 	// maxRemoteIPChars is the conservative netsh command-line budget for one
 	// rule's remoteip= list (Windows CL size is ~32k; 400 IPv4 CIDRs land
 	// far below both that and the firewall's per-rule entry limit).
@@ -184,14 +184,14 @@ func ParseIPFile(path string) ([]string, error) {
 	return FilterSafeCIDRs(raw), nil
 }
 
-// EnsureListSource registers a user blocklist file as an IPolice `file`
-// source (IPolice re-reads it on every refresh), so the same ranges are
-// visible to IPolice's dashboard and to Sentinel — the "both" wiring:
-// the monitor enforces the file directly, IPolice mirrors it. Existing
+// EnsureListSource registers a user blocklist file as an wGrid `file`
+// source (wGrid re-reads it on every refresh), so the same ranges are
+// visible to wGrid's dashboard and to wHawk — the "both" wiring:
+// the monitor enforces the file directly, wGrid mirrors it. Existing
 // registration is success.
 func (cs *CountrySource) EnsureListSource(label, path string) error {
 	if cs == nil {
-		return nil // no IPolice wiring without the client; direct still works
+		return nil // no wGrid wiring without the client; direct still works
 	}
 	src := map[string]any{
 		"name":   "list/" + label,
@@ -238,11 +238,11 @@ type countryEntry struct {
 	FetchedAt float64  `json:"fetched_at"`
 }
 
-// CountrySource serves per-country CIDR lists from IPolice with a disk
-// cache. Nil-safe: a nil *CountrySource behaves like an absent IPolice.
+// CountrySource serves per-country CIDR lists from wGrid with a disk
+// cache. Nil-safe: a nil *CountrySource behaves like an absent wGrid.
 //
-// The IPolice endpoint is not fixed: the launcher assigns each app its port
-// at start and has reassigned IPolice more than once, so a pinned URL
+// The wGrid endpoint is not fixed: the launcher assigns each app its port
+// at start and has reassigned wGrid more than once, so a pinned URL
 // eventually refuses. When that happens the source relocates (see
 // relocate): launcher registry first, then a signature-validated loopback
 // scan, keeping the winner in memory and on disk.
@@ -274,13 +274,13 @@ type CountrySource struct {
 
 // NewCountrySource opens (or creates) the disk cache under dir/country-cidrs.
 func NewCountrySource(dir string) *CountrySource {
-	base := ipoliceBaseURL()
+	base := wgridBaseURL()
 	cs := &CountrySource{
 		home:        dir,
 		dir:         filepath.Join(dir, "country-cidrs"),
 		base:        base,
 		cfgURL:      base,
-		launcherURL: ipoliceLauncherURL(),
+		launcherURL: wgridLauncherURL(),
 		discover:    true,
 		hc:          &http.Client{Timeout: countryFetchTimeout},
 		cache:       map[string]countryEntry{},
@@ -291,17 +291,17 @@ func NewCountrySource(dir string) *CountrySource {
 	return cs
 }
 
-func ipoliceBaseURL() string {
+func wgridBaseURL() string {
 	if v := os.Getenv("WGRID_URL"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
 	return WGridDefaultURL
 }
 
-// ipoliceLauncherURL resolves the AppDeck registry base for peer discovery:
+// wgridLauncherURL resolves the AppDeck registry base for peer discovery:
 // the launcher hands every app it spawns an APPDECK_LAUNCHER_URL; the
-// well-known dashboard port is the fallback (IPolice's wired.go contract).
-func ipoliceLauncherURL() string {
+// well-known dashboard port is the fallback (wGrid's wired.go contract).
+func wgridLauncherURL() string {
 	if v := os.Getenv("APPDECK_LAUNCHER_URL"); v != "" {
 		return strings.TrimRight(v, "/")
 	}
@@ -317,7 +317,7 @@ func (cs *CountrySource) baseURL() string {
 
 // -- endpoint relocation (autoscan) ---------------------------------------
 
-type ipoliceEndpoint struct {
+type wgridEndpoint struct {
 	URL string  `json:"url"`
 	At  float64 `json:"at"`
 }
@@ -329,12 +329,12 @@ func (cs *CountrySource) endpointPath() string {
 // saveEndpoint records the relocated endpoint so a monitor restart starts
 // at the right port instead of failing first and rescanning.
 func (cs *CountrySource) saveEndpoint(url string) {
-	raw, err := json.Marshal(ipoliceEndpoint{URL: url, At: Now()})
+	raw, err := json.Marshal(wgridEndpoint{URL: url, At: Now()})
 	if err != nil {
 		return
 	}
 	if err := os.WriteFile(cs.endpointPath(), raw, 0o600); err != nil {
-		fmt.Printf("[ipolice] endpoint save error: %v\n", err)
+		fmt.Printf("[wgrid] endpoint save error: %v\n", err)
 	}
 }
 
@@ -344,7 +344,7 @@ func (cs *CountrySource) loadEndpoint() string {
 	if err != nil {
 		return ""
 	}
-	var ep ipoliceEndpoint
+	var ep wgridEndpoint
 	if json.Unmarshal(raw, &ep) != nil {
 		return ""
 	}
@@ -382,19 +382,19 @@ func isConnRefused(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "connection refused")
 }
 
-// relocate re-finds IPolice after the configured endpoint refused a
+// relocate re-finds wGrid after the configured endpoint refused a
 // connection. The launcher assigns every app its port at start (and has
-// reassigned IPolice more than once), so a pinned URL goes stale whenever
+// reassigned wGrid more than once), so a pinned URL goes stale whenever
 // the assignment changes. Candidates are probed in order — configured URL,
 // the manual-run default, the last relocated endpoint (persisted), the
 // launcher's /api/apps registry, then every listening loopback port — and
-// the first one serving IPolice's /api/networks signature wins. Cooldown-
-// gated and single-flight: a down IPolice costs one scan per gap, not one
+// the first one serving wGrid's /api/networks signature wins. Cooldown-
+// gated and single-flight: a down wGrid costs one scan per gap, not one
 // per request. Returns the new base, or "" (nothing found / skipped).
 func (cs *CountrySource) relocate() string {
 	cs.mu.Lock()
 	if !cs.discover || cs.discovering ||
-		Now()-cs.lastDiscover < ipoliceRelocateGap.Seconds() {
+		Now()-cs.lastDiscover < wgridRelocateGap.Seconds() {
 		cs.mu.Unlock()
 		return ""
 	}
@@ -421,7 +421,7 @@ func (cs *CountrySource) relocate() string {
 		cs.base = c
 		cs.mu.Unlock()
 		cs.saveEndpoint(c)
-		fmt.Printf("[ipolice] endpoint moved — relocated to %s\n", c)
+		fmt.Printf("[wgrid] endpoint moved — relocated to %s\n", c)
 		return c
 	}
 	return ""
@@ -457,14 +457,14 @@ func (cs *CountrySource) relocateCandidates() []string {
 }
 
 // launcherPeerURL asks the AppDeck launcher — which spawned every app and
-// handed it its --port — where the ipolice app currently serves, the same
-// registry IPolice's wired.go uses to find Sentinel. "" when no launcher is
+// handed it its --port — where the wgrid app currently serves, the same
+// registry wGrid's wired.go uses to find wHawk. "" when no launcher is
 // configured or reachable, or it reports no usable (non-zero) port.
 func (cs *CountrySource) launcherPeerURL() string {
 	if cs.launcherURL == "" {
 		return ""
 	}
-	hc := &http.Client{Timeout: ipoliceProbeTimeout}
+	hc := &http.Client{Timeout: wgridProbeTimeout}
 	resp, err := hc.Get(cs.launcherURL + "/api/apps")
 	if err != nil {
 		return ""
@@ -481,7 +481,7 @@ func (cs *CountrySource) launcherPeerURL() string {
 		return ""
 	}
 	for _, a := range apps {
-		if a.ID == launcherIpoliceID && a.Port != 0 {
+		if a.ID == launcherWGridID && a.Port != 0 {
 			return fmt.Sprintf("http://127.0.0.1:%d", a.Port)
 		}
 	}
@@ -495,11 +495,11 @@ func (cs *CountrySource) scanPorts() []int {
 	return listeningLoopbackPorts()
 }
 
-// probeWGrid reports whether base serves IPolice's /api/networks
+// probeWGrid reports whether base serves wGrid's /api/networks
 // signature (HTTP 200 with a providers array) — how relocation candidates
 // are told apart from any other local server that happens to listen there.
 func (cs *CountrySource) probeWGrid(base string) bool {
-	hc := &http.Client{Timeout: ipoliceProbeTimeout}
+	hc := &http.Client{Timeout: wgridProbeTimeout}
 	resp, err := hc.Get(base + "/api/networks")
 	if err != nil {
 		return false
@@ -552,8 +552,8 @@ func (cs *CountrySource) saveLocked() {
 }
 
 // Cached returns the currently cached ranges for a cache key (a country
-// code, or an IPolice provider name for provider rules) — no I/O to
-// IPolice. ok=false when nothing is cached. Used by the dashboard and by
+// code, or an wGrid provider name for provider rules) — no I/O to
+// wGrid. ok=false when nothing is cached. Used by the dashboard and by
 // enforcer rebuild paths.
 func (cs *CountrySource) Cached(key string) ([]string, bool) {
 	if cs == nil {
@@ -585,7 +585,7 @@ func (cs *CountrySource) CachedCount(cc string) int {
 
 // EnsureBackground is Ensure for cache-warming paths (block add, reconcile,
 // dashboard polls): one attempt per country per minute, failures silent —
-// IPolice's feed refresh runs concurrently and the next attempt catches it.
+// wGrid's feed refresh runs concurrently and the next attempt catches it.
 func (cs *CountrySource) EnsureBackground(cc string) {
 	if cs == nil {
 		return
@@ -603,9 +603,9 @@ func (cs *CountrySource) EnsureBackground(cc string) {
 	_, _ = cs.Ensure(cc)
 }
 
-// EnsureProvider fetches a user-managed IPolice provider's CIDRs — the
-// "upload a list in IPolice, block it in the monitor" path. Cache-first
-// with the same TTL as countries; the user manages the source in IPolice
+// EnsureProvider fetches a user-managed wGrid provider's CIDRs — the
+// "upload a list in wGrid, block it in the monitor" path. Cache-first
+// with the same TTL as countries; the user manages the source in wGrid
 // (Databases UI or API), the monitor only consumes it.
 func (cs *CountrySource) EnsureProvider(name string) ([]string, error) {
 	if cs == nil {
@@ -613,7 +613,7 @@ func (cs *CountrySource) EnsureProvider(name string) ([]string, error) {
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil, fmt.Errorf("empty IPolice provider name")
+		return nil, fmt.Errorf("empty wGrid provider name")
 	}
 	cs.mu.Lock()
 	e, ok := cs.cache[name]
@@ -628,20 +628,20 @@ func (cs *CountrySource) EnsureProvider(name string) ([]string, error) {
 		if ok { // stale cache beats no data
 			return FilterSafeCIDRs(e.CIDRs), nil
 		}
-		return nil, fmt.Errorf("IPolice (%s) unreachable: %w", cs.baseURL(), err)
+		return nil, fmt.Errorf("wGrid (%s) unreachable: %w", cs.baseURL(), err)
 	}
 	if !found {
 		if ok {
 			return FilterSafeCIDRs(e.CIDRs), nil
 		}
-		return nil, fmt.Errorf("IPolice has no provider %q — add it in "+
-			"IPolice first (Databases → add source)", name)
+		return nil, fmt.Errorf("wGrid has no provider %q — add it in "+
+			"wGrid first (Databases → add source)", name)
 	}
 	if len(cidrs) == 0 {
 		if ok {
 			return FilterSafeCIDRs(e.CIDRs), nil
 		}
-		return nil, fmt.Errorf("IPolice provider %q has no ranges", name)
+		return nil, fmt.Errorf("wGrid provider %q has no ranges", name)
 	}
 	cs.mu.Lock()
 	cs.cache[name] = countryEntry{CC: name, CIDRs: cidrs, FetchedAt: Now()}
@@ -668,7 +668,7 @@ func (cs *CountrySource) EnsureProviderBackground(name string) {
 	_, _ = cs.EnsureProvider(name)
 }
 
-// ProviderNames lists the IPolice providers the user manages themselves —
+// ProviderNames lists the wGrid providers the user manages themselves —
 // everything except the monitor-managed country/* and list/* feeds.
 func (cs *CountrySource) ProviderNames() ([]string, error) {
 	if cs == nil {
@@ -695,7 +695,7 @@ func (cs *CountrySource) ProviderNames() ([]string, error) {
 	return out, nil
 }
 
-// Ensure returns the safe CIDR list for cc, refreshing from IPolice when
+// Ensure returns the safe CIDR list for cc, refreshing from wGrid when
 // the cache is missing or stale. Errors carry a dashboard-ready reason.
 func (cs *CountrySource) Ensure(cc string) ([]string, error) {
 	if cs == nil {
@@ -718,7 +718,7 @@ func (cs *CountrySource) Ensure(cc string) ([]string, error) {
 		return FilterSafeCIDRs(e.CIDRs), nil
 	}
 
-	cidrs, err := cs.fetchFromIPolice(cc)
+	cidrs, err := cs.fetchFromwGrid(cc)
 	if err != nil {
 		if ok { // stale cache beats no data
 			return FilterSafeCIDRs(e.CIDRs), nil
@@ -729,7 +729,7 @@ func (cs *CountrySource) Ensure(cc string) ([]string, error) {
 		if ok {
 			return append([]string(nil), e.CIDRs...), nil
 		}
-		return nil, fmt.Errorf("IPolice returned no ranges for country %s", cc)
+		return nil, fmt.Errorf("wGrid returned no ranges for country %s", cc)
 	}
 	cs.mu.Lock()
 	cs.cache[cc] = countryEntry{CC: cc, CIDRs: cidrs, FetchedAt: Now()}
@@ -738,40 +738,40 @@ func (cs *CountrySource) Ensure(cc string) ([]string, error) {
 	return cidrs, nil
 }
 
-// countryRetryGap paces the post-registration polls: IPolice's feed refresh
+// countryRetryGap paces the post-registration polls: wGrid's feed refresh
 // runs concurrently with this function, so the provider may appear only
 // after a few seconds. Var so tests can shrink it.
 var countryRetryGap = 2500 * time.Millisecond
 
-// fetchFromIPolice pulls provider "country/<CC>" from IPolice, registering
+// fetchFromwGrid pulls provider "country/<CC>" from wGrid, registering
 // the country feed as a source first when the provider is missing.
-func (cs *CountrySource) fetchFromIPolice(cc string) ([]string, error) {
+func (cs *CountrySource) fetchFromwGrid(cc string) ([]string, error) {
 	cidrs, ok, err := cs.providerCIDRs(countryProviderPrefix + cc)
 	if err != nil {
-		return nil, fmt.Errorf("IPolice (%s) unreachable: %w", cs.baseURL(), err)
+		return nil, fmt.Errorf("wGrid (%s) unreachable: %w", cs.baseURL(), err)
 	}
 	if ok {
 		return cidrs, nil
 	}
-	// The provider does not exist yet: register its feed in IPolice
+	// The provider does not exist yet: register its feed in wGrid
 	// (persisted to sources.json there), refresh, and poll briefly — the
 	// feed fetch runs concurrently with these checks.
-	if err := cs.ensureIPoliceSource(cc); err != nil {
-		return nil, fmt.Errorf("IPolice has no country/%s feed and registering "+
+	if err := cs.ensurewGridSource(cc); err != nil {
+		return nil, fmt.Errorf("wGrid has no country/%s feed and registering "+
 			"it failed: %w", cc, err)
 	}
 	for attempt := 0; attempt < 5; attempt++ {
 		time.Sleep(countryRetryGap)
 		cidrs, ok, err = cs.providerCIDRs(countryProviderPrefix + cc)
 		if err != nil {
-			return nil, fmt.Errorf("IPolice (%s) unreachable after source add: %w",
+			return nil, fmt.Errorf("wGrid (%s) unreachable after source add: %w",
 				cs.baseURL(), err)
 		}
 		if ok {
 			return cidrs, nil
 		}
 	}
-	return nil, fmt.Errorf("IPolice has no ranges for country/%s yet — "+
+	return nil, fmt.Errorf("wGrid has no ranges for country/%s yet — "+
 		"its feed is still refreshing; try again shortly", cc)
 }
 
@@ -798,10 +798,10 @@ func (cs *CountrySource) providerCIDRs(provider string) ([]string, bool, error) 
 	return nil, false, nil
 }
 
-// ProviderRawLines returns one provider's lines exactly as IPolice serves
+// ProviderRawLines returns one provider's lines exactly as wGrid serves
 // them — not CIDR-filtered. The DNS shield consumes these: for a `text`
-// source IPolice stores every feed line verbatim, so a list of domains
-// rides in the same field the CIDR lists use. found=false when IPolice is
+// source wGrid stores every feed line verbatim, so a list of domains
+// rides in the same field the CIDR lists use. found=false when wGrid is
 // reachable but has no such provider.
 func (cs *CountrySource) ProviderRawLines(name string) ([]string, bool, error) {
 	if cs == nil {
@@ -809,7 +809,7 @@ func (cs *CountrySource) ProviderRawLines(name string) ([]string, bool, error) {
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil, false, fmt.Errorf("empty IPolice provider name")
+		return nil, false, fmt.Errorf("empty wGrid provider name")
 	}
 	var payload struct {
 		Providers []struct {
@@ -832,11 +832,11 @@ func (cs *CountrySource) ProviderRawLines(name string) ([]string, bool, error) {
 	return nil, false, nil
 }
 
-// ensureIPoliceSource registers a per-country zone as an IPolice source
-// (ipdeny.com's published country ranges, fetched by IPolice over HTTPS —
+// ensurewGridSource registers a per-country zone as an wGrid source
+// (ipdeny.com's published country ranges, fetched by wGrid over HTTPS —
 // it is the internet-facing half of the pair). "already configured" is
 // success.
-func (cs *CountrySource) ensureIPoliceSource(cc string) error {
+func (cs *CountrySource) ensurewGridSource(cc string) error {
 	lcc := strings.ToLower(cc)
 	src := map[string]any{
 		"name":   countryProviderPrefix + cc,
@@ -852,7 +852,7 @@ func (cs *CountrySource) ensureIPoliceSource(cc string) error {
 	}
 	// sources/add activates the source; refresh pulls the feed now.
 	if err := cs.postJSON("/api/refresh", map[string]any{}); err != nil {
-		return fmt.Errorf("IPolice refresh failed: %w", err)
+		return fmt.Errorf("wGrid refresh failed: %w", err)
 	}
 	return nil
 }
@@ -861,7 +861,7 @@ func (cs *CountrySource) getJSON(path string, out any) error {
 	base := cs.baseURL()
 	err := cs.getJSONAt(base, path, out)
 	if err != nil && isConnRefused(err) {
-		// nothing listens there anymore — IPolice was reassigned; find it
+		// nothing listens there anymore — wGrid was reassigned; find it
 		// and retry the request once against the new endpoint
 		if nb := cs.relocate(); nb != "" {
 			return cs.getJSONAt(nb, path, out)
@@ -879,7 +879,7 @@ func (cs *CountrySource) getJSONAt(base, path string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		cs.markDown(fmt.Errorf("%s -> %d", path, resp.StatusCode))
-		return fmt.Errorf("IPolice %s -> %d", path, resp.StatusCode)
+		return fmt.Errorf("wGrid %s -> %d", path, resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		cs.markDown(err)
@@ -911,7 +911,7 @@ func (cs *CountrySource) postJSON(path string, body any) error {
 			if json.NewDecoder(resp.Body).Decode(&payload) == nil && payload.Error != "" {
 				msg = payload.Error
 			}
-			err := fmt.Errorf("IPolice %s", msg)
+			err := fmt.Errorf("wGrid %s", msg)
 			cs.markDown(err)
 			return err
 		}
@@ -947,7 +947,7 @@ func (cs *CountrySource) markUp() {
 	cs.mu.Unlock()
 }
 
-// Status summarizes the IPolice link for the dashboard. Read-only: it must
+// Status summarizes the wGrid link for the dashboard. Read-only: it must
 // never trigger a fetch (only blockAdd resolves the own country on demand).
 func (cs *CountrySource) Status() map[string]any {
 	if cs == nil {
@@ -960,7 +960,7 @@ func (cs *CountrySource) Status() map[string]any {
 		"up":        cs.up,
 		"available": cs.up,
 		// true once the endpoint was re-found after a refusal (the
-		// configured IPOLICE_URL/default no longer matches where IPolice is)
+		// configured IPOLICE_URL/default no longer matches where wGrid is)
 		"discovered": cs.base != cs.cfgURL,
 	}
 	if cs.lastErr != "" {

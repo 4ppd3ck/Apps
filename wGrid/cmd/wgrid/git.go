@@ -1,8 +1,9 @@
 package main
 
-// Git-backed sources: shallow-clone a repository once and keep it current,
-// then read the list file out of the working tree. Uses the git CLI (like
-// wPurge shells out to plutil/pgrep) to keep the stdlib-only build.
+// Git-backed intel-feed sources: shallow-clone a repository once and keep it
+// current, then read the list file out of the working tree. Uses the git CLI
+// (like wPurge shells out to plutil/pgrep) to keep the stdlib-only build.
+// Ported from the former wGrid app.
 
 import (
 	"context"
@@ -70,13 +71,13 @@ func gitRepoFile(s Source, reposDir string) ([]byte, error) {
 			args = append(args, "--branch", s.Branch, "--single-branch")
 		}
 		args = append(args, s.URL, repo)
-		if out, err := runGit(args); err != nil {
+		if out, err := runGit(args, s.URL); err != nil {
 			os.RemoveAll(repo) // a partial clone must not poison the next attempt
 			// Some transports (plain local paths, restricted hosts) refuse
 			// shallow clones — retry once with full history.
-			if out2, err2 := runGit([]string{"clone", "--quiet", s.URL, repo}); err2 != nil {
+			if out2, err2 := runGit([]string{"clone", "--quiet", s.URL, repo}, s.URL); err2 != nil {
 				os.RemoveAll(repo)
-				return nil, fmt.Errorf("clone %s: %s: %s", s.URL, err2, tail(out2))
+				return nil, fmt.Errorf("clone %s: %s: %s", s.URL, err2, tailOut(out2))
 			}
 			_ = out
 		}
@@ -85,11 +86,11 @@ func gitRepoFile(s Source, reposDir string) ([]byte, error) {
 		if s.Branch != "" {
 			ref = s.Branch
 		}
-		if out, err := runGit([]string{"-C", repo, "fetch", "--depth", "1", "--quiet", "origin", ref}); err != nil {
-			return nil, fmt.Errorf("fetch %s: %s: %s", s.URL, err, tail(out))
+		if out, err := runGit([]string{"-C", repo, "fetch", "--depth", "1", "--quiet", "origin", ref}, s.URL); err != nil {
+			return nil, fmt.Errorf("fetch %s: %s: %s", s.URL, err, tailOut(out))
 		}
-		if out, err := runGit([]string{"-C", repo, "reset", "--hard", "--quiet", "FETCH_HEAD"}); err != nil {
-			return nil, fmt.Errorf("update %s: %s: %s", s.URL, err, tail(out))
+		if out, err := runGit([]string{"-C", repo, "reset", "--hard", "--quiet", "FETCH_HEAD"}, s.URL); err != nil {
+			return nil, fmt.Errorf("update %s: %s: %s", s.URL, err, tailOut(out))
 		}
 	}
 	target := filepath.Join(repo, s.Path)
@@ -103,22 +104,39 @@ func gitRepoFile(s Source, reposDir string) ([]byte, error) {
 	return raw, nil
 }
 
-func runGit(args []string) (string, error) {
+func runGit(args []string, url string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	// Belt and braces beside the https-only validation: whatever URL slips
-	// through, git may only speak https — never run an ext:: helper, never
-	// stop to ask for credentials (this process has no terminal).
+	// through, git may only speak the transport the configured URL itself
+	// names — never run an ext:: helper, never stop to ask for credentials
+	// (this process has no terminal). In practice that is always https;
+	// file:// is the one extra admission (see gitProtocolLock).
 	cmd.Env = append(os.Environ(),
-		"GIT_ALLOW_PROTOCOL=https",
 		"GIT_TERMINAL_PROMPT=0",
+		gitProtocolLock(url),
 	)
 	out, err := cmd.CombinedOutput()
-	return tail(string(out)), err
+	return tailOut(string(out)), err
 }
 
-func tail(s string) string {
+// gitProtocolLock pins GIT_ALLOW_PROTOCOL to the scheme of the configured
+// URL. validateSource admits only https:// git sources through the API, so
+// dashboard-added sources are always locked to https. A file:// URL can
+// only arrive via a hand-edited sources.json — the same trust level as a
+// "file"-type source, which already reads arbitrary local paths — and
+// allowing the file transport there keeps local repos (and the TestGitSource
+// coverage of the clone/read path) working. Anything else stays https-only,
+// so ssh can never probe the LAN and ext:: helpers can never run.
+func gitProtocolLock(url string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(url)), "file://") {
+		return "GIT_ALLOW_PROTOCOL=file"
+	}
+	return "GIT_ALLOW_PROTOCOL=https"
+}
+
+func tailOut(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 400 {
 		s = s[:400] + "…"

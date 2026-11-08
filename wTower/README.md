@@ -2,10 +2,11 @@
 
 **See what your computer is really doing — and cut off anything you don't like.**
 
-AppScope Monitor is a live dashboard for your Mac, Windows PC, or Linux box that answers three
-questions in real time: *who is using my camera and mic?*, *which apps are talking to the
-internet (and where)?*, and *how do I block them?* — all on one page, all stored on your
-machine, nothing sent anywhere.
+wTower (AppScope Monitor) is a live dashboard for your Mac, Windows PC, or Linux box that
+answers three questions in real time: *who is using my camera and mic?*, *which apps are talking
+to the internet (and where)?*, and *how do I block them?* — all on one page, all stored on your
+machine, nothing sent anywhere. (The host watchdog lives in the companion **wHawk** app and the
+known-IP intel feed in **wGrid** — both split back out.)
 
 | | |
 |---|---|
@@ -36,6 +37,11 @@ documentation ranges `203.0.113.x`.)*
   blocklist.
 - **🔋 The rest of the vitals** — battery, RAM, disk, top CPU processes, USB devices, logins,
   and (if you plug one in) an Android phone's camera/mic/network usage.
+- **🦅 wHawk companion** — the host watchdog (RATs, MITM, beacons, persistence, exfiltration)
+  now lives in its own app; its alerts' ⛔ button still lands the firewall block here, through
+  this app's own block pipeline.
+- **📡 wGrid companion** — the known-IP intel feed (provider network ranges) is its own app
+  too; the Blocked panel's country rules fetch their CIDR data from it automatically.
 
 Everything runs **locally**: one small Go binary + a web dashboard on `127.0.0.1`. No account,
 no cloud, no telemetry.
@@ -93,9 +99,10 @@ The dashboard lives at `http://127.0.0.1:8765` (change with `--port`).
 | **Watch** | Live connection table (app, PID, user, protocol, host, geo, per-connection block, per-domain DNS block) · per-app and per-site traffic · connections by country/city · data-transfer totals per period · connection history (persisted, filterable) · "new this week" badges on freshly seen destinations |
 | **Site visits** | Reconstructed *visits*: one app's sockets to one site, merged back together when the network gap is small (2–30 min, your choice) — each with start time, the moment the network closed (or "still open"), wall-clock span, active transfer time, and exact in/out bytes summed from that visit's own connection counters. Naming uses the DNS shield's answer map when its query log is on, then reverse DNS |
 | **Privacy** | Camera / mic / contacts / calendar / automation (AppleScript) events on macOS (TCC) and Windows (ConsentStore) · per-app file-open tracing · on-demand root file tracing with a padlock toggle |
-| **Block** | Rule types: `ip`, `ip:port`, app (path), country (all its IPv4 ranges), blocklist file, pasted IP list, IPolice-managed lists · one-click re-apply · per-country ⛔ from the geo table · global pause/resume for every enforced rule |
+| **Block** | Rule types: `ip`, `ip:port`, app (path), country (all its IPv4 ranges), blocklist file, pasted IP list, wGrid-managed provider lists · one-click re-apply · per-country ⛔ from the geo table · global pause/resume for every enforced rule |
 | **DNS shield** | A built-in filtering resolver (`dnsfilter.go`): answers NXDOMAIN for blocked **domains** — ads/trackers die at the name layer, so no IP snapshots, no shared-CDN collateral. HOSTS-format lists (MVPS, StevenBlack) paste in as-is; `allow-*` lists carve exceptions; the 🌐 button on live connections appends to the custom list; upstreams auto-discover per platform (`/etc/resolv.conf`, Windows TCP/IP registry; `dns_upstreams` config overrides). Loopback port 53 is bridged in by the helper's fixed `dns on|off` verb (pf rdr on macOS, iptables REDIRECT on Linux) |
 | **Vitals** | Battery + power estimates, RAM, disks/volumes, top CPU processes, USB/device connect events, login sessions, focused app |
+| **Companions** | The host watchdog (**wHawk**) and the known-IP intel feed (**wGrid**) are separate launcher apps; wTower forwards nothing and fetches only the CIDR tables its country rules need from wGrid
 | **Dashboard** | Live updates over SSE · 5 themes (Auto follows the OS light/dark choice; the active palette is injected server-side, so no flash on load) · drag / resize / hide / lock any panel · persisted layout · activity-by-hour heatmap (who calls home at 3am) · configurable retention with automatic purging · history purge tools |
 | **Data** | Everything stored in a local SQLite file (`data/`) — inspect or delete it any time; the 🗑 button purges old events |
 
@@ -180,15 +187,21 @@ systemd-resolved manage resolv.conf themselves — point its global DNS at
   | FreeBSD/OpenBSD/NetBSD | ✔ | – | – | – | portable collectors only; blocking queues |
 
 - **Repo layout**: `*.go` at root (context, config, store, server, netstate, geo, enforcer,
-  grant, themes) · `collectors/` (build-tagged per OS) · `web/` (dashboard, embedded in the
-  binary) · `cmd/monitor/` (CLI entrypoint) · `scripts/` (grant/revoke helpers, embedded and
-  materialized at start) · `docs/screenshots/`.
+  grant, themes, report) · `collectors/` (build-tagged per OS) · `web/` (dashboard, embedded
+  in the binary) · `cmd/wtower/` (CLI entrypoint) · `scripts/` (grant/revoke helpers,
+  embedded and materialized at start) · `data/` (shipped lists: DNS blocklists, FireHOL IP
+  snapshot) · `docs/screenshots/`.
 - **CLI flags**: `--config` · `--host` · `--port` · `--open` · `--debug`.
-- **Country blocking** uses per-country CIDR ranges (IPv4). With the companion **IPolice**
-  app running, ranges are fetched over loopback and cached in `data/country-cidrs/`; without
-  it, country rules simply stay queued. The monitor itself makes no blocklist downloads.
-- **External network calls (all optional, cached)**: geo enrichment via ip-api.com and a
-  one-shot own-country lookup for the guardrail below. That's it.
+- **Country blocking** uses per-country CIDR ranges (IPv4), fetched from the wGrid app's
+  `/api/networks` surface and cached in `data/country-cidrs/`. When the feed is unreachable
+  the source relocates (launcher registry lookup on the `wgrid` app id, then a
+  signature-validated loopback port scan), and country rules without data simply stay queued.
+  Ad-domain blocking rides the DNS shield; the FireHOL level1 IP snapshot ships in
+  `data/blocklists/`.
+- **External network calls (all optional, cached)**: wGrid's provider sources (Google,
+  Cloudflare, GitHub, FireHOL git clone — they live in the wGrid app now), geo enrichment via
+  ip-api.com and a one-shot own-country lookup for the guardrail below. wTower's own
+  collectors make zero external requests beyond those lookups.
 
 ### Safety — the one-time grant
 
@@ -204,6 +217,24 @@ rules.
 - The grant API is loopback-only — a phone on your Wi-Fi can't trigger password dialogs.
 - Click the padlock on the Blocked panel to revoke: helper, its passwordless entry, and all
   applied rules are removed; stored rules return to queued.
+
+---
+
+## The companion apps (wHawk, wGrid)
+
+The host watchdog and the IP intel feed were merged into wTower for a while and are
+standalone launcher apps again:
+
+- **wHawk** (host watchdog) watches the machine itself — processes, network listeners,
+  ARP/DNS state, persistence locations, the firewall — and alerts on compromise indicators.
+  Its alerts' block button lands the firewall rule through wTower's own enforcement pipeline
+  (`POST /api/wtower/block`): same validation, guardrails and Grant flow as a rule typed
+  into the Blocked panel. Its state migrated out of this app's `data/watchdog/` folder on
+  its first run (alerts, rules, exclusions, baseline — never overwritten).
+- **wGrid** (known-IP intel feed) fetches the published network ranges of well-known
+  providers and serves the `/api/networks` surface the country-block source here has always
+  auto-discovered (launcher registry, then a signature-validated loopback port scan). Its
+  state (cache, sources, git repos) migrated from `data/watchdog/` the same way.
 
 ---
 

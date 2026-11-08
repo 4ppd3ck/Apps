@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📡 wGrid</title>
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/feed.css">
+<script>
+  // Apply the saved theme before first paint to avoid a flash.
+  try {
+    const t = localStorage.getItem('wgrid.theme') ||
+      (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+</head>
+<body>
+<header>
+  <div class="head-row">
+    <div class="brand">
+      <span class="logo">📡</span>
+      <div>
+        <h1>wGrid</h1>
+        <p class="sub">Known-IP intelligence feed — the network ranges of well-known providers, for wHawk's checks and wTower's blocks.</p>
+      </div>
+    </div>
+    <div class="topstate">
+      <span id="peerWhawk" class="peer-pill">wHawk · &hellip;</span>
+      <span id="peerWpurge" class="peer-pill">wPurge · &hellip;</span>
+    </div>
+    <div class="machine" id="machine"></div>
+    <button id="themeBtn" class="btn ghost theme-btn" title="Toggle light/dark" aria-label="Toggle light or dark theme">🌙</button>
+  </div>
+</header>
+
+<main>
+  <div id="error" class="error" hidden></div>
+
+  <section class="panel" id="intel-panel">
+    <div class="panel-head">
+      <h2>IP intel <span class="tag" id="intel-status-tag">&hellip;</span></h2>
+      <div class="head-controls">
+        <input class="filter" id="intel-lookup" placeholder="look up an IP, e.g. 8.8.8.8"
+               title="whose network is this? answered from the feed's provider ranges">
+        <span id="intel-lookup-result" class="dim"></span>
+        <button id="intel-refresh-btn" class="btn ghost" type="button"
+                title="fetch every source now (background)">&#10227; refresh now</button>
+        <button id="intel-add-btn" class="btn ghost" type="button"
+                title="add an http(s), git or file feed">+ add source</button>
+      </div>
+    </div>
+    <div id="intel-add-form" class="head-controls" style="display:none; padding: 8px 14px;">
+      <input class="filter" id="intel-src-name" placeholder="provider name, e.g. Telegram" style="width:11em">
+      <select id="intel-src-type" class="filter" title="where the feed lives">
+        <option value="http" selected>http(s) url</option>
+        <option value="git">git repo</option>
+        <option value="file">local file</option>
+      </select>
+      <input class="filter" id="intel-src-url" placeholder="url of the feed" style="width:16em">
+      <input class="filter" id="intel-src-path" placeholder="path inside repo / local file" style="width:15em;display:none">
+      <select id="intel-src-format" class="filter" title="feed format">
+        <option value="text" selected>text (one CIDR per line)</option>
+        <option value="goog">Google ipranges JSON</option>
+        <option value="aws">AWS ip-ranges JSON</option>
+        <option value="ms365">Microsoft 365 endpoints</option>
+        <option value="github-meta">GitHub meta</option>
+        <option value="fastly">Fastly IP list</option>
+        <option value="csv">CSV (network column)</option>
+      </select>
+      <button id="intel-src-save" class="btn primary" type="button">add</button>
+      <button id="intel-src-cancel" class="btn ghost" type="button">cancel</button>
+    </div>
+    <div id="intel-summary" class="panel-foot"><span class="dim">feed state pending&hellip;</span></div>
+    <div class="tbl-wrap">
+      <table id="tbl-intel-sources">
+        <thead><tr>
+          <th>Provider</th><th>Source</th><th>Format</th><th>Kind</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody><tr><td colspan="6" class="dim">no intel sources configured</td></tr></tbody>
+      </table>
+    </div>
+    <div class="panel-foot">the feed publishes the network ranges of well-known providers (Google, Cloudflare, Apple&hellip;);
+      wHawk labels or calms alerts on known endpoints, and wTower's Blocked panel can block a whole
+      provider from the same tables. <b>Cloud-hosting feeds (AWS/Azure/GCP customer space) are
+      deliberately not defaults</b> — arbitrary customer workloads live there.</div>
+  </section>
+
+  <section class="panel" id="apps-panel">
+    <div class="panel-head">
+      <h2>Installed apps <span class="dim" style="font-weight:400">&middot; via wPurge</span></h2>
+      <div class="head-controls">
+        <button id="scanApps" class="btn primary" type="button"
+                title="scan the apps wPurge reports installed and match them against the vendor catalog">&#128269; Scan installed apps</button>
+        <span id="appsMeta" class="dim"></span>
+      </div>
+    </div>
+    <div id="appsErr" class="panel-foot" style="display:none; color:var(--amber)"></div>
+    <div class="tbl-wrap">
+      <table id="tbl-apps">
+        <thead><tr>
+          <th>Vendor</th><th>Installed apps</th><th>Database</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody><tr><td colspan="5" class="dim">not scanned yet</td></tr></tbody>
+      </table>
+    </div>
+    <div class="panel-foot" id="apps-unmatched"></div>
+    <div class="panel-foot">scans the apps wPurge reports installed and matches them against a catalog of
+      official vendor IP databases; adding one feeds its ranges to wHawk. Apps wPurge no longer
+      sees (leftovers) are handled by wPurge's own Traces tab, and there is no DNS step —
+      domain-level blocking lives in wTower's DNS shield.</div>
+  </section>
+
+  <footer>
+    <p class="muted">🔒 Localhost-only, zero telemetry — feeds are fetched from their publishers and served to local peers, nothing about your machine leaves it.</p>
+  </footer>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="js/app.js"></script>
+<script src="js/feed.js"></script>
+</body>
+</html>

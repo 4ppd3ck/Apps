@@ -14,6 +14,7 @@
 package wtower
 
 import (
+	"net"
 	"sort"
 	"strings"
 )
@@ -86,6 +87,9 @@ func BuildVisits(ctx *Ctx, since, gapSeconds float64) ([]VisitSession, error) {
 	type groupKey struct{ domain, app string }
 	type group struct {
 		sessions []*VisitSession
+		// org carries the geo org of the first naming row — the label
+		// fallback for IP-literal domains (no reverse-DNS record published)
+		org string
 	}
 	groups := map[groupKey]*group{}
 	for _, row := range rows {
@@ -93,12 +97,12 @@ func BuildVisits(ctx *Ctx, since, gapSeconds float64) ([]VisitSession, error) {
 		if app == "" {
 			app = "Unknown"
 		}
-		cc, country, host, _ := destNameOf(ctx, row.RemoteIP)
+		cc, country, host, org := destNameOf(ctx, row.RemoteIP)
 		domain := domainOf(host)
 		key := groupKey{domain, app}
 		g := groups[key]
 		if g == nil {
-			g = &group{}
+			g = &group{org: org}
 			groups[key] = g
 		}
 		end := row.Last
@@ -160,6 +164,11 @@ func BuildVisits(ctx *Ctx, since, gapSeconds float64) ([]VisitSession, error) {
 				s.Span = 0
 			}
 			s.Label = siteLabelOf(s.Domain)
+			// IP-literal domains (no reverse-DNS published): the geo org is
+			// the honest label the internet does offer
+			if net.ParseIP(s.Domain) != nil && g.org != "" {
+				s.Label = g.org
+			}
 			for ip := range s.ips {
 				s.IPs = append(s.IPs, ip)
 			}

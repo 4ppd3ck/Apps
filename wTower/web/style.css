@@ -117,6 +117,14 @@ header { display: flex; align-items: center; justify-content: space-between; fle
 .visibility-options .visibility-all { padding-bottom: 6px; border-bottom: 1px solid var(--line); font-weight: 700; }
 .visibility-options label { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .visibility-options input { accent-color: var(--accent); }
+/* panels grouped under their header tab, each group with a panel count */
+.visibility-group { display: grid; gap: 7px; padding-top: 7px; border-top: 1px solid var(--line); }
+.visibility-group-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .4px; color: var(--dim);
+}
+.visibility-group-count { font-weight: 400; letter-spacing: 0; text-transform: none; }
 
 /* multi-select checkbox filters (states, countries, apps…): a button that
    looks like the other .filter controls opening a checkbox popover */
@@ -547,3 +555,107 @@ img.flag {
   border-color: color-mix(in srgb, var(--amber) 50%, var(--line));
   color: var(--amber);
 }
+
+/* ---- report view (header switch: Dashboard | Tables | System | Watchdog | Report) ---- */
+.view-switch { display: flex; flex-wrap: wrap; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
+.view-btn { border: 0; background: transparent; color: var(--dim); padding: 5px 14px; border-radius: 6px; cursor: pointer; font: inherit; }
+.view-btn:hover { color: var(--text); }
+.view-btn.active { background: var(--accent); color: #fff; }
+
+.report-view { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: start; gap: 12px; margin: 0; }
+.report-view[hidden] { display: none; }
+.report-view > .panel { margin: 0; min-width: 0; grid-column: span 12; }
+.report-view > .report-period-panel { grid-column: span 12; }
+/* arrangement widths (dashboard parity): full/half/third applied from the
+   saved report layout; halves let two tables sit side by side */
+.report-view > .panel.layout-full { grid-column: span 12; }
+.report-view > .panel.layout-half { grid-column: span 6; }
+.report-view > .panel.layout-third { grid-column: span 4; }
+@media (max-width: 900px) { .report-view > .panel { grid-column: span 12; } }
+.report-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; }
+.report-window { margin-left: 4px; }
+#report-usage-chart { display: block; width: 100%; }
+#tbl-report-usage tr.hl { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+/* display:grid/inline-block would defeat the hidden attribute's UA style */
+.dashboard-layout[hidden] { display: none; }
+.toolbar[hidden] { display: none; }
+
+/* ---- report charts (donuts, section filters, donut-mode chip) ------------ */
+/* the visual row splits its width equally across its blocks: 2 donuts +
+   bars = thirds, donut + table = halves (set via --cols in the HTML) */
+.report-body { display: grid; gap: 14px; align-items: start; padding: 10px 14px;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); }
+.report-charts { min-width: 0; }
+.report-donut { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+
+.donut-plot { position: relative; }
+.donut-plot svg { display: block; }
+.donut-seg { cursor: pointer; opacity: 1; transition: opacity .15s ease, stroke-width .15s ease; }
+.donut-seg:hover { stroke-width: 28; opacity: 0.92; }
+.donut-rest { opacity: 0.45; }
+.donut-center { position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 12px; color: var(--dim); pointer-events: none; text-align: center; }
+/* legend entries stack top-to-bottom (single column) so long app / domain
+   names stay readable instead of truncating in side-by-side cells */
+.donut-legend { list-style: none; margin: 0; padding: 4px 6px; display: flex;
+  flex-direction: column; gap: 1px; align-self: center; min-width: 235px;
+  width: 100%; max-width: 330px; }
+.donut-legend li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto 38px;
+  align-items: center; gap: 7px; font-size: 12px; cursor: pointer;
+  padding: 2px 4px; border-radius: 4px; }
+.donut-legend li:hover { background: var(--panel2); }
+.donut-legend i { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
+.donut-key { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.donut-val { color: var(--text); text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.donut-pct { color: var(--dim); text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; }
+.donut-legend li.donut-hot { background: color-mix(in srgb, var(--accent) 12%, var(--panel2)); }
+.report-filter { width: auto; min-width: 130px; }
+.chip-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.chip-toggle button { border: 0; background: transparent; color: var(--dim);
+  padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.chip-toggle button.active { background: var(--accent); color: #fff; }
+
+/* ---- report table expand/collapse ---------------------------------------- */
+.report-table-foot { padding: 7px 14px; border-top: 1px solid var(--line); }
+.report-table-foot:empty { display: none; }
+
+/* "collapse table": the whole table folds away (no header strip left
+   behind) — the foot button is the way back */
+#report-view .tbl-wrap.table-collapsed { display: none; }
+
+/* report period panel: Lock layout + Sections ride the title row */
+.panel-head > .head-inline { grid-column: 2; grid-row: 1; display: flex;
+  gap: 8px; align-items: center; justify-content: flex-end; min-width: 0; }
+
+/* the report Sections popover lives inside an overflow:hidden panel, so it
+   renders in viewport coordinates (positioned by JS on toggle) instead of
+   being clipped by the panel edge */
+#report-section-options { position: fixed; left: -10000px; right: auto; z-index: 60; }
+
+/* donut selection: the chosen slice stays bright, the rest dims; the chosen
+   legend row is marked. The ✕ next to each filter input resets everything. */
+.donut-seg.donut-dim { opacity: 0.3; }
+.donut-legend li.donut-dim { opacity: 0.45; }
+.donut-legend li.donut-sel { background: color-mix(in srgb, var(--accent) 14%, var(--panel2)); }
+.filter-x { border: 0; background: transparent; color: var(--dim); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 7px; border-radius: 4px; }
+.filter-x:hover { color: var(--text); background: var(--panel2); }
+
+/* Watchdog panel: severity badges + alert rows */
+.sev {
+  display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 10px;
+  text-transform: uppercase; letter-spacing: .4px; font-weight: 700;
+}
+.sev-critical { background: color-mix(in srgb, var(--red) 30%, var(--panel2)); color: var(--red); }
+.sev-high     { background: color-mix(in srgb, var(--red) 16%, var(--panel2)); color: var(--red); }
+.sev-medium   { background: color-mix(in srgb, var(--amber) 18%, var(--panel2)); color: var(--amber); }
+.sev-low      { background: color-mix(in srgb, var(--cyan) 14%, var(--panel2)); color: var(--cyan); }
+.sev-info     { background: var(--inset); color: var(--dim); }
+tr.wd-acked { opacity: .5; }
+.wd-detail { font-size: 11px; margin-top: 2px; max-width: 52em; white-space: normal; }
+.wd-actions { white-space: nowrap; }
+.wd-actions .purge-btn { margin-right: 4px; }
+.chip-mini { font-size: 10px; padding: 2px 7px; }

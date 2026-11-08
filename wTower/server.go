@@ -5,6 +5,7 @@ package wtower
 import (
 	"bytes"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,7 +88,8 @@ func NewMonitorServer(addr string, handler http.Handler) (*MonitorServer, error)
 	}
 	srv := &MonitorServer{Listener: ln}
 	wrapped := &debugHandler{inner: handler, server: srv}
-	srv.HTTP = &http.Server{Handler: hostGuard(hostOf(addr), wrapped)}
+	srv.HTTP = &http.Server{Handler: hostGuard(hostOf(addr),
+		tokenFence(os.Getenv("APPDECK_TOKEN"), wrapped))}
 	srv.HTTP.ErrorLog = log.New(&filteredWriter{next: os.Stderr},
 		"", log.LstdFlags)
 	return srv, nil
@@ -179,9 +181,19 @@ func doGet(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		serveStatic(ctx, w, path[len("/web/"):])
 		return
 	}
+	if path == "/api/report.csv" { // text/csv, not the JSON writeJSON path
+		reportCSV(ctx, w, r)
+		return
+	}
 	payload, code, err := apiGet(ctx, path, r)
 	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		// handlers classify their own client errors (bad params etc.) with
+		// a 4xx code; anything else is a genuine 500
+		if code < 500 {
+			writeJSON(w, code, map[string]any{"error": err.Error()})
+		} else {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+		}
 		return
 	}
 	if code == http.StatusSeeOther { // SSE hijack marker
@@ -254,6 +266,48 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "style": style})
 	case "/api/data/delete":
 		postDataDelete(ctx, w, r)
+	case "/api/report-layout":
+		body, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		layout, err := saveReportLayout(ctx.Cfg, body["layout"])
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "layout": layout})
+	case "/api/report-sections":
+		data, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		sections, _ := data["sections"].(map[string]any)
+		if sections == nil {
+			writeJSON(w, 400, map[string]any{"error": "body must be {\"sections\": {...}}"})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true,
+			"sections": SaveReportSections(ctx.Cfg, sections)})
+	case "/api/view":
+		data, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		view, _ := data["view"].(string)
+		if view != "dashboard" && view != "report" {
+			writeJSON(w, 400, map[string]any{"error": "unknown view"})
+			return
+		}
+		ctx.Cfg.Data["view"] = view
+		if err := ctx.Cfg.Save(); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "view": view})
 	case "/api/retention":
 		postRetention(ctx, w, r)
 	case "/api/blocks":
@@ -264,8 +318,84 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		postGrant(ctx, w, r, "block")
 	case "/api/files/grant":
 		postGrant(ctx, w, r, "files")
+	case "/api/wtower/block", "/api/watchdog/block":
+		// the wHawk app's block button forwards here (its own endpoint is
+		// a loopback relay onto this one): the enforcement pipeline —
+		// validation, guardrails, Grant flow, blocks store, firewall —
+		// stayed in wTower when the watchdog split back out. The body is
+		// the /api/blocks add shape narrowed to a single public IP.
+		if ctx.Enforcer == nil {
+			writeJSON(w, 500, map[string]any{"error": "enforcer unavailable"})
+			return
+		}
+		body, ok := readBody(r)
+		if !ok {
+			writeJSON(w, 400, map[string]any{"error": "invalid body"})
+			return
+		}
+		blockAdd(ctx, ctx.Enforcer, map[string]any{
+			"action": "add", "type": "ip", "ip": body["ip"],
+		}, w)
 	default:
 		writeJSON(w, 404, map[string]any{"error": "not found"})
+	}
+}
+
+// reportCSV serves one report table as text/csv — the Report view's export
+// buttons (GlassWire-style historical export). table: apps | domains | daily.
+func reportCSV(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
+	qs, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	since, until, err := reportWindow(r.URL.RawQuery)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	rep, err := BuildReport(ctx, since, until)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	table := qsValue(qs, "table", "apps")
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf("attachment; filename=wtower-%s-%s.csv", table, LocalDay(rep.Since)))
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	switch table {
+	case "daily":
+		cw.Write([]string{"day", "bytes_in", "bytes_out"})
+		for _, row := range rep.UsageByDay {
+			cw.Write([]string{row.Day,
+				strconv.FormatInt(row.BytesIn, 10), strconv.FormatInt(row.BytesOut, 10)})
+		}
+	case "domains":
+		cw.Write([]string{"domain", "label", "seconds", "connections",
+			"bytes_in", "bytes_out"})
+		for _, s := range rep.Sites {
+			cw.Write([]string{s.Domain, s.Label, formatFloat(s.Seconds),
+				strconv.FormatInt(s.Connections, 10),
+				strconv.FormatInt(s.BytesIn, 10), strconv.FormatInt(s.BytesOut, 10)})
+		}
+	default: // apps: foreground time joined with the rolled-up byte totals
+		bytesOf := map[string][2]int64{}
+		for _, row := range rep.UsageByApp {
+			bytesOf[row.Key] = [2]int64{row.BytesIn, row.BytesOut}
+		}
+		cw.Write([]string{"app", "foreground_seconds", "sessions",
+			"bytes_in", "bytes_out"})
+		if rep.ScreenTime != nil {
+			for _, a := range rep.ScreenTime.Apps {
+				b := bytesOf[a.App]
+				cw.Write([]string{a.App, formatFloat(a.Seconds),
+					strconv.FormatInt(a.Sessions, 10),
+					strconv.FormatInt(b[0], 10), strconv.FormatInt(b[1], 10)})
+			}
+		}
 	}
 }
 
@@ -525,10 +655,10 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 			rules = []*Block{}
 		}
 		_, grantable := grantScript("block")
-		ipolice := map[string]any{"available": false}
+		wgrid := map[string]any{"available": false}
 		countryCIDRs := map[string]int{}
 		if ctx.Country != nil {
-			ipolice = ctx.Country.Status()
+			wgrid = ctx.Country.Status()
 		}
 		hasAllow := false
 		for _, r := range rules {
@@ -538,7 +668,7 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 			if r.Type == "country" || r.Type == "provider" {
 				countryCIDRs[r.Value] = ctx.Country.CachedCount(r.Value)
 				if countryCIDRs[r.Value] == 0 {
-					// data not in yet (IPolice's feed refresh races the
+					// data not in yet (wGrid's feed refresh races the
 					// first fetch): retry in the background, debounced
 					if r.Type == "country" {
 						go ctx.Country.EnsureBackground(r.Value)
@@ -556,7 +686,7 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 				"grant_supported": grantable,
 			},
 			"paused":        ctx.Enforcer != nil && ctx.Enforcer.Paused(),
-			"ipolice":       ipolice,
+			"wgrid":         wgrid,
 			"country_cidrs": countryCIDRs,
 			// allow rules need the helper's allow verbs; an installed
 			// helper from before them must be re-granted (reinstalled)
@@ -582,6 +712,24 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 		status := ctx.DNSShield.Status()
 		status["custom_domains"] = ctx.DNSShield.CustomDomains()
 		return status, 200, nil
+	case "/api/report-layout":
+		return reportLayout(ctx.Cfg), 200, nil
+	case "/api/report":
+		since, until, err := reportWindow(r.URL.RawQuery)
+		if err != nil {
+			return nil, 400, err
+		}
+		rep, err := BuildReport(ctx, since, until)
+		if err != nil {
+			return nil, 400, err
+		}
+		return rep, 200, nil
+	case "/api/view":
+		view := StrOf(ctx.Cfg.Data["view"])
+		if view != "report" {
+			view = "dashboard"
+		}
+		return map[string]any{"view": view}, 200, nil
 	case "/api/heatmap":
 		qs, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
@@ -823,6 +971,8 @@ func postDataDelete(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
+		// the usage rollup is stored data too — a full purge takes it with the rest
+		_ = ctx.Store.DeleteUsageDailyAll()
 		writeJSON(w, 200, map[string]any{"ok": true, "deleted": deleted,
 			"scope": "all"})
 		return
@@ -1132,7 +1282,7 @@ func blockAdd(ctx *Ctx, enf *Enforcer, body map[string]any, w http.ResponseWrite
 		path := strings.TrimSpace(StrOf(body["list"]))
 		if path == "" && strings.TrimSpace(StrOf(body["list_text"])) != "" {
 			// pasted list: persist it under data/blocklists/ so the rule
-			// keeps a real file (IPolice's file source reads it too)
+			// keeps a real file (wGrid's file source reads it too)
 			text := strings.TrimSpace(StrOf(body["list_text"]))
 			label := SanitizeLabel(StrOf(body["name"]))
 			if label == "" {

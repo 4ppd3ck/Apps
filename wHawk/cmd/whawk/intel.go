@@ -1,12 +1,12 @@
 package main
 
-// Client for IPolice, the optional known-IP intelligence companion app.
-// Sentinel never fetches from the internet itself — it bulk-loads provider
-// network tables from IPolice over loopback (mirroring the AppScope Monitor
+// Client for wGrid, the optional known-IP intelligence companion app.
+// wHawk never fetches from the internet itself — it bulk-loads provider
+// network tables from wGrid over loopback (mirroring the AppScope Monitor
 // client in integ.go) and consults them when classifying endpoints.
 //
 // Modes (rules.intel_match) govern what a known match means for alerts; see
-// rules.go. With IPolice offline everything behaves exactly as before.
+// rules.go. With wGrid offline everything behaves exactly as before.
 
 import (
 	"encoding/json"
@@ -56,7 +56,7 @@ func trimRight(s, cut string) string {
 }
 
 // RetryIfDown re-polls after a failed attempt once minGap seconds passed —
-// IPolice may simply be starting up (Sentinel's first poll can race its
+// wGrid may simply be starting up (wHawk's first poll can race its
 // bind). Once up, slow-tick polls keep the tables fresh.
 func (it *Intel) RetryIfDown(minGap float64) {
 	it.mu.Lock()
@@ -68,8 +68,8 @@ func (it *Intel) RetryIfDown(minGap float64) {
 	it.Poll()
 }
 
-// Poll refreshes the provider tables from IPolice. Called on the slow tick;
-// offline IPolice keeps the last good tables in memory.
+// Poll refreshes the provider tables from wGrid. Called on the slow tick;
+// offline wGrid keeps the last good tables in memory.
 func (it *Intel) Poll() {
 	it.mu.Lock()
 	it.lastTry = NowF()
@@ -168,7 +168,7 @@ func (r *Rules) IntelMode() string {
 
 // KnownRemote is the nil-safe correlation lookup used by the exfil and
 // sensitive checks: ("Google & YouTube", true) for a known range, ("", false)
-// otherwise. A nil Intel (IPolice disabled) is simply never-known.
+// otherwise. A nil Intel (wGrid disabled) is simply never-known.
 func (it *Intel) KnownRemote(ipStr string) (string, bool) {
 	if it == nil {
 		return "", false

@@ -93,6 +93,33 @@ valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+# merge_cidrs <prefix> <protected:1|0> — validate stdin CIDRs and append the
+# ones not already in STATE as "<prefix>|<cidr>" lines, in ONE awk pass. The
+# old loop ran a `grep` process per candidate line against the ever-growing
+# STATE (16k+ lines): thousands of ranges made every startup O(N²) — tens of
+# seconds of dashboard downtime before the port ever opened. n_added counts
+# the valid input lines (dups included), matching the old loop's count.
+merge_cidrs() {
+  local prefix="$1" protected="$2" line
+  [ -f "$STATE" ] || : > "$STATE"
+  local tmp_in
+  tmp_in=$(mktemp "$STATE_DIR/mergein.XXXXXX") || return 1
+  while IFS= read -r line; do
+    line="${line//[[:space:]]/}"
+    [ -n "$line" ] || continue
+    valid_cidr "$line" || continue
+    [ "$protected" = "1" ] && protected_cidr "$line" && continue
+    echo "${prefix}|${line}"
+  done > "$tmp_in"
+  n_added=$(wc -l < "$tmp_in" | tr -d ' ')
+  # append only candidates not already present (in STATE or earlier in this
+  # input — the old grep-per-line loop deduped both); FILENAME==ARGV[1] (not
+  # NR==FNR) so an empty STATE still registers its (zero) lines
+  awk 'FILENAME==ARGV[1] { seen[$0]=1; next } !seen[$0] { seen[$0]=1; print }' \
+    "$STATE" "$tmp_in" >> "$STATE"
+  rm -f "$tmp_in"
+}
+
 valid_path() {
   case "$1" in
     /*) [ -e "$1" ] ;;
@@ -571,15 +598,7 @@ case "$cmd" in
         if [ "$action" = "add" ]; then
           # CIDR list on stdin, one range per line; junk and protected
           # ranges are skipped, everything else is persisted per country
-          n_added=0
-          while IFS= read -r line; do
-            line="${line//[[:space:]]/}"
-            [ -n "$line" ] || continue
-            valid_cidr "$line" || continue
-            protected_cidr "$line" && continue
-            grep -qxF "country|$cc|$line" "$STATE" || echo "country|$cc|$line" >> "$STATE"
-            n_added=$((n_added+1))
-          done
+          merge_cidrs "country|$cc" 1
           if [ "$OS" = "linux" ]; then regen_linux_country; else regen_pf; fi
           echo "ok: $n_added cidrs for $cc"
         else
@@ -592,15 +611,7 @@ case "$cmd" in
         label="${1:-}"
         [[ "$label" =~ ^[a-z0-9_-]{1,32}$ ]] || { echo "invalid list label: $label"; exit 2; }
         if [ "$action" = "add" ]; then
-          n_added=0
-          while IFS= read -r line; do
-            line="${line//[[:space:]]/}"
-            [ -n "$line" ] || continue
-            valid_cidr "$line" || continue
-            protected_cidr "$line" && continue
-            grep -qxF "list|$label|$line" "$STATE" || echo "list|$label|$line" >> "$STATE"
-            n_added=$((n_added+1))
-          done
+          merge_cidrs "list|$label" 1
           if [ "$OS" = "linux" ]; then regen_linux_country; else regen_pf; fi
           echo "ok: $n_added cidrs for list $label"
         else
@@ -616,14 +627,7 @@ case "$cmd" in
         label="${1:-}"
         [[ "$label" =~ ^[a-z0-9_-]{1,32}$ ]] || { echo "invalid allowlist label: $label"; exit 2; }
         if [ "$action" = "add" ]; then
-          n_added=0
-          while IFS= read -r line; do
-            line="${line//[[:space:]]/}"
-            [ -n "$line" ] || continue
-            valid_cidr "$line" || continue
-            grep -qxF "allowlist|$label|$line" "$STATE" || echo "allowlist|$label|$line" >> "$STATE"
-            n_added=$((n_added+1))
-          done
+          merge_cidrs "allowlist|$label" 0
           if [ "$OS" = "linux" ]; then regen_linux_allow; else regen_pf; fi
           echo "ok: $n_added cidrs for allowlist $label"
         else

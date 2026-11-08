@@ -5,7 +5,7 @@
   "icon": "🚨",
   "desc": "Host watchdog — alerts on intrusions and data theft",
   "category": "Security",
-  "port": 24509,
+  "port": 0,
   "urlPath": "/",
   "network": false,
   "binary": "whawk",
@@ -13,9 +13,8 @@
     "--port",
     "{port}"
   ],
-  "version": "1.0",
+  "version": "1.1",
   "env": {
-    "WTOWER_URL": "http://127.0.0.1:8765",
-    "WGRID_URL": "http://127.0.0.1:24504"
+    "WTOWER_URL": "http://127.0.0.1:8765"
   }
 }

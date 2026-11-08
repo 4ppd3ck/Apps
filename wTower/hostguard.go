@@ -11,7 +11,12 @@ package wtower
 //     cross-site (or send a foreign/null Origin); non-GET requests carrying
 //     those markers are rejected. Non-browser clients (curl, the peer Go
 //     apps) send neither header and pass untouched.
+//   - token fence: when the launcher injected APPDECK_TOKEN, state-changing
+//     /api/ requests (every POST — theme, layout, retention, blocks, grants,
+//     data deletion) from non-loopback callers must carry it as
+//     X-AppDeck-Token. Loopback (the operator's own machine) is exempt.
 import (
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,6 +49,32 @@ func reject(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(msg))
+}
+
+// tokenFence enforces the launcher's non-loopback token rule: when
+// APPDECK_TOKEN is set, non-GET /api/ requests (all the mutating endpoints)
+// from non-loopback callers must carry it as X-AppDeck-Token (constant-time
+// compare). Loopback callers — the local browser, sibling apps — are exempt.
+func tokenFence(token string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token != "" && r.Method != http.MethodGet && r.Method != http.MethodHead &&
+			r.Method != http.MethodOptions && strings.HasPrefix(r.URL.Path, "/api/") &&
+			!fromLoopback(r) &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get("X-AppDeck-Token")), []byte(token)) != 1 {
+			http.Error(w, "missing or wrong X-AppDeck-Token", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func fromLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func urlHost(origin string) string {

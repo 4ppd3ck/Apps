@@ -2,8 +2,8 @@
 
 package wtower
 
-// Listening-port enumeration for IPolice endpoint relocation (see
-// ipoliceport_darwin.go): netstat's LISTENING lines, no connect attempts.
+// Listening-port enumeration for wGrid endpoint relocation (see
+// wgridport_darwin.go): netstat's LISTENING lines, no connect attempts.
 // The state word is not localized on Windows, so the line filter is safe;
 // anything else here is best effort — an empty list just skips the scan
 // stage of relocation.

@@ -1,9 +1,0 @@
-{
-  "prefixes": [
-    { "ip_prefix": "192.0.2.0/24", "region": "us-east-1" },
-    { "ip_prefix": "198.51.100.0/24", "region": "eu-west-1" }
-  ],
-  "ipv6_prefixes": [
-    { "ipv6_prefix": "2001:db8::/32" }
-  ]
-}

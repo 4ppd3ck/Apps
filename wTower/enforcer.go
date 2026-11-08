@@ -766,7 +766,7 @@ func (e *Enforcer) ipsetCIDRRules(rule *Block, add bool) (string, string) {
 }
 
 // cidrsForApply fetches the ranges a rule being ADDED should enforce:
-// country rules resolve via IPolice (queued on failure), list rules parse
+// country rules resolve via wGrid (queued on failure), list rules parse
 // their file. Returns (nil, status, detail) on a short-circuit.
 func (e *Enforcer) cidrsForApply(rule *Block) ([]string, string, string) {
 	switch rule.Type {
@@ -1017,7 +1017,7 @@ func unionCIDRs(ranges map[string][]string) []string {
 // cidrHelper feeds the privileged helper a CIDR list on stdin for the
 // monitor-managed set rules (list / provider — both use the helper's
 // generic `list <label>` command). list rules additionally mirror their
-// file into IPolice (file source) when it is up.
+// file into wGrid (file source) when it is up.
 func (e *Enforcer) cidrHelper(rule *Block, add bool) (string, string) {
 	label := SanitizeLabel(rule.Value)
 	if !add {
@@ -1057,7 +1057,7 @@ func (e *Enforcer) cidrHelper(rule *Block, add bool) (string, string) {
 
 // Reconcile (re)applies all stored rules; call at startup and after grant.
 // Country rules additionally refresh their CIDR caches in the background
-// (cache-first — an offline IPolice keeps the last good table enforceable).
+// (cache-first — an offline wGrid keeps the last good table enforceable).
 func (e *Enforcer) Reconcile() (int, error) {
 	rules, err := e.Ctx.Store.ListBlocks()
 	if err != nil {

@@ -1,0 +1,16 @@
+{
+  "apiVersion": 1,
+  "id": "wlens",
+  "name": "wLens",
+  "icon": "🔎",
+  "desc": "Find, download and run open-source apps",
+  "category": "Developer Tools",
+  "port": 0,
+  "urlPath": "/",
+  "network": false,
+  "binary": "wlens",
+  "args": [
+    "{port}"
+  ],
+  "version": "1.0"
+}

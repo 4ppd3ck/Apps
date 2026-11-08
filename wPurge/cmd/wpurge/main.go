@@ -38,7 +38,7 @@ import (
 
 const (
 	defaultPort = 8212
-	appVersion  = "0.5.1"
+	appVersion  = "0.6.0"
 )
 
 /* ---------- rules database ---------- */
@@ -244,7 +244,9 @@ func serve(args []string) error {
 		return fmt.Errorf("cannot bind %s: %w", addr, err)
 	}
 	fmt.Printf("💧 wPurge v%s at http://127.0.0.1:%d  (read-only until you confirm a clean)\n", appVersion, port)
-	httpSrv := &http.Server{Handler: hostGuard("127.0.0.1", mux)}
+	handler := hostGuard("127.0.0.1", mux)
+	handler = tokenFence(os.Getenv("APPDECK_TOKEN"), handler)
+	httpSrv := &http.Server{Handler: handler}
 	return httpSrv.Serve(ln)
 }
 

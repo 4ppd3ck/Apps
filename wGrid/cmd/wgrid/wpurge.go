@@ -1,8 +1,9 @@
 package main
 
-// Loopback client for wPurge's installed-apps inventory. wPurge computes
-// the list live from the OS (see its apps.go), so wGrid polls it and keeps
-// a short-lived cache instead of persisting anything.
+// Loopback client for wPurge's installed-apps inventory (optional peer, kept
+// from the former wGrid app: --wpurge-url / WPURGE_URL). wPurge computes the
+// list live from the OS (see its apps.go), so the feed polls it and keeps a
+// short-lived cache instead of persisting anything.
 
 import (
 	"encoding/json"
@@ -14,10 +15,7 @@ import (
 	"time"
 )
 
-const (
-	wpurgeDefaultURL  = "http://127.0.0.1:8212"
-	whawkDefaultURL = "http://127.0.0.1:8899"
-)
+const wpurgeDefaultURL = "http://127.0.0.1:8212"
 
 // wPurgeApp mirrors wPurge's GET /api/apps entries.
 type wPurgeApp struct {
@@ -38,7 +36,7 @@ type wPurgeClient struct {
 	at   float64
 }
 
-func NewwPurgeClient(base string) *wPurgeClient {
+func newWPurgeClient(base string) *wPurgeClient {
 	if strings.TrimSpace(base) == "" {
 		base = wpurgeDefaultURL
 	}
@@ -53,7 +51,7 @@ func NewwPurgeClient(base string) *wPurgeClient {
 func (d *wPurgeClient) Apps(force bool) ([]wPurgeApp, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !force && d.apps != nil && NowF()-d.at < 60 {
+	if !force && d.apps != nil && Now()-d.at < 60 {
 		return d.apps, nil
 	}
 	d.apps = nil
@@ -75,6 +73,6 @@ func (d *wPurgeClient) Apps(force bool) ([]wPurgeApp, error) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, fmt.Errorf("wpurge response: %w", err)
 	}
-	d.apps, d.at = out.Apps, NowF()
+	d.apps, d.at = out.Apps, Now()
 	return d.apps, nil
 }

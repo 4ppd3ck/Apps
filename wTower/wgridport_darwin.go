@@ -2,10 +2,10 @@
 
 package wtower
 
-// Listening-port enumeration for IPolice endpoint relocation: when the
+// Listening-port enumeration for wGrid endpoint relocation: when the
 // launcher is unreachable, every listening TCP port on the machine is a
 // relocation candidate; the signature probe (see CountrySource.probeWGrid)
-// tells IPolice apart from the other local servers. lsof — the same source
+// tells wGrid apart from the other local servers. lsof — the same source
 // the network collector uses — lists them without a single connect attempt.
 
 import (

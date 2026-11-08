@@ -218,7 +218,7 @@ func (e *Engine) runOnce(interval string) {
 	e.exclusions.MaybeReload() // on-disk changes (other processes, edits) apply immediately
 	if interval == "fast" {
 		e.pollMonitor()
-		e.intel.RetryIfDown(10) // re-try a starting/offline IPolice (loopback: cheap)
+		e.intel.RetryIfDown(10) // re-try a starting/offline wGrid (loopback: cheap)
 	} else {
 		e.intel.Poll() // slow tick keeps the known-IP tables fresh
 	}

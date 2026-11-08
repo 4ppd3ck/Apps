@@ -236,7 +236,7 @@ func (b *BaseCollector) killProcs() {
 			time.Sleep(300 * time.Millisecond)
 			_ = wtower.KillCmdGroup(p.Process, syscall.SIGKILL)
 			// Kill without Wait leaves a zombie until the process object is
-			// finalized — reap immediately so nothing lingers for Sentinel
+			// finalized — reap immediately so nothing lingers for wHawk
 			// to flag. Wait returns at once for already-dead children.
 			_ = p.Wait()
 		}

@@ -5,7 +5,8 @@ package main
 // philosophy as DefaultSources: no cloud-customer space. Match rules are
 // "bid:<prefix>" (bundle-id prefix, e.g. com.microsoft.) or "name:<keyword>"
 // (substring of the lowercased app name). Entries without match rules never
-// match an app; they exist so the dashboard's full list can offer them.
+// match an app; they exist so the Intel Sources view's full list can offer
+// them. Ported from the former wGrid app.
 
 import (
 	"sort"
@@ -107,7 +108,7 @@ type CatalogMatch struct {
 // MatchCatalog joins wPurge's installed apps with the catalog. Every entry
 // is returned (installed ones first) so the dashboard can offer the full
 // list; unmatched apps come back separately.
-func (it *Intel) MatchCatalog(apps []wPurgeApp) ([]CatalogMatch, []AppRef) {
+func (it *IntelFeed) MatchCatalog(apps []wPurgeApp) ([]CatalogMatch, []AppRef) {
 	cat := Catalog()
 	matched := make([][]AppRef, len(cat))
 	unmatched := []AppRef{}

@@ -30,6 +30,21 @@ func Now() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
 }
 
+// LocalDay renders an epoch timestamp as its local calendar day ("2026-11-06")
+// — the usage_daily rollup key. ISO dates sort lexicographically, so the
+// store's day-range queries compare the strings directly.
+func LocalDay(ts float64) string {
+	return time.Unix(int64(ts), 0).Format("2006-01-02")
+}
+
+// DayStart returns the local midnight epoch bounding the day `ts` falls in,
+// plus the following midnight (a [start, end) window).
+func DayStart(ts float64) (start, end float64) {
+	t := time.Unix(int64(ts), 0)
+	mid := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	return float64(mid.UnixNano()) / 1e9, float64(mid.Add(24*time.Hour).UnixNano()) / 1e9
+}
+
 // Run executes a command and returns (returncode, stdout, stderr), mirroring
 // util.run(): command not found -> (127, "", "cmd: not found"), timeout ->
 // (124, "", "timeout"). Output is decoded with invalid bytes replaced

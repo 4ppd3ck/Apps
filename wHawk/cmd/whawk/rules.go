@@ -16,7 +16,7 @@ type Rules struct {
 	// IntelMatch decides what happens when an endpoint resolves to a known
 	// provider: "label" (record at info, labelled — never notifies),
 	// "suppress" (never alert at all), "autoack" (alert lands pre-acked),
-	// "off" (ignore IPolice entirely).
+	// "off" (ignore wGrid entirely).
 	IntelURL       string   `json:"wgrid_url"`
 	IntelMatch     string   `json:"wgrid_match"`
 	TickSeconds    int      `json:"tick_seconds"`

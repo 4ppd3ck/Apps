@@ -1,6 +1,6 @@
 package main
 
-// Remediation — the deliberate exception to Sentinel's detection-only
+// Remediation — the deliberate exception to wHawk's detection-only
 // stance: user-initiated, per-entry actions from the App access tab.
 //   - TCC grant removal (macOS): delete a leftover/unwanted grant row from
 //     the user TCC database (row is backed up first). System-database rows
@@ -43,7 +43,7 @@ func tccIdentValid(s string) bool {
 }
 
 // systemPathPrefixes are macOS locations whose files and TCC grants belong
-// to the OS itself; Sentinel refuses remediation actions against them.
+// to the OS itself; wHawk refuses remediation actions against them.
 var systemPathPrefixes = []string{"/System", "/usr", "/bin", "/sbin", "/private/var/db"}
 
 // systemPathProtected reports whether path is inside (or equals) one of the
@@ -371,7 +371,7 @@ func daemonRemoveDarwin(path string, override bool) (string, error) {
 // ---- Linux/BSD systemd unit & autostart removal -----------------------------
 
 // linuxSystemPrefixes are Linux locations whose files belong to the OS
-// itself; Sentinel refuses remediation actions against them. /etc is
+// itself; wHawk refuses remediation actions against them. /etc is
 // deliberately absent — the whitelisted removal targets (third-party
 // systemd units, autostart entries) live there, mirroring how the macOS
 // path allows /Library/LaunchDaemons.
@@ -467,7 +467,7 @@ func daemonRemovePOSIX(path string, override bool) (string, error) {
 	return "deleted " + clean + " (the unit was disabled first if systemd managed it)", nil
 }
 
-// winRuleName is the display name of the rule Sentinel manages for a program.
+// winRuleName is the display name of the rule wHawk manages for a program.
 // Only rules carrying this prefix are ever deleted by "remove"/"allow".
 func winRuleName(action, base string, dir string) string {
 	d := "in"

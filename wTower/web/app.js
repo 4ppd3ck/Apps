@@ -9,7 +9,7 @@ const DEST_COLS = ["name", "ip", "apps", "ips", "connections", "open",
 const NUMERIC_SORT_COLS = new Set(["ips", "connections", "open", "seconds",
   "bytes_in", "bytes_out", "last_seen", "pid", "established", "ok", "closed",
   "internal", "external", "count", "ts", "started", "duration_secs",
-  "vstarted", "vended", "span", "active"]);
+  "vstarted", "vended", "span", "active", "sessions", "bytes_total"]);
 /* sub-table (detail) column lists: declared with the other sort registries
    because the clickSubSort registrations below run during script evaluation */
 const IP_SUB_COLS = [["geo", "Geo"], ["ip", "IP"], ["apps", "Apps"],
@@ -65,12 +65,33 @@ const state = {
   sortHistorySub: { col: "last_seen", dir: -1 }, // observations inside a process group
   tableVisibility: {},
   dashboardLayout: null,
+  mainView: "dashboard",     // header switcher tab: dashboard|tables|system|report
   trafficTotals: null,
   trafficHistory: [],  // last chart sample set (redrawn on resize/hover)
   connectionHistory: [],
   connectionHistoryRequest: 0,
   expandedConnectionGroups: new Set(),
   filters: {},         // per event table: {app, kind, user}
+  report: null,              // last /api/report payload
+  reportRequest: 0,
+  reportDays: 1,             // 1 | 7 | 30
+  reportHours: 0,            // 1 | 3 | 6 | 12 (hour presets; 0 = day mode)
+  reportFrom: "",            // custom range start ("2026-11-06T14:00")
+  reportTo: "",              // custom range end
+  reportDaySel: "",          // day bar clicked in the usage chart
+  reportSections: {},        // which report sections show (server-persisted)
+  reportSectionsBuilt: false,
+  reportFilters: { screen: "", sites: "", daily: "", byapp: "", protos: "" },
+  reportSort: {
+    screen: { col: "seconds", dir: -1 },
+    sites: { col: "seconds", dir: -1 },
+    daily: { col: "day", dir: 1 },
+    byapp: { col: "bytes_total", dir: -1 },
+    protos: { col: "bytes_total", dir: -1 },
+  },
+  siteDonutMode: "data",     // site donut colours: "time" | "data"
+  reportExpanded: {},        // per report table: show all rows (vs top cap)
+  reportTableHidden: {},     // per report table: body hidden (header + foot stay)
 };
 
 const RANGE_OPTS = [[5, "5 min"], [15, "15 min"], [30, "30 min"],
@@ -457,15 +478,39 @@ const VISIBILITY_LABELS = {
   "dns-panel": "DNS shield",
 };
 
+/* Header tab -> the panels it shows. Every VISIBILITY_LABELS id belongs to
+   exactly one tab; each tab's order is the panel's position in the saved
+   dashboard layout order (one flat list server-side, filtered per tab), so
+   an arrangement saved before the tabs existed keeps its relative order in
+   each tab. The visibility menu below groups its checkboxes by this map. */
+const PANEL_VIEWS = {
+  dashboard: ["traffic-totals-panel", "traffic-panel", "live-connections-panel",
+    "top-apps-panel", "connection-summary-panel", "heatmap-panel"],
+  tables: ["geo-countries-panel", "sites-panel", "connections-panel",
+    "visits-panel", "privacy-panel", "files-panel", "network-panel",
+    "blocks-panel", "dns-panel"],
+  system: ["battery-panel", "system-panel"],
+};
+const PANEL_VIEW_LABELS = {
+  dashboard: "Dashboard", tables: "Tables", system: "System",
+};
+
 async function loadTableVisibility() {
   try {
     const data = await getJSON("/api/table-visibility");
     state.tableVisibility = data.visibility || {};
     const holder = $("table-visibility-options");
+    // one checkbox per panel, grouped under its header tab (same ids as the
+    // /api/table-visibility persistence keys) with a per-tab panel count
     holder.innerHTML = `<label class="visibility-all"><input type="checkbox" data-all="true"> All</label>` +
-      Object.entries(VISIBILITY_LABELS).map(([id, label]) =>
+      Object.entries(PANEL_VIEWS).map(([view, ids]) =>
+      `<div class="visibility-group">` +
+      `<div class="visibility-group-head"><span>${PANEL_VIEW_LABELS[view]}</span>` +
+      `<span class="visibility-group-count">${ids.length}</span></div>` +
+      ids.map((id) =>
       `<label><input type="checkbox" data-panel="${id}" ` +
-      `${state.tableVisibility[id] !== false ? "checked" : ""}> ${label}</label>`).join("");
+      `${state.tableVisibility[id] !== false ? "checked" : ""}> ${VISIBILITY_LABELS[id]}</label>`).join("") +
+      `</div>`).join("");
     const updateAll = () => {
       const inputs = [...holder.querySelectorAll("input[data-panel]")];
       const all = holder.querySelector("[data-all]");
@@ -485,7 +530,7 @@ async function loadTableVisibility() {
         for (const checkbox of holder.querySelectorAll("input[data-panel]")) {
           checkbox.checked = state.tableVisibility[checkbox.dataset.panel] !== false;
         }
-        applyTableVisibility();
+        applyPanelDisplay();
         updateAll();
         try {
           const response = await fetch("/api/table-visibility", {
@@ -502,22 +547,32 @@ async function loadTableVisibility() {
           for (const checkbox of holder.querySelectorAll("input[data-panel]")) {
             checkbox.checked = state.tableVisibility[checkbox.dataset.panel] !== false;
           }
-          applyTableVisibility();
+          applyPanelDisplay();
           updateAll();
         }
       });
     });
-    applyTableVisibility();
+    applyPanelDisplay();
   } catch (error) {
     console.warn("table visibility", error);
     $("visibility-msg").textContent = `Could not load visibility: ${error.message}`;
   }
 }
 
-function applyTableVisibility() {
+/* Per-panel display state combines two sources, both via the `hidden`
+   attribute (the .panel[hidden] CSS rule does the rest): the per-panel
+   visibility checkboxes (persisted server-side by panel id) and the active
+   header tab — a panel belongs to exactly one tab and hides outside it.
+   Loaders keep running on their cadence for hidden panels; only the paint
+   is skipped by the browser. */
+function applyPanelDisplay() {
+  const viewPanels = PANEL_VIEWS[state.mainView] || null;
   for (const [id] of Object.entries(VISIBILITY_LABELS)) {
     const panel = $(id);
-    if (panel) panel.hidden = state.tableVisibility[id] === false;
+    if (panel) {
+      panel.hidden = state.tableVisibility[id] === false ||
+        (viewPanels ? !viewPanels.includes(id) : false);
+    }
   }
 }
 
@@ -739,7 +794,9 @@ function setupDashboardLayoutControls() {
           item.querySelector(".panel-width").value = "half";
         }
       }
-      container.insertBefore(dragged, before ? panel : panel.nextElementSibling);
+      // both panels are on the active tab (only those are visible to drop
+      // on) — splice them within the tab's slots of the flat panel order
+      reorderPanelInOrder(dragged, panel, before);
     });
   }
 }
@@ -755,7 +812,11 @@ function panelLocked(panel) {
 function movePanel(panel, direction) {
   if (layoutLocked() || panelLocked(panel)) return;
   const container = $("dashboard-layout");
-  const panels = [...container.querySelectorAll(":scope > .panel")];
+  // Reorder within the active tab: panels on other tabs keep their slots in
+  // the saved flat order (each tab shows its panels in that relative order).
+  const view = PANEL_VIEWS[state.mainView];
+  const panels = [...container.querySelectorAll(":scope > .panel")]
+    .filter((item) => !view || view.includes(item.id));
   const index = panels.indexOf(panel);
   // Every step is one panel position. The dashboard is a 12-column grid with
   // mixed panel widths (full/half/third), so "one row" has no fixed size in
@@ -773,10 +834,29 @@ function movePanel(panel, direction) {
       item.querySelector(".panel-width").value = "half";
     }
   }
-  panels.splice(index, 1);
-  panels.splice(targetIndex, 0, panel);
-  panels.forEach((item) => container.append(item));
+  // up/left lands the panel before its neighbour, down/right after it
+  reorderPanelInOrder(panel, target, offset < 0);
   saveDashboardLayout();
+}
+
+/* Move `panel` to sit before/after `target` inside the active tab's panel
+   sequence, splicing only that tab's slots in the flat panel order — panels
+   belonging to other tabs (and their relative order) stay put. */
+function reorderPanelInOrder(panel, target, before) {
+  const container = $("dashboard-layout");
+  const view = PANEL_VIEWS[state.mainView];
+  const all = [...container.querySelectorAll(":scope > .panel")];
+  const inView = view ? all.filter((item) => view.includes(item.id)) : all;
+  if (!inView.includes(panel) || !inView.includes(target)) return;
+  inView.splice(inView.indexOf(panel), 1);
+  const tpos = inView.indexOf(target); // target's index after the removal
+  inView.splice(before ? tpos : tpos + 1, 0, panel);
+  let vi = 0;
+  const ordered = all.map((item) =>
+    view && !view.includes(item.id) ? item : inView[vi++]);
+  if (ordered.some((item, i) => container.children[i] !== item)) {
+    for (const item of ordered) container.append(item);
+  }
 }
 
 function byPanelId(id) {
@@ -1713,6 +1793,10 @@ function sortValueOf(row, col) {
     case "target": return String(row.value ?? "").toLowerCase();
     case "status": return String(row.status ?? "").toLowerCase();
     case "detail": return String(row.status_detail ?? "").toLowerCase();
+    // report view columns
+    case "bytes_total": return (row.bytes_in ?? 0) + (row.bytes_out ?? 0);
+    case "day": return String(row.day ?? "");
+    case "sessions": return row.sessions ?? 0;
     // site-visit session columns
     case "vstarted": return row.started;
     case "vended": return row.endedNum ?? row.last;
@@ -2676,6 +2760,13 @@ function setGauge(id, pct) {
   val.textContent = Math.round(pct) + "%";
 }
 
+/* fmtUptime renders seconds as "3d 4h" / "4h 12m" / "38m" for the panel. */
+function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600),
+        m = Math.floor((sec % 3600) / 60);
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 async function loadBattery() {
   try {
     const b = await getJSON("/api/battery");
@@ -2702,6 +2793,14 @@ async function loadBattery() {
     $("vd-batt").textContent = battLine;
     $("vd-ram").textContent = b.mem_used ? `${b.mem_used} / ${b.mem_total}` : "–";
     $("vd-disk").textContent = b.disk_used ? `${b.disk_used} / ${b.disk_total}` : "–";
+    const load = b.load_avg || [];
+    $("vd-load").textContent = load.length === 3
+      ? load.map((v) => v.toFixed(2)).join(" · ") : "–";
+    $("vd-sys").textContent = b.uptime_sec != null || b.procs != null
+      ? [b.uptime_sec != null ? `up ${fmtUptime(b.uptime_sec)}` : null,
+         b.procs != null ? `${b.procs} procs` : null,
+         b.cores != null ? `${b.cores} cores` : null]
+        .filter(Boolean).join(" · ") : "–";
     renderThermal(b.thermal);
     // mounted volumes (external drives, USB, other partitions)
     const vols = b.volumes || [];
@@ -2911,7 +3010,7 @@ async function loadBlocks() {
     lockBtn.setAttribute("aria-label",
       "blocking is " + (d.paused ? "paused" : mode ? "enforced" : "queued only") +
       " — click to toggle");
-    state.ownCountry = d.ipolice?.own_country || "";
+    state.ownCountry = d.wgrid?.own_country || "";
     state.countryCIDRs = d.country_cidrs || {};
     // allow rules need the helper's allow verbs; surface the reinstall
     // button while the installed helper predates them
@@ -3319,7 +3418,7 @@ async function loadDNS() {
         "no System Settings edits"
       : "install the loopback port-53 redirect; you point system DNS at " +
         "127.0.0.1 yourself");
-  // watchdog banner: the route auto-lifted after failed health checks
+  // auto-revert banner: the route auto-lifted after failed health checks
   const banner = $("dns-banner");
   if (d.auto_reverted) {
     banner.style.display = "";
@@ -3743,8 +3842,1046 @@ $("retention-days").addEventListener("change", async (e) => {
   }
 });
 
-// Polling only runs while the dashboard is actually watched: paused or
-// backgrounded tabs skip ticks and catch up on resume / when the tab returns.
+/* --------------------------------------------------------- report view ----
+   The "Report" header switch swaps the dashboard grid for a usage-report
+   page (GlassWire's Usage tab is the benchmark): donut charts for time and
+   data by app / site / country / protocol, sortable + filterable tables, a
+   daily-usage chart, and section checkboxes. Screen time diffs the
+   appfocus collector's app_switch events; site time is connection
+   lifecycles; byte buckets come from the usage_daily rollup. */
+
+const REPORT_SECTION_LABELS = {
+  screen: "Screen time",
+  sites: "Site time",
+  usage: "Data per day",
+  byapp: "Data by app",
+  protos: "Traffic types",
+};
+
+/* Header view switcher: four dashboard tabs (PANEL_VIEWS keys, each showing
+   its own panel subset) plus the usage-report page. The server-side /api/view
+   preference keeps its coarse dashboard|report contract; which dashboard tab
+   was last active is a best-effort localStorage hint (the launcher wipes
+   localStorage, so a wiped browser just lands on Dashboard). */
+function setView(view, persist = true) {
+  const report = view === "report";
+  state.mainView = view;
+  $("report-view").hidden = !report;
+  $("dashboard-layout").hidden = report;
+  // dashboard-only chrome (summary cards, toolbar with panel menus) makes
+  // no sense over the report page
+  document.querySelector(".toolbar").style.display = report ? "none" : "";
+  document.querySelector(".cards").style.display = report ? "none" : "";
+  for (const button of document.querySelectorAll("#view-switch .view-btn")) {
+    const active = button.id === `view-${view}`;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+  applyPanelDisplay();
+  if (persist) {
+    try { localStorage.setItem("wtower.view", view); } catch { /* private mode */ }
+    fetch("/api/view", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view: report ? "report" : "dashboard" }),
+    }).catch(() => {});
+  }
+  if (report) loadReport();
+}
+
+async function loadViewPref() {
+  let report = false;
+  try {
+    const d = await getJSON("/api/view");
+    report = d.view === "report";
+  } catch {
+    // server preference unavailable — still honour the local tab hint below
+  }
+  if (report) {
+    setView("report", false);
+    return;
+  }
+  let tab = "dashboard";
+  try {
+    const saved = localStorage.getItem("wtower.view");
+    if (saved && PANEL_VIEWS[saved]) tab = saved;
+  } catch { /* localStorage unavailable */ }
+  setView(tab, false);
+}
+
+// reportParams builds the /api/report query for the selected period:
+// hour presets, day presets, or the custom from/to range. Returns null
+// while a custom range is half-picked.
+function reportParams() {
+  const p = new URLSearchParams();
+  if (state.reportHours > 0) {
+    p.set("hours", String(state.reportHours));
+    return p;
+  }
+  if (state.reportFrom && state.reportTo) {
+    const since = new Date(state.reportFrom).getTime() / 1000;
+    const until = new Date(state.reportTo).getTime() / 1000;
+    if (!(since > 0 && until > since)) return null;
+    p.set("since", String(Math.floor(since)));
+    p.set("until", String(Math.ceil(until)));
+    return p;
+  }
+  p.set("days", String(state.reportDays));
+  return p;
+}
+
+async function loadReport() {
+  if (state.mainView !== "report") return;
+  const req = ++state.reportRequest;
+  const params = reportParams();
+  if (!params) return; // custom range still incomplete
+  let d;
+  try {
+    d = await getJSON(`/api/report?${params}`);
+  } catch (error) {
+    $("report-window").textContent = `could not load report: ${error.message}`;
+    return;
+  }
+  if (req !== state.reportRequest) return; // a newer load superseded this one
+  state.report = d;
+  if (d.sections) {
+    const first = !state.reportSectionsBuilt;
+    state.reportSections = d.sections;
+    if (first) {
+      state.reportSectionsBuilt = true;
+      buildReportSectionMenu();
+    } else {
+      syncReportSectionMenu();
+    }
+  }
+  renderReport(d);
+}
+
+function renderReport(d) {
+  applyReportSections();
+  for (const table of Object.keys(REPORT_SECTION_LABELS)) {
+    applyReportTableHidden(table);
+  }
+  let win;
+  if (state.reportFrom && state.reportTo) {
+    win = `${esc(state.reportFrom.replace("T", " "))} &rarr; ${esc(state.reportTo.replace("T", " "))}`;
+  } else if (d.day) {
+    win = `day ${esc(d.day)}`;
+  } else if (d.hours) {
+    win = `last ${d.hours} ${d.hours === 1 ? "hour" : "hours"}`;
+  } else {
+    win = d.days === 1 ? "today" : `last ${d.days} days`;
+  }
+  const cov = d.first_event
+    ? ` · app switches ${fmtTime(d.first_event)} &rarr; ${fmtTime(d.last_event)}` : "";
+  $("report-window").innerHTML = win + cov;
+  renderScreenTime(d.screen_time);
+  renderSiteTime(d);
+  renderUsage(d);
+  renderUsageApps(d.usage_by_app || []);
+  renderProtos(d.protos || []);
+}
+
+/* ---- sections (which panels the report shows; persisted server-side) ---- */
+
+function applyReportSections() {
+  for (const panel of document.querySelectorAll("#report-view .panel[data-section]")) {
+    panel.hidden = state.reportSections[panel.dataset.section] === false;
+  }
+}
+
+function reportSectionInputs() {
+  return [...$("report-section-options").querySelectorAll("input[data-section]")];
+}
+
+function syncReportSectionMenu() {
+  for (const input of reportSectionInputs()) {
+    input.checked = state.reportSections[input.dataset.section] !== false;
+  }
+  updateReportSectionAll();
+}
+
+function updateReportSectionAll() {
+  const inputs = reportSectionInputs();
+  const all = $("report-section-options").querySelector("[data-all]");
+  all.checked = inputs.length > 0 && inputs.every((i) => i.checked);
+  all.indeterminate = inputs.some((i) => i.checked) && inputs.some((i) => !i.checked);
+}
+
+function buildReportSectionMenu() {
+  const holder = $("report-section-options");
+  // the popover is position:fixed (it would be clipped by the panel's
+  // overflow:hidden) — anchor it under the Sections button on every open
+  const menuDetails = $("report-section-menu").closest("details");
+  menuDetails.addEventListener("toggle", () => {
+    if (!menuDetails.open) {
+      holder.style.left = "-10000px";
+      return;
+    }
+    const rect = $("report-section-menu").getBoundingClientRect();
+    holder.style.top =
+      `${Math.min(rect.bottom + 6, window.innerHeight - holder.offsetHeight - 8)}px`;
+    holder.style.left = `${Math.max(8, rect.right - holder.offsetWidth)}px`;
+  });
+  document.addEventListener("click", (e) => {
+    if (menuDetails.open && !menuDetails.contains(e.target)) menuDetails.open = false;
+  });
+  holder.innerHTML = `<label class="visibility-all"><input type="checkbox" data-all="true"> All</label>` +
+    Object.entries(REPORT_SECTION_LABELS).map(([key, label]) =>
+      `<label><input type="checkbox" data-section="${key}" ` +
+      `${state.reportSections[key] !== false ? "checked" : ""}> ${label}</label>`).join("");
+  const updateAll = () => updateReportSectionAll();
+  updateAll();
+  holder.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const changes = input.dataset.all === "true"
+        ? Object.fromEntries(Object.keys(REPORT_SECTION_LABELS).map((k) => [k, input.checked]))
+        : { [input.dataset.section]: input.checked };
+      const previous = { ...state.reportSections };
+      Object.assign(state.reportSections, changes);
+      syncReportSectionMenu();
+      applyReportSections();
+      if (state.report) renderReport(state.report);
+      try {
+        const response = await fetch("/api/report-sections", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sections: changes }),
+        });
+        if (!response.ok) {
+          const result = await response.json();
+          throw new Error(result.error || "could not save sections");
+        }
+      } catch (error) {
+        console.warn("report sections", error);
+        state.reportSections = previous;
+        syncReportSectionMenu();
+        applyReportSections();
+        if (state.report) renderReport(state.report);
+      }
+    });
+  });
+}
+
+/* ---- table filters (donut segments and legend entries click-filter too) -- */
+
+function reportFiltered(items, table) {
+  const q = (state.reportFilters[table] || "").trim().toLowerCase();
+  if (!q) return items;
+  return items.filter((it) => JSON.stringify(it).toLowerCase().includes(q));
+}
+
+function setReportFilter(table, value) {
+  state.reportFilters[table] = value;
+  const input = $("report-filter-" + table);
+  if (input) input.value = value;
+  if (state.report) renderReport(state.report);
+}
+
+const reportEmptyRow = (cols, text) =>
+  `<tr><td colspan="${cols}" class="dim">${text}</td></tr>`;
+
+// report tables show the top REPORT_ROW_CAP rows until expanded — the site
+// table alone can carry hundreds of domains
+const REPORT_ROW_CAP = 15;
+
+function reportTableFoot(table, total, shown) {
+  let html = `<button class="purge-btn" data-report-table-toggle="${table}">` +
+    `${state.reportTableHidden[table] ? "expand table" : "collapse table"}</button>`;
+  if (total > REPORT_ROW_CAP) {
+    html = `<button class="purge-btn" data-report-expand="${table}">` +
+      `${state.reportExpanded[table] ? "Show top " + REPORT_ROW_CAP : "Show all " + total + " rows"}</button>` + html;
+  }
+  return html;
+}
+
+function reportCap(table, rows) {
+  return state.reportExpanded[table] ? rows : rows.slice(0, REPORT_ROW_CAP);
+}
+
+// apply the collapsed state to one report table: the whole table folds
+// away (header included) — the foot button is the way back
+function applyReportTableHidden(table) {
+  const tbl = $("tbl-report-" + table);
+  if (tbl) tbl.closest(".tbl-wrap").classList
+    .toggle("table-collapsed", !!state.reportTableHidden[table]);
+}
+
+/* ---- donut charts (hand-rolled SVG; click a segment or legend entry to
+   filter the matching table — the GlassWire click-through) ----------------- */
+
+const DONUT_PALETTE = ["--accent", "--green", "--purple", "--amber",
+  "#4dd0e1", "#f06292", "#7986cb", "#aed581", "#4db6ac", "#e57373",
+  "#ffd54f", "#9575cd"];
+
+function donutColor(i) {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue(DONUT_PALETTE[i % DONUT_PALETTE.length]).trim();
+  return raw || "#7f8ea3";
+}
+
+function renderDonut(containerId, items, opts = {}) {
+  const el = $(containerId);
+  if (!el) return;
+  const format = opts.format || fmtBytes;
+  const size = opts.size || 190;
+  // a selection (a table filter) HIGHLIGHTS its slice and dims the rest —
+  // the donut always shows the full distribution so there is always a way back
+  const selected = opts.selected || "";
+  const isSel = (it) => it.key === selected || (selected && it.cc === selected);
+  const usable = (items || []).filter((it) => it.value > 0);
+  const total = usable.reduce((s, it) => s + it.value, 0);
+  if (!usable.length || total <= 0) {
+    el.innerHTML = '<div class="empty">nothing to chart in this window</div>';
+    return;
+  }
+  // keep the first nine slices and anything big enough to read (>=2%); the
+  // tail folds into one grey "more" slice — a huge bucket like idle must
+  // never disappear into it
+  const shown = [];
+  let restVal = 0;
+  for (let i = 0; i < usable.length; i++) {
+    if (shown.length < 9 &&
+        (usable[i].value / total >= 0.02 || shown.length === 0)) {
+      shown.push(usable[i]);
+    } else {
+      restVal += usable[i].value;
+    }
+  }
+  const segs = [...shown];
+  if (restVal > 0) {
+    segs.push({ key: "__rest", label: `${usable.length - shown.length} more`, value: restVal });
+  }
+  const r = 59, cx = 75, cy = 75, circ = 2 * Math.PI * r;
+  let acc = 0;
+  const attr = (s) => String(s).replace(/"/g, "&quot;");
+  const circles = segs.map((it, i) => {
+    const frac = it.value / total;
+    const offset = -acc * circ;
+    acc += frac;
+    const dim = selected && !isSel(it) ? " donut-dim" : "";
+    return `<circle class="donut-seg${it.key === "__rest" ? " donut-rest" : ""}${dim}"` +
+      ` data-key="${attr(it.key)}" data-cc="${attr(it.cc || "")}" r="${r}" cx="${cx}" cy="${cy}" fill="none"` +
+      ` stroke="${donutColor(i)}" stroke-width="24"` +
+      ` stroke-dasharray="${(frac * circ).toFixed(2)} ${(circ - frac * circ).toFixed(2)}"` +
+      ` stroke-dashoffset="${offset.toFixed(2)}">` +
+      `<title>${esc(it.label)}: ${format(it.value)} (${Math.round(frac * 100)}%)</title></circle>`;
+  }).join("");
+  const pctOf = (v) => {
+    const p = (v / total) * 100;
+    return p > 0 && p < 10 ? p.toFixed(1) : Math.round(p) + "";
+  };
+  // Grafana-style aligned table: label left, value + share right in tabular
+  // columns — no ragged gaps
+  const legend = segs.map((it, i) => {
+    const cls = [it.key === "__rest" ? "donut-rest" : "",
+      selected ? (isSel(it) ? "donut-sel" : "donut-dim") : ""].join(" ").trim();
+    return `
+    <li data-key="${attr(it.key)}"${cls ? ` class="${cls}"` : ""}>
+      <i style="background:${donutColor(i)}"></i>
+      <span class="donut-key" title="${esc(it.label)}">${esc(it.label)}</span>
+      <span class="donut-val">${format(it.value)}</span>
+      <span class="donut-pct">${pctOf(it.value)}%</span>
+    </li>`;
+  }).join("");
+  el.innerHTML = `
+    <div class="donut-plot" style="width:${size}px;height:${size}px">
+      <svg viewBox="0 0 150 150" style="width:${size}px;height:${size}px"
+           role="img" aria-label="${esc(opts.aria || "share chart")}">
+        <g transform="rotate(-90 ${cx} ${cy})">${circles}</g>
+      </svg>
+      <div class="donut-center">${opts.centerLabel ? esc(opts.centerLabel) : ""}</div>
+    </div>
+    <ul class="donut-legend">${legend}</ul>`;
+  if (opts.onClick) {
+    el.querySelectorAll("[data-key]").forEach((node) => {
+      node.addEventListener("click", () => {
+        const key = node.dataset.key;
+        if (key !== "__rest") opts.onClick(key);
+      });
+    });
+  }
+  // hover sync: a legend row or a slice highlights its counterpart and dims
+  // the rest (Grafana's legend behaviour)
+  const setHot = (key) => {
+    el.querySelectorAll(".donut-seg").forEach((seg) => {
+      seg.style.opacity = key == null || seg.dataset.key === key ? "" : "0.25";
+      seg.style.strokeWidth = key && seg.dataset.key === key ? "29" : "";
+    });
+    el.querySelectorAll(".donut-legend li").forEach((li) => {
+      li.classList.toggle("donut-hot", key != null && li.dataset.key === key);
+    });
+  };
+  for (const node of el.querySelectorAll("[data-key]")) {
+    node.addEventListener("mouseenter", () => setHot(node.dataset.key));
+    node.addEventListener("mouseleave", () => setHot(null));
+  }
+}
+
+/* ---- screen time --------------------------------------------------------- */
+
+function renderScreenTime(st) {
+  const bars = $("report-screen-bars");
+  const tbl = $("tbl-report-screen").querySelector("tbody");
+  const all = (st && st.apps) || [];
+  if (!all.length) {
+    bars.innerHTML = '<div class="empty">no app switches recorded in this window &mdash; ' +
+      "is the appfocus collector active?</div>";
+    tbl.innerHTML = reportEmptyRow(4, "no app_switch events in this window");
+    $("report-donut-screen").innerHTML = "";
+    $("report-screen-idle").textContent = "";
+    return;
+  }
+  const rows = sortRowsBy(reportFiltered(all, "screen"), state.reportSort.screen);
+  const total = all.reduce((s, a) => s + a.seconds, 0) + (st.idle_seconds || 0);
+  const max = Math.max(...rows.map((a) => a.seconds), 1);
+  const donutAll = [...all].sort((a, b) => b.seconds - a.seconds);
+  bars.innerHTML = rows.length
+    ? rows.slice(0, 12).map((a) => `
+    <div class="row">
+      <div class="name"><span>${esc(a.app)}</span><span>${fmtDuration(a.seconds)}</span></div>
+      <div class="bar"><i class="in" style="width:${(a.seconds / max) * 100}%"></i></div>
+    </div>`).join("")
+    : '<div class="empty">nothing matches the filter</div>';
+  const shownApps = reportCap("screen", rows);
+  tbl.innerHTML = shownApps.map((a) => `
+    <tr>
+      <td>${esc(a.app)}</td>
+      <td data-v="${a.seconds}">${fmtDuration(a.seconds)}</td>
+      <td data-v="${a.sessions}">${a.sessions}</td>
+      <td data-v="${total ? a.seconds / total : 0}">${total ? Math.round((a.seconds / total) * 100) : 0}%</td>
+    </tr>`).join("") || reportEmptyRow(4, "nothing matches the filter");
+  $("report-foot-screen").innerHTML = reportTableFoot("screen", rows.length, shownApps.length);
+  // the donut includes the idle bucket (grey) — honest about the gaps
+  const donutItems = donutAll.map((a) => ({ key: a.app, label: a.app, value: a.seconds }));
+  if (st.idle_seconds > 0) {
+    donutItems.push({ key: "__idle", label: "idle / unattributed", value: st.idle_seconds });
+  }
+  renderDonut("report-donut-screen", donutItems, {
+    format: fmtDuration,
+    centerLabel: fmtDuration(donutAll.reduce((s, a) => s + a.seconds, 0)),
+    aria: "screen time share by app",
+    selected: state.reportFilters.screen,
+    onClick: (key) =>
+      setReportFilter("screen", state.reportFilters.screen === key ? "" : key),
+  });
+  $("report-screen-idle").textContent =
+    (st.idle_seconds > 60
+      ? `idle / unattributed: ${fmtDuration(st.idle_seconds)} — `
+      : "") +
+    "one stretch on an app counts at most 1 h; the excess is idle or sleep " +
+    "(the monitor has no sleep/wake signal)";
+}
+
+/* ---- site time + countries ---------------------------------------------- */
+
+function renderSiteTime(d) {
+  const bars = $("report-site-bars");
+  const tbl = $("tbl-report-sites").querySelector("tbody");
+  const all = d.sites || [];
+  const rows = sortRowsBy(reportFiltered(all, "sites"), state.reportSort.sites);
+  const active = rows.filter((s) => s.seconds > 0);
+  const max = Math.max(...active.slice(0, 12).map((s) => s.seconds), 1);
+  bars.innerHTML = active.length
+    ? active.slice(0, 12).map((s) => `
+    <div class="row">
+      <div class="name"><span>${esc(s.label || s.domain)}${s.cc ? " " + ccToFlag(s.cc) : ""}</span>
+        <span>${fmtDuration(s.seconds)}</span></div>
+      <div class="bar"><i class="in" style="width:${(s.seconds / max) * 100}%"></i></div>
+    </div>`).join("")
+    : '<div class="empty">no external connections in this window</div>';
+  const shownSites = reportCap("sites", rows);
+  tbl.innerHTML = shownSites.map((s) => {
+    const apps = (s.top_apps || []).slice(0, 3).map((a) => esc(a.app)).join(", ");
+    return `
+    <tr>
+      <td>${esc(s.label || s.domain)}${s.cc ? " " + ccToFlag(s.cc) : ""}
+        <span class="dim">${esc(s.cc || "")}</span></td>
+      <td data-v="${s.seconds}">${fmtDuration(s.seconds)}</td>
+      <td data-v="${s.connections}">${s.connections}</td>
+      <td data-v="${s.bytes_in}">${fmtBytes(s.bytes_in)}</td>
+      <td data-v="${s.bytes_out}">${fmtBytes(s.bytes_out)}</td>
+      <td>${apps}</td>
+    </tr>`;
+  }).join("") || reportEmptyRow(6, "no external connections in this window");
+  $("report-foot-sites").innerHTML = reportTableFoot("sites", rows.length, shownSites.length);
+  // site + country donuts always show the FULL distribution (a selection
+  // dims the rest instead of collapsing the chart to it)
+  const mode = state.siteDonutMode;
+  const siteDonutItems = all.map((s) => ({
+    key: s.domain, label: s.label || s.domain, cc: s.cc,
+    value: mode === "time" ? s.seconds : s.bytes_in + s.bytes_out,
+  })).sort((a, b) => b.value - a.value);
+  renderDonut("report-donut-sites", siteDonutItems, {
+    format: mode === "time" ? fmtDuration : fmtBytes,
+    centerLabel: mode === "time" ? "time" : "data",
+    aria: `${mode} share by site`,
+    selected: state.reportFilters.sites,
+    onClick: (key) =>
+      setReportFilter("sites", state.reportFilters.sites === key ? "" : key),
+  });
+  renderDonut("report-donut-countries",
+    (d.countries || []).map((c) => ({
+      key: c.cc, label: `${ccToFlag(c.cc)} ${c.cc}`, value: c.bytes_in + c.bytes_out,
+    })).sort((a, b) => b.value - a.value), {
+      format: fmtBytes,
+      centerLabel: "by country",
+      aria: "data share by country",
+      selected: state.reportFilters.sites,
+      onClick: (key) =>
+        setReportFilter("sites", state.reportFilters.sites === key ? "" : key),
+    });
+}
+
+/* ---- daily data usage ---------------------------------------------------- */
+
+function renderUsage(d) {
+  const days = d.usage_by_day || [];
+  drawReportUsage(days);
+  const rows = sortRowsBy(reportFiltered(days, "daily"), state.reportSort.daily);
+  const tbl = $("tbl-report-usage").querySelector("tbody");
+  const totIn = days.reduce((s, r) => s + r.bytes_in, 0);
+  const totOut = days.reduce((s, r) => s + r.bytes_out, 0);
+  $("report-usage-total").textContent =
+    days.length ? `· ↓${fmtBytes(totIn)} ↑${fmtBytes(totOut)}` : "";
+  const shownDays = reportCap("daily", rows);
+  tbl.innerHTML = shownDays.map((r) => `
+    <tr data-day="${esc(r.day)}"${r.day === state.reportDaySel ? ' class="hl"' : ""}>
+      <td>${esc(r.day)}</td>
+      <td data-v="${r.bytes_in}">${fmtBytes(r.bytes_in)}</td>
+      <td data-v="${r.bytes_out}">${fmtBytes(r.bytes_out)}</td>
+      <td data-v="${r.bytes_in + r.bytes_out}">${fmtBytes(r.bytes_in + r.bytes_out)}</td>
+    </tr>`).join("") ||
+    reportEmptyRow(4, days.length
+      ? "nothing matches the filter"
+      : "the daily rollup fills as the monitor records traffic (it starts with this version)");
+  $("report-foot-usage").innerHTML = reportTableFoot("daily", rows.length, shownDays.length);
+}
+
+/* daily-usage bar chart: stacked in (accent) / out (green) per local day,
+   click a bar to highlight its table row — the light version of GlassWire's
+   graph-spike click-through */
+const reportPad = { l: 60, r: 12, t: 10, b: 22 };
+
+function drawReportUsage(days) {
+  const cv = $("report-usage-chart");
+  if (!cv) return;
+  const w = cv.clientWidth || 600, h = 150;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue("--accent").trim();
+  const green = styles.getPropertyValue("--green").trim();
+  if (!days.length) {
+    g.fillStyle = styles.getPropertyValue("--dim").trim();
+    g.font = "12px sans-serif"; g.textAlign = "center";
+    g.fillText("no daily data yet — the rollup fills as traffic is recorded",
+      w / 2, h / 2);
+    return;
+  }
+  const max = Math.max(...days.map((r) => r.bytes_in + r.bytes_out), 1);
+  const inner = w - reportPad.l - reportPad.r;
+  const base = h - reportPad.b;
+  const bw = Math.min(46, (inner / days.length) * 0.6);
+  g.strokeStyle = styles.getPropertyValue("--line").trim();
+  g.fillStyle = styles.getPropertyValue("--dim").trim();
+  g.font = "10px sans-serif"; g.textAlign = "right";
+  for (let i = 0; i <= 3; i++) {
+    const v = (max / 3) * i;
+    const y = base - (v / max) * (h - reportPad.t - reportPad.b);
+    g.beginPath(); g.moveTo(reportPad.l, y); g.lineTo(w - reportPad.r, y); g.stroke();
+    g.fillText(fmtBytes(v), reportPad.l - 6, y + 3);
+  }
+  g.textAlign = "center";
+  days.forEach((r, i) => {
+    const cx = reportPad.l + (i + 0.5) * (inner / days.length);
+    const inH = (r.bytes_in / max) * (base - reportPad.t);
+    const outH = (r.bytes_out / max) * (base - reportPad.t);
+    g.fillStyle = accent;
+    g.fillRect(cx - bw / 2, base - inH, bw, inH);
+    g.fillStyle = green;
+    g.fillRect(cx - bw / 2, base - inH - outH, bw, outH);
+    g.fillStyle = styles.getPropertyValue("--dim").trim();
+    g.fillText(String(r.day).slice(5), cx, h - 8);
+    if (r.day === state.reportDaySel) {
+      g.strokeStyle = accent;
+      g.strokeRect(cx - bw / 2 - 2, reportPad.t, bw + 4, base - reportPad.t);
+    }
+  });
+  cv.onclick = (ev) => {
+    const rect = cv.getBoundingClientRect();
+    const i = Math.floor((ev.clientX - rect.left - reportPad.l) /
+      (inner / days.length));
+    if (i >= 0 && i < days.length) {
+      state.reportDaySel = days[i].day;
+      drawReportUsage(days);
+      renderUsage(state.report);
+    }
+  };
+}
+
+/* ---- data by app --------------------------------------------------------- */
+
+function renderUsageApps(rows) {
+  const all = rows;
+  rows = sortRowsBy(reportFiltered(all, "byapp"), state.reportSort.byapp);
+  const bars = $("report-usage-apps");
+  const tbl = $("tbl-report-byapp").querySelector("tbody");
+  if (!rows.length) {
+    bars.innerHTML = '<div class="empty">no daily rollup yet — per-app buckets ' +
+      "start with this version; the sites table still totals the window</div>";
+    tbl.innerHTML = reportEmptyRow(4, "the daily rollup fills as the monitor records traffic");
+    $("report-donut-byapp").innerHTML = "";
+    return;
+  }
+  const max = Math.max(...rows.map((r) => r.bytes_in + r.bytes_out), 1);
+  bars.innerHTML = rows.slice(0, 12).map((r) => `
+    <div class="row">
+      <div class="name"><span>${esc(r.key)}</span>
+        <span>&darr;${fmtBytes(r.bytes_in)} &uarr;${fmtBytes(r.bytes_out)}</span></div>
+      <div class="bar">
+        <i class="in" style="width:${(r.bytes_in / max) * 100}%"></i>
+        <i class="out" style="width:${(r.bytes_out / max) * 100}%"></i>
+      </div>
+    </div>`).join("");
+  const shownByApp = reportCap("byapp", rows);
+  tbl.innerHTML = shownByApp.map((r) => `
+    <tr>
+      <td>${esc(r.key)}</td>
+      <td data-v="${r.bytes_in}">${fmtBytes(r.bytes_in)}</td>
+      <td data-v="${r.bytes_out}">${fmtBytes(r.bytes_out)}</td>
+      <td data-v="${r.bytes_in + r.bytes_out}">${fmtBytes(r.bytes_in + r.bytes_out)}</td>
+    </tr>`).join("");
+  $("report-foot-byapp").innerHTML = reportTableFoot("byapp", rows.length, shownByApp.length);
+  renderDonut("report-donut-byapp",
+    all.map((r) => ({ key: r.key, label: r.key, value: r.bytes_in + r.bytes_out }))
+      .sort((a, b) => b.value - a.value), {
+      format: fmtBytes,
+      aria: "data share by app",
+      selected: state.reportFilters.byapp,
+      onClick: (key) =>
+        setReportFilter("byapp", state.reportFilters.byapp === key ? "" : key),
+    });
+}
+
+/* ---- traffic types ------------------------------------------------------- */
+
+function renderProtos(protos) {
+  const rows = sortRowsBy(reportFiltered(protos, "protos"), state.reportSort.protos);
+  const tbl = $("tbl-report-protos").querySelector("tbody");
+  const shownProtos = reportCap("protos", rows);
+  tbl.innerHTML = shownProtos.map((p) => `
+    <tr>
+      <td>${esc(p.proto)}</td>
+      <td data-v="${p.connections}">${p.connections}</td>
+      <td data-v="${p.seconds}">${fmtDuration(p.seconds)}</td>
+      <td data-v="${p.bytes_in + p.bytes_out}">${fmtBytes(p.bytes_in + p.bytes_out)}</td>
+    </tr>`).join("") ||
+    reportEmptyRow(4, "no external connections in this window");
+  $("report-foot-protos").innerHTML = reportTableFoot("protos", rows.length, shownProtos.length);
+  renderDonut("report-donut-protos",
+    [...protos].map((p) => ({
+      key: p.proto, label: p.proto, value: p.bytes_in + p.bytes_out,
+    })), {
+      format: fmtBytes,
+      aria: "data share by protocol",
+      selected: state.reportFilters.protos,
+      onClick: (key) =>
+        setReportFilter("protos", state.reportFilters.protos === key ? "" : key),
+    });
+}
+
+/* ---- report panel arrangement (mirrors the dashboard's Move/width/Lock
+   controls: drag, ←→↑↓ steps, full/half/third width, per-panel and global
+   locks, collapse, height handles — persisted server-side) ---------------- */
+
+const REPORT_PANEL_IDS = ["report-screen-panel", "report-protos-panel",
+  "report-sites-panel", "report-usage-panel", "report-byapp-panel"];
+
+function defaultReportLayout() {
+  const widths = Object.fromEntries(REPORT_PANEL_IDS.map((id) => [id, "full"]));
+  widths["report-screen-panel"] = "half";
+  widths["report-protos-panel"] = "half";
+  widths["report-usage-panel"] = "half";
+  widths["report-byapp-panel"] = "half";
+  return {
+    order: [...REPORT_PANEL_IDS], widths, heights: {},
+    locked: false,
+    panel_locks: Object.fromEntries(REPORT_PANEL_IDS.map((id) => [id, false])),
+    collapsed: Object.fromEntries(REPORT_PANEL_IDS.map((id) => [id, false])),
+  };
+}
+
+function reportLayoutLocked() {
+  return state.reportLayout?.locked === true;
+}
+
+function reportPanelLocked(panel) {
+  return panel?.dataset.layoutLocked === "true";
+}
+
+function applyReportLayout(layout) {
+  const container = $("report-view");
+  const validPanels = [...container.querySelectorAll(":scope > .panel[data-section]")];
+  const byId = new Map(validPanels.map((panel) => [panel.id, panel]));
+  const seen = new Set();
+  const ordered = [];
+  for (const id of layout.order || []) {
+    const panel = byId.get(id);
+    if (panel && !seen.has(id)) { ordered.push(panel); seen.add(id); }
+  }
+  for (const panel of validPanels) {
+    if (!seen.has(panel.id)) ordered.push(panel);
+  }
+  if (ordered.some((panel, i) => reportPanelsInDom()[i] !== panel)) {
+    for (const panel of ordered) container.append(panel);
+  }
+  for (const panel of validPanels) {
+    const width = LAYOUT_WIDTHS.includes(layout.widths?.[panel.id])
+      ? layout.widths[panel.id] : "full";
+    panel.dataset.layoutWidth = width;
+    panel.classList.remove("layout-full", "layout-half", "layout-third");
+    panel.classList.add(`layout-${width}`);
+    const height = Number(layout.heights?.[panel.id]);
+    if (Number.isFinite(height) && height >= 180 && height <= 1200) {
+      panel.dataset.layoutHeight = String(height);
+      panel.style.height = `${height}px`;
+      panel.style.overflow = "auto";
+    }
+  }
+  state.reportLayout = {
+    ...layout,
+    locked: layout.locked === true,
+    panel_locks: layout.panel_locks || {},
+  };
+  const lockAll = $("report-lock-all");
+  if (lockAll) {
+    lockAll.textContent = layout.locked ? "Unlock layout" : "Lock layout";
+    lockAll.setAttribute("aria-pressed", String(layout.locked === true));
+  }
+  for (const panel of validPanels) {
+    panel.dataset.layoutLocked = String(layout.panel_locks?.[panel.id] === true);
+    setPanelCollapsed(panel, layout.collapsed?.[panel.id] === true);
+    const select = panel.querySelector(".panel-width");
+    if (select) select.value = panel.dataset.layoutWidth || "full";
+    const lock = panel.querySelector(".panel-lock");
+    if (lock) {
+      lock.setAttribute("aria-pressed", String(reportPanelLocked(panel)));
+    }
+  }
+}
+
+function reportPanelsInDom() {
+  return [...$("report-view").querySelectorAll(":scope > .panel[data-section]")];
+}
+
+async function saveReportLayout() {
+  const layout = state.reportLayout || defaultReportLayout();
+  layout.order = reportPanelsInDom().map((panel) => panel.id);
+  layout.widths = Object.fromEntries(reportPanelsInDom().map((panel) =>
+    [panel.id, panel.dataset.layoutWidth || "full"]));
+  try {
+    const response = await fetch("/api/report-layout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ layout }),
+    });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error || "could not save report layout");
+    }
+  } catch (error) {
+    console.warn("report layout", error);
+  }
+}
+
+async function loadReportLayout() {
+  try {
+    applyReportLayout(await getJSON("/api/report-layout"));
+  } catch (error) {
+    console.warn("report layout", error);
+    applyReportLayout(defaultReportLayout());
+  }
+}
+
+function moveReportPanel(panel, direction) {
+  if (reportLayoutLocked() || reportPanelLocked(panel)) return;
+  const container = $("report-view");
+  const panels = reportPanelsInDom();
+  const index = panels.indexOf(panel);
+  // one position per step; left/right additionally pairs the neighbours at
+  // half width so two tables land side by side (dashboard behaviour)
+  const offset = direction === "left" || direction === "up" ? -1 : 1;
+  const targetIndex = Math.max(0, Math.min(panels.length - 1, index + offset));
+  const target = panels[targetIndex];
+  if (!target || target === panel || reportPanelLocked(target)) return;
+  if (direction === "left" || direction === "right") {
+    for (const item of [panel, target]) {
+      item.dataset.layoutWidth = "half";
+      item.classList.remove("layout-full", "layout-half", "layout-third");
+      item.classList.add("layout-half");
+      item.querySelector(".panel-width").value = "half";
+    }
+  }
+  panels.splice(index, 1);
+  panels.splice(targetIndex, 0, panel);
+  panels.forEach((item) => container.append(item));
+  saveReportLayout();
+}
+
+function setReportPanelCollapsed(panel, collapsed) {
+  panel.classList.toggle("panel-collapsed", collapsed);
+  const button = panel.querySelector(".panel-collapse");
+  if (button) button.setAttribute("aria-expanded", String(!collapsed));
+}
+
+function setupReportLayoutControls() {
+  for (const panel of reportPanelsInDom()) {
+    const head = panel.querySelector(".panel-head");
+    if (!head || head.querySelector(".layout-controls")) continue;
+    // collapse toggle (own save target — the dashboard's collapse saves there)
+    const title = head.querySelector("h2");
+    if (title && !title.querySelector(".panel-collapse")) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "panel-collapse";
+      button.title = "Collapse / expand panel";
+      button.setAttribute("aria-expanded", "true");
+      button.setAttribute("aria-controls", panel.id);
+      button.textContent = "▾";
+      button.addEventListener("click", () => {
+        const collapsed = !panel.classList.contains("panel-collapsed");
+        setReportPanelCollapsed(panel, collapsed);
+        state.reportLayout = state.reportLayout || defaultReportLayout();
+        state.reportLayout.collapsed = state.reportLayout.collapsed || {};
+        state.reportLayout.collapsed[panel.id] = collapsed;
+        saveReportLayout();
+      });
+      title.prepend(button);
+    }
+    const controls = document.createElement("div");
+    controls.className = "layout-controls";
+    controls.innerHTML = `<button type="button" class="layout-drag" draggable="true" ` +
+      `title="Drag to rearrange panel" aria-label="Drag to rearrange panel">Move</button>` +
+      `<button type="button" class="layout-step" data-step="left" title="Move left">←</button>` +
+      `<button type="button" class="layout-step" data-step="right" title="Move right">→</button>` +
+      `<button type="button" class="layout-step" data-step="up" title="Move up">↑</button>` +
+      `<button type="button" class="layout-step" data-step="down" title="Move down">↓</button>` +
+      `<select class="filter panel-width" title="panel width">` +
+      `<option value="full">Full</option><option value="half">Half</option>` +
+      `<option value="third">Third</option></select>` +
+      `<button type="button" class="panel-lock" aria-pressed="false" title="lock this panel arrangement">Lock</button>`;
+    head.append(controls);
+    const select = controls.querySelector("select");
+    select.value = panel.dataset.layoutWidth || "full";
+    select.addEventListener("change", () => {
+      panel.dataset.layoutWidth = select.value;
+      panel.classList.remove("layout-full", "layout-half", "layout-third");
+      panel.classList.add(`layout-${select.value}`);
+      saveReportLayout();
+    });
+    controls.querySelectorAll(".layout-step").forEach((button) => {
+      button.addEventListener("click", () => moveReportPanel(panel, button.dataset.step));
+    });
+    controls.querySelector(".panel-lock").addEventListener("click", () => {
+      state.reportLayout = state.reportLayout || defaultReportLayout();
+      state.reportLayout.panel_locks = state.reportLayout.panel_locks || {};
+      state.reportLayout.panel_locks[panel.id] = !reportPanelLocked(panel);
+      applyReportLayout(state.reportLayout);
+      saveReportLayout();
+    });
+    const handle = document.createElement("div");
+    handle.className = "panel-resize-handle";
+    handle.title = "Drag to resize panel height";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", "Resize panel height");
+    panel.append(handle);
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const startY = event.clientY;
+      const startHeight = panel.getBoundingClientRect().height;
+      handle.setPointerCapture(event.pointerId);
+      const move = (moveEvent) => {
+        const height = Math.max(180, Math.min(1200, startHeight + moveEvent.clientY - startY));
+        panel.style.height = `${height}px`;
+        panel.style.overflow = "auto";
+        panel.dataset.layoutHeight = String(Math.round(height));
+      };
+      const end = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", end);
+        saveReportLayout();
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", end, { once: true });
+    });
+    const drag = controls.querySelector(".layout-drag");
+    drag.addEventListener("dragstart", (event) => {
+      if (reportLayoutLocked() || reportPanelLocked(panel)) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.setData("text/plain", panel.id);
+      event.dataTransfer.effectAllowed = "move";
+      panel.classList.add("panel-dragging");
+    });
+    drag.addEventListener("dragend", () => {
+      panel.classList.remove("panel-dragging");
+      saveReportLayout();
+    });
+    panel.addEventListener("dragover", (event) => event.preventDefault());
+    panel.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const dragged = reportPanelsInDom()
+        .find((p) => p.id === event.dataTransfer.getData("text/plain")) || null;
+      if (!dragged || dragged === panel || reportLayoutLocked() ||
+          reportPanelLocked(dragged) || reportPanelLocked(panel)) return;
+      const rect = panel.getBoundingClientRect();
+      const horizontal = Math.abs(event.clientX - (rect.left + rect.width / 2)) >
+        Math.abs(event.clientY - (rect.top + rect.height / 2));
+      const before = horizontal
+        ? event.clientX < rect.left + rect.width / 2
+        : event.clientY < rect.top + rect.height / 2;
+      if (horizontal) {
+        dragged.dataset.layoutWidth = "half";
+        panel.dataset.layoutWidth = "half";
+        for (const item of [dragged, panel]) {
+          item.classList.remove("layout-full", "layout-half", "layout-third");
+          item.classList.add("layout-half");
+          item.querySelector(".panel-width").value = "half";
+        }
+      }
+      container.insertBefore(dragged, before ? panel : panel.nextElementSibling);
+    });
+  }
+  const lockAll = $("report-lock-all");
+  if (lockAll && !lockAll.dataset.wired) {
+    lockAll.dataset.wired = "true";
+    lockAll.addEventListener("click", () => {
+      state.reportLayout = state.reportLayout || defaultReportLayout();
+      state.reportLayout.locked = !reportLayoutLocked();
+      applyReportLayout(state.reportLayout);
+      saveReportLayout();
+    });
+  }
+}
+
+/* ---- wiring -------------------------------------------------------------- */
+
+$("report-view").addEventListener("click", (e) => {
+  const clear = e.target.closest("[data-filter-clear]");
+  if (clear) {
+    setReportFilter(clear.dataset.filterClear, "");
+    return;
+  }
+  const toggle = e.target.closest("[data-report-table-toggle]");
+  if (toggle) {
+    const table = toggle.dataset.reportTableToggle;
+    state.reportTableHidden[table] = !state.reportTableHidden[table];
+    applyReportTableHidden(table);
+    if (state.report) renderReport(state.report);
+    return;
+  }
+  const btn = e.target.closest("[data-report-expand]");
+  if (!btn) return;
+  const table = btn.dataset.reportExpand;
+  state.reportExpanded[table] = !state.reportExpanded[table];
+  if (state.report) renderReport(state.report);
+});
+for (const view of [...Object.keys(PANEL_VIEWS), "report"]) {
+  $(`view-${view}`).addEventListener("click", () => setView(view));
+}
+const Now = () => Date.now() / 1000; // epoch seconds, matching the server
+const dtLocalValue = (ts) => {
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+$("report-period").addEventListener("change", (e) => {
+  const v = e.target.value;
+  state.reportDaySel = "";
+  state.reportHours = 0;
+  state.reportFrom = state.reportTo = "";
+  if (v === "custom") {
+    // sensible defaults: last 24 hours, pre-filled so one click works
+    $("report-from").value = dtLocalValue(Now() - 86400);
+    $("report-to").value = dtLocalValue(Now());
+    $("report-from").hidden = $("report-to").hidden = false;
+    $("report-range-sep").hidden = false;
+    state.reportFrom = $("report-from").value;
+    state.reportTo = $("report-to").value;
+    loadReport();
+    return;
+  }
+  $("report-from").hidden = $("report-to").hidden = true;
+  $("report-range-sep").hidden = true;
+  if (v.startsWith("h")) {
+    state.reportHours = parseInt(v.slice(1), 10) || 1;
+  } else {
+    state.reportDays = parseInt(v, 10) || 1;
+  }
+  loadReport();
+});
+for (const id of ["report-from", "report-to"]) {
+  $(id).addEventListener("change", (e) => {
+    state.reportFrom = $("report-from").value;
+    state.reportTo = $("report-to").value;
+    state.reportDaySel = "";
+    loadReport();
+  });
+}
+const reportCsvUrl = (table) => {
+  const p = new URLSearchParams({ table });
+  const q = reportParams();
+  for (const [k, v] of q) p.set(k, v);
+  return `/api/report.csv?${p}`;
+};
+$("report-csv-apps").addEventListener("click", () => { window.location = reportCsvUrl("apps"); });
+$("report-csv-domains").addEventListener("click", () => { window.location = reportCsvUrl("domains"); });
+$("report-csv-daily").addEventListener("click", () => { window.location = reportCsvUrl("daily"); });
+for (const key of Object.keys(REPORT_SECTION_LABELS)) {
+  const input = $(`report-filter-${key}`);
+  if (!input) continue; // a section without its filter box still wires the rest
+  input.addEventListener("input", (e) => {
+    state.reportFilters[key] = e.target.value;
+    if (state.report) renderReport(state.report);
+  });
+}
+$("report-site-donut-mode").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  state.siteDonutMode = btn.dataset.mode;
+  $("report-site-donut-mode").querySelectorAll("button").forEach((b) =>
+    b.classList.toggle("active", b === btn));
+  if (state.report) renderReport(state.report);
+});
+// sortable report tables (headers are static in the HTML)
+setupReportLayoutControls();
+loadReportLayout();
+clickSort("tbl-report-screen", state.reportSort.screen,
+  () => state.report && renderReport(state.report), ["name", "seconds", "sessions"]);
+clickSort("tbl-report-sites", state.reportSort.sites,
+  () => state.report && renderReport(state.report),
+  ["name", "seconds", "connections", "bytes_in", "bytes_out"]);
+clickSort("tbl-report-usage", state.reportSort.daily,
+  () => state.report && renderReport(state.report),
+  ["day", "bytes_in", "bytes_out", "bytes_total"]);
+clickSort("tbl-report-byapp", state.reportSort.byapp,
+  () => state.report && renderReport(state.report),
+  ["name", "bytes_in", "bytes_out", "bytes_total"]);
+clickSort("tbl-report-protos", state.reportSort.protos,
+  () => state.report && renderReport(state.report),
+  ["name", "connections", "seconds", "bytes_total"]);
+window.addEventListener("resize", () => {
+  if (state.mainView === "report" && state.report) {
+    drawReportUsage(state.report.usage_by_day || []);
+  }
+});
+
 const poll = (fn) => () => { if (!state.paused && !document.hidden) fn(); };
 setInterval(poll(updatePrivacyCard), 1000);   // keep "Xs ago" ticking between events
 setInterval(tickConnectionDurations, 1000);   // live connection durations tick from the DOM
@@ -3759,10 +4896,12 @@ setInterval(poll(loadStatus), 15000);
 setInterval(poll(loadDNS), 5000);   // DNS shield stats + list state
 setInterval(poll(loadHeatmap), 60000);   // slow-moving hour buckets
 setInterval(poll(loadVisits), 45000);    // reconstructed site visits
+setInterval(poll(loadReport), 60000);    // report view refresh (no-op off-view)
 loadDNS();
 loadHeatmap();
 loadVisits();
 loadRetention();
+loadViewPref();
 
 function refreshLiveViews() {
   updatePrivacyCard();

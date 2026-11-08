@@ -1,4 +1,4 @@
-// Sentinel — AppDeck host-compromise watchdog.
+// wHawk — AppDeck host-compromise watchdog.
 //
 // Reads AppScope Monitor's live data (connections, privacy/file events) and
 // layers its own per-OS checks on top, alerting when the machine shows
@@ -61,10 +61,13 @@ func main() {
 		*host = h
 	}
 
+	migrateWatchdogState(dataDir)
+
 	rules := LoadRules(dataDir)
-	// Peer URLs: flag > env > rules. The hardcoded rules defaults only work
-	// while the launcher hands every app its usual port; explicit overrides
-	// keep the interlinks alive if APPDECK_PORT assignments ever drift.
+	// Peer URLs: flag > env > launcher registry > rules. The hardcoded rules
+	// defaults only work while the launcher hands every app its usual port;
+	// the registry lookup keeps the interlinks alive when apps are
+	// auto-assigned (port 0) and their assignments drift.
 	if *wtowerFl != "" {
 		rules.MonitorURL = *wtowerFl
 	} else if v := os.Getenv("WTOWER_URL"); v != "" {
@@ -74,6 +77,10 @@ func main() {
 		rules.IntelURL = *wgridFl
 	} else if v := os.Getenv("WGRID_URL"); v != "" {
 		rules.IntelURL = v
+	} else if u := discoverPeerURL(launcherURL(), "wgrid"); u != "" {
+		// the wGrid app is port 0 (launcher auto-assigns): the registry is
+		// the only static-free way to find it
+		rules.IntelURL = u
 	}
 	warnPortConflicts(rules)
 

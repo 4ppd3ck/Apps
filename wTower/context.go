@@ -2,7 +2,9 @@
 // (mirrors monitor/context.py).
 package wtower
 
-import "sync"
+import (
+	"sync"
+)
 
 // Status is a collector status chip: {"state": ..., "detail": ...}
 // (base.Collector.status dict).
@@ -40,7 +42,7 @@ type Ctx struct {
 	Net       *NetState
 	Enforcer  *Enforcer
 	Geo       *GeoCache      // external-IP geo enrichment (nil disables it)
-	Country   *CountrySource // per-country CIDR data via IPolice (nil-safe)
+	Country   *CountrySource // per-country CIDR data via wGrid (nil-safe)
 	DNSShield *DNSShield     // filtering resolver (nil-safe API paths)
 
 	collectors []Collector

@@ -11,6 +11,7 @@ let report = null;
 const selected = new Set();
 let tab = localStorage.getItem('wpurge.tab') || 'buildup';
 let pollTimer = null;
+let onboardShown = false; // assigned in initOnboarding; must be declared — this is a strict-mode script
 
 function fmtBytes(n) {
   if (!n) return '0 B';
@@ -100,12 +101,33 @@ function initOnboarding(info) {
   if (info && info.onboarded) seen = true;
   if (seen) return;
   $('#onboard').hidden = false;
+  onboardShown = true;
   $('#onboardOk').addEventListener('click', () => {
     $('#onboard').hidden = true;
+    onboardShown = false;
     try { localStorage.setItem('wpurge.onboarded', '1'); } catch (e) {}
     api('/api/onboarded', {}).catch(() => {}); // best-effort; banner stays hidden this session regardless
   });
 }
+
+/* ---------- wLens hand-off ---------- */
+
+// Hand-off from wLens (it opens wPurge with ?handoff=<path>; the in-app
+// Analyze view this once served is now the standalone wLens app): the
+// path itself is NOT deleted here — destructive work stays behind the
+// guarded cleanup endpoints. The note plus a buildup scan points the
+// operator at the right tools.
+window.wpurgeHandToClean = function (path) {
+  showTab('buildup');
+  const note = $('#handoffNote');
+  note.innerHTML =
+    `<span class="grow">🗺️ Handed off from <b>wLens</b>: <span class="mono">${esc(path)}</span> — ` +
+    `pick a matching cleanup rule below, or use <b>🧹 Traces</b> for leftovers of apps that are already gone.</span>` +
+    `<button class="btn small ghost" id="handoffDismiss">Dismiss</button>`;
+  note.hidden = false;
+  $('#handoffDismiss').addEventListener('click', () => { note.hidden = true; });
+  if (!report) scan(); // straight into the existing guarded buildup scan
+};
 
 /* ---------- tabs ---------- */
 
@@ -174,8 +196,14 @@ async function init() {
     renderGuardBtn();
   } catch (e) { showError('Could not reach the wPurge server: ' + e.message); }
   initOnboarding(info);
-  showTab(tab);
+  showTab(tab); // restores the stored Clean tab
   if (tab === 'buildup') pollScan(); // picks up an in-flight job after reload
+  // wLens hand-off: its 🧹 Hand to Clean button opens wPurge with the
+  // scanned path in the query string
+  try {
+    const h = new URLSearchParams(location.search).get('handoff');
+    if (h) window.wpurgeHandToClean(h);
+  } catch (e) {}
 }
 
 function scan() {
@@ -1060,6 +1088,50 @@ async function loadStartup() {
 function initTrust() {
   $('#trustBtn').addEventListener('click', () => $('#trustDialog').showModal());
   $('#trustClose').addEventListener('click', () => $('#trustDialog').close());
+}
+
+/* ---------- Excel-style column resize (traces + exclusions) ---------- */
+
+// The .tbl-wrap tables keep the design system's fixed layout + ellipsis:
+// long paths truncate and the full text stays in the cell's title tooltip.
+// These edge handles add the Excel behavior — drag a header's right edge
+// to widen that one column (the others keep their frozen widths and the
+// table grows past the panel, where .tbl-wrap's horizontal scrollbar takes
+// over) or narrow it; double-click resets the table to its default widths.
+// The first column is skipped everywhere: it is the fixed-width checkbox
+// gutter and holds nothing to reveal.
+for (const id of ['#tbl-traces', '#tbl-exclusions']) {
+  const table = $(id);
+  const cells = [...table.tHead.rows[0].cells];
+  const defWidths = cells.map((t) => t.style.width); // design defaults (some are inline styles)
+  const ths = cells.slice(1);
+  ths.forEach((th) => {
+    const handle = document.createElement('span');
+    handle.className = 'col-resizer';
+    handle.title = 'drag to resize this column · double-click to reset';
+    handle.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      // freeze every column at its current width so only the dragged one moves
+      cells.forEach((t) => { t.style.width = t.offsetWidth + 'px'; });
+      const startX = e.clientX;
+      const startW = th.offsetWidth;
+      const onMove = (ev) => {
+        th.style.width = Math.max(48, startW + ev.clientX - startX) + 'px';
+      };
+      const onUp = () => {
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.body.classList.remove('col-resizing');
+      };
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      document.body.classList.add('col-resizing');
+    });
+    handle.addEventListener('dblclick', () => {
+      cells.forEach((t, i) => { t.style.width = defWidths[i]; });
+    });
+    th.appendChild(handle);
+  });
 }
 
 /* ---------- boot ---------- */

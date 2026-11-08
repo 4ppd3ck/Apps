@@ -4,6 +4,8 @@
 //   - battery: percent, state (charging/discharging), time remaining,
 //     low-power mode -- omitted on machines without a battery
 //   - cpu_percent / mem_percent / disk_percent: system-wide utilisation
+//   - load_avg / uptime_sec / procs / cores: machine vitals (POSIX; Windows
+//     omits them and the panel shows dashes)
 //   - volumes: every mounted volume with used/total
 //   - top power consumers: per-app CPU usage + process runtime
 //   - macOS extra: apps holding sleep-prevention assertions

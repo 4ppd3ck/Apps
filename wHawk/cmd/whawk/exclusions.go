@@ -73,7 +73,7 @@ func (e *Exclusions) statMod() map[string]any {
 func (e *Exclusions) noteMod() { e.lastMod = e.statMod() }
 
 // MaybeReload re-reads exclusions.json when it changed on disk. A second
-// Sentinel process (an orphaned previous launch) or a manual edit must take
+// wHawk process (an orphaned previous launch) or a manual edit must take
 // effect in a long-running instance — otherwise a process that started
 // before the exclusion was saved keeps notifying forever.
 func (e *Exclusions) MaybeReload() {

@@ -777,8 +777,8 @@ func planUninstall(app *AppInfo) (string, int64, []Leftover) {
 
 // appUninstallOutcome is what trashing one application produced.
 type appUninstallOutcome struct {
-	entry   JournalEntry
-	note    string
+	entry    JournalEntry
+	note     string
 	failures []map[string]string
 }
 
@@ -903,12 +903,12 @@ func (s *server) handleAppsUninstallBatch(w http.ResponseWriter, r *http.Request
 	}
 
 	type batchResult struct {
-		Path   string `json:"path"`
-		Name   string `json:"name,omitempty"`
-		OK     bool   `json:"ok"`
-		Bytes  int64  `json:"bytes,omitempty"`
-		Files  int    `json:"files,omitempty"`
-		Error  string `json:"error,omitempty"`
+		Path  string `json:"path"`
+		Name  string `json:"name,omitempty"`
+		OK    bool   `json:"ok"`
+		Bytes int64  `json:"bytes,omitempty"`
+		Files int    `json:"files,omitempty"`
+		Error string `json:"error,omitempty"`
 	}
 	var results []batchResult
 	var skipped []map[string]string

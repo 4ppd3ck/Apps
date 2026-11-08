@@ -3,19 +3,14 @@
   "id": "wgrid",
   "name": "wGrid",
   "icon": "🚔",
-  "desc": "Known-IP intel feed for wHawk",
-  "category": "Security",
-  "port": 24504,
+  "desc": "Known-IP intel feed — provider network ranges for wHawk and wTower",
+  "category": "Tools",
+  "port": 0,
   "urlPath": "/",
-  "network": true,
+  "network": false,
   "binary": "wgrid",
   "args": [
-    "--port",
     "{port}"
   ],
-  "version": "1.0",
-  "env": {
-    "WHAWK_URL": "http://127.0.0.1:24509",
-    "WPURGE_URL": "http://127.0.0.1:8212"
-  }
+  "version": "1.0"
 }

@@ -1,6 +1,6 @@
 package main
 
-// Sentinel HTTP API + embedded dashboard. Loopback by default (AppDeck hands
+// wHawk HTTP API + embedded dashboard. Loopback by default (AppDeck hands
 // us APPDECK_HOST); no auth layer beyond loopback + the DNS-rebinding Host
 // guard (hostguard.go), matching wTower.
 
@@ -262,7 +262,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.json(w, s.monitor.Summary())
 	case "/api/wtower/block":
 		// user-initiated remediation: queue a block rule for this IP in
-		// wTower ("Sentinel finds it, you approve, AppScope cuts
+		// wTower ("wHawk finds it, you approve, AppScope cuts
 		// it"). The monitor re-validates everything and its own guardrails
 		// still apply; the same protected-range filter here keeps obviously
 		// dangerous targets (your router, the LAN, loopback) from ever
@@ -316,7 +316,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiStatus() map[string]any {
 	status := s.engine.Status()
-	status["version"] = Version // peers (IPolice's wiring page) detect drift
+	status["version"] = Version // peers (wGrid's wiring page) detect drift
 	st := s.store.Summary()
 	status["alerts"] = st
 	status["wtower"] = s.monitor.Summary()

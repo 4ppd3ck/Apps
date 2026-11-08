@@ -1,6 +1,6 @@
 package main
 
-// Client for AppScope Monitor (the "appscan" source). Sentinel keeps its own
+// Client for AppScope Monitor (the "appscan" source). wHawk keeps its own
 // host checks running even when the monitor is offline; monitor data adds
 // event correlation (camera/mic/file + connections) and a live connection
 // table with per-app attribution.
@@ -171,7 +171,7 @@ func (m *Monitor) Summary() map[string]any {
 // BlockIP queues one IP block rule in AppScope Monitor (user-initiated
 // remediation from an alert's "block in AppScope" button). The rule lands
 // in the monitor's store as "queued" behind its own guardrails (argument
-// validation, protected-range filtering, the one-time Grant) — Sentinel
+// validation, protected-range filtering, the one-time Grant) — wHawk
 // never touches the firewall itself. Loopback only by construction: the
 // monitor URL is a local peer address.
 func (m *Monitor) BlockIP(ip string) (map[string]any, error) {

@@ -2,7 +2,7 @@ package main
 
 // Live "sensitive access" watch: which apps are holding or attempting
 // access to the microphone, camera, password-manager data or sensitive
-// files — Sentinel's own per-OS primitives, independent of wTower:
+// files — wHawk's own per-OS primitives, independent of wTower:
 //
 //   Linux  : /proc/<pid>/fd readlink — V4L2 camera nodes, ALSA capture
 //            devices, password stores and sensitive paths open per process
@@ -172,7 +172,7 @@ func isNoiseProcess(name string) bool   { return StrHasAny(name, noiseProcessTok
 
 // scanProcFDs walks /proc/<pid>/fd readlinks. Unreadable pids (other users)
 // are skipped silently — coverage is this user's processes plus root's when
-// Sentinel runs elevated.
+// wHawk runs elevated.
 func scanProcFDs(snap *SensitiveSnapshot, rules *Rules) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -604,7 +604,7 @@ func dedupeAccess(in []SensitiveAccess) []SensitiveAccess {
 }
 
 // sensitiveFindings converts a snapshot into findings. intel (may be nil —
-// IPolice offline) downgrades the network correlation when the paired
+// wGrid offline) downgrades the network correlation when the paired
 // outbound peer is a known provider: a Meet/Teams call keeps the device-hold
 // severity with an annotation instead of "spyware behaviour", and a
 // sensitive file held while talking to a known range drops to medium.
@@ -646,7 +646,7 @@ func sensitiveFindings(rules *Rules, snap SensitiveSnapshot,
 		// "via <source>" marks externally-reported rows in the title: the
 		// app is the one using the device, the source is the witness that
 		// reported it (only wTower is an external witness — local
-		// scans are Sentinel's own eyes and add no suffix)
+		// scans are wHawk's own eyes and add no suffix)
 		via := ""
 		if a.Source == "wTower" {
 			via = " via wTower"
@@ -683,7 +683,7 @@ func sensitiveFindings(rules *Rules, snap SensitiveSnapshot,
 				}
 				// the wording separates actor from witness: the app named in
 				// the title is the one using the device; the source is only
-				// how Sentinel learned it
+				// how wHawk learned it
 				if a.Source == "wTower" {
 					f.Detail = fmt.Sprintf("wTower saw the %s turn on for "+
 						"%s (macOS TCC log). The monitor is the witness here — it "+

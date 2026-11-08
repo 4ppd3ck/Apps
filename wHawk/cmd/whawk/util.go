@@ -135,7 +135,7 @@ func AnyBool(v any) bool {
 }
 
 // blockableRemoteIP mirrors AppScope Monitor's own guardrails for the
-// Sentinel→AppScope bridge: only a public IPv4 may be queued (loopback,
+// wHawk→AppScope bridge: only a public IPv4 may be queued (loopback,
 // LAN, CGNAT, multicast and reserved ranges can never be blocked there
 // either — and the monitor re-validates whatever arrives).
 func blockableRemoteIP(s string) bool {

@@ -159,7 +159,7 @@ func (c *FilesMacOS) run() {
 	// The stream child must be reaped: sudo exits instantly when the
 	// passwordless grant disappears between probe and start ("sudo: a
 	// password is required" on stderr, which PopenStream discards), and an
-	// unwaited dead child lingers as a zombie for Sentinel to flag. Wait
+	// unwaited dead child lingers as a zombie for wHawk to flag. Wait
 	// always, then surface WHY the stream ended so "active" never lies.
 	waitErr := proc.Wait()
 	if c.Stopped() {

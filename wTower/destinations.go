@@ -242,6 +242,12 @@ func destinationSummary(ctx *Ctx, since float64) ([]IPCountryRow, []SiteGroup, [
 			}
 			c.domain = domainOf(c.host)
 			c.label = siteLabelOf(c.domain)
+			// IPs with no reverse-DNS record (most CDN/cloud nodes) would
+			// show as a bare address — the geo org ("Alibaba.com LLC",
+			// "Fastly, Inc.") is the honest name the internet does publish.
+			if c.domain == ip && c.org != "" && c.label == "" {
+				c.label = c.org
+			}
 			cells[key] = c
 		}
 		return c

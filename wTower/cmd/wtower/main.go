@@ -64,12 +64,21 @@ func main() {
 	store.Start(cfg.RetentionDays())
 	bus := wtower.NewEventBus(store)
 	ctx := wtower.NewCtx(cfg, store, bus)
+
+	// The host watchdog and the IP intel feed live in their own apps since
+	// the split (wHawk and wGrid); the country-block source discovers wGrid
+	// on its own (launcher registry + signature probe).
+
 	ctx.SetCollectors(collectors.BuildCollectors(ctx))
 	// external-IP geo enrichment: async ip-api.com lookups + persistent cache
 	ctx.Geo = wtower.NewGeoCache(filepath.Join(cfg.DataDir(), "geo_cache.json"))
 
 	// blocking enforcement: materialize the packaged helper/grant scripts
-	// beside the config, probe privilege level, then re-apply stored rules
+	// beside the config and probe privilege level. The stored-rule
+	// re-apply (StartupReconcile) deliberately runs AFTER the dashboard
+	// binds below: it can feed thousands of CIDRs to the privileged
+	// helper, and the launcher's start probe must see the port answer
+	// long before that finishes.
 	if err := wtower.MaterializeScripts(
 		filepath.Join(filepath.Dir(cfg.Path), "scripts")); err != nil {
 		fmt.Printf("[blocks] scripts: %v\n", err)
@@ -77,13 +86,6 @@ func main() {
 	enf := wtower.NewEnforcer(ctx)
 	ctx.Enforcer = enf
 	enf.Probe()
-	if _, err := enf.StartupReconcile(); err != nil {
-		fmt.Printf("[blocks] reconcile error: %v\n", err)
-	}
-	if enf.Paused() {
-		fmt.Println("[blocks] blocking is PAUSED — stored rules stay " +
-			"unenforced until resumed from the dashboard")
-	}
 
 	// DNS shield: the local filtering resolver. Off unless dns_shield is
 	// set in the config (the dashboard's DNS panel can start it any time).
@@ -96,6 +98,8 @@ func main() {
 			fmt.Printf("[dns] shield listening on 127.0.0.1:%d\n", shield.Port())
 		}
 	}
+	// the Report tab's daily usage rollup names destinations at flush time
+	wtower.WireReportRollup(ctx)
 
 	for _, col := range ctx.Collectors() {
 		if !col.Enabled() {
@@ -147,14 +151,34 @@ func main() {
 		fmt.Printf("  [%s] %-16s %s%s\n", mark, col.Name(), st.State, extra)
 	}
 
+	// serve BEFORE the slow startup work: the launcher opens the dashboard
+	// the moment the port answers, so HTTP must be live while the firewall
+	// reconcile and first collector polls still run in the background
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+		}
+	}()
+
+	// re-apply stored rules while the dashboard is already serving: pf
+	// anchors reload without holding the web UI hostage
+	if _, err := enf.StartupReconcile(); err != nil {
+		fmt.Printf("[blocks] reconcile error: %v\n", err)
+	}
+	if enf.Paused() {
+		fmt.Println("[blocks] blocking is PAUSED — stored rules stay " +
+			"unenforced until resumed from the dashboard")
+	}
+
 	if *openBrowserFlag || cfg.GetBool("open_browser", false) {
 		openBrowser(url)
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
+	select {
+	case <-sigCh:
 		fmt.Println("\nshutting down...")
 		for _, col := range ctx.Collectors() {
 			col.Stop()
@@ -162,8 +186,7 @@ func main() {
 		shield.Stop()
 		store.Stop()
 		srv.Close()
-	}()
-	if err := srv.Serve(); err != nil && err != http.ErrServerClosed {
+	case err := <-serveErr:
 		log.Printf("server error: %v", err)
 	}
 	_ = store.Close()

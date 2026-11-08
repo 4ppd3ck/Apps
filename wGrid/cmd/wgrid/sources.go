@@ -1,7 +1,8 @@
 package main
 
-// sources.json persistence and the add/remove-source operations behind the
-// dashboard. Two file shapes are understood:
+// Intel-feed sources.json persistence and the add/remove-source operations
+// behind the Intel Sources view. Ported from the former wGrid app. Two file
+// shapes are understood:
 //
 //	[ …sources ]                      legacy array: replaces the defaults
 //	{"replace":bool,"sources":[…]}    object form; replace=false merges with
@@ -30,9 +31,9 @@ type sourcesFile struct {
 	legacy  bool     `json:"-"`
 }
 
-func (it *Intel) sourcesPath() string { return filepath.Join(it.dataDir, "sources.json") }
+func (it *IntelFeed) sourcesPath() string { return filepath.Join(it.dataDir, "sources.json") }
 
-func (it *Intel) loadSources() {
+func (it *IntelFeed) loadSources() {
 	raw, err := os.ReadFile(it.sourcesPath())
 	if err != nil {
 		return
@@ -86,7 +87,7 @@ type SourceView struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func (it *Intel) SourceViews() []SourceView {
+func (it *IntelFeed) SourceViews() []SourceView {
 	defs := DefaultSources()
 	it.mu.Lock()
 	defer it.mu.Unlock()
@@ -148,7 +149,7 @@ func validateSource(s Source) error {
 
 // AddSource validates a source, persists it to sources.json, then activates
 // it in memory. Callers kick off a Refresh afterwards.
-func (it *Intel) AddSource(s Source) error {
+func (it *IntelFeed) AddSource(s Source) error {
 	if err := validateSource(s); err != nil {
 		return err
 	}
@@ -176,7 +177,7 @@ func (it *Intel) AddSource(s Source) error {
 // RemoveSource drops a source from memory and sources.json. If no remaining
 // source feeds that provider name, the fetched provider is removed from the
 // cache so lookups stop matching immediately.
-func (it *Intel) RemoveSource(s Source) error {
+func (it *IntelFeed) RemoveSource(s Source) error {
 	it.mu.Lock()
 	kept := make([]Source, 0, len(it.sources))
 	removed := false
@@ -230,7 +231,7 @@ func (it *Intel) RemoveSource(s Source) error {
 // fresh managed file is object form with replace=false). Deleted defaults
 // are recorded in the object form's "removed" list so they stay gone across
 // restarts while remaining code-owned.
-func (it *Intel) persistSourceChange(add *Source, remove Source) error {
+func (it *IntelFeed) persistSourceChange(add *Source, remove Source) error {
 	raw, _ := os.ReadFile(it.sourcesPath())
 	obj := parseSourcesFile(raw)
 	if obj == nil {
