@@ -1,4 +1,4 @@
-# 🔭 SpaceLens
+# 🔭 wGauge
 
 **What's eating your disk? Scan any folder or volume and see it — sunburst, treemap or
 bars — then drill in, reveal, and trash the hogs. Read-mostly by design.**
@@ -26,7 +26,7 @@ paths are guarded.
   queue.
 - **📂 Reveal** — open any file or folder in Finder / Explorer / your file manager.
 - **🗑️ Safe deletion** — *Move to Trash only*; root paths and system locations are
-  guarded; nothing is ever permanently deleted by SpaceLens.
+  guarded; nothing is ever permanently deleted by wGauge.
 - **📁 Native folder picker** — choose scan roots through the OS dialog; presets for home,
   Applications and volumes included.
 - **🌙 Dark UI, fully local** — the scanner and server run on loopback.
@@ -38,17 +38,17 @@ paths are guarded.
 ### The easy way — with the AppDeck launcher
 
 1. Put this folder in the launcher's `Apps/` directory (or import its zip).
-2. Start the launcher — it builds SpaceLens on first start — and click the **🔭
-   SpaceLens** tile.
+2. Start the launcher — it builds wGauge on first start — and click the **🔭
+   wGauge** tile.
 
 ### Build it yourself
 
 Requires [Go](https://go.dev/dl/):
 
 ```sh
-cd SpaceLens
-go build -o spacelens ./cmd/spacelens
-./spacelens -port 8767
+cd wGauge
+go build -o wgauge ./cmd/spacelens
+./wgauge -port 8767
 # open http://127.0.0.1:8767
 ```
 
@@ -86,5 +86,5 @@ cmd/spacelens/
 
 ```sh
 go build ./... && go vet ./...
-./spacelens -port 8767   # scan a small folder, zoom, reveal
+./wgauge -port 8767   # scan a small folder, zoom, reveal
 ```

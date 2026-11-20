@@ -1,10 +1,10 @@
-# 💧 Descale
+# 💧 wPurge
 
 **The kettle-cleaner for your computer: buildup report, app uninstaller and startup
 manager — and nothing is ever touched without your confirmation.**
 
 Caches, logs, crash reports, leftover app traces, things that sneak into login items…
-Descale finds the scale, shows you exactly what it is, and moves it to the Trash (never
+wPurge finds the scale, shows you exactly what it is, and moves it to the Trash (never
 straight to deletion). Every session is journalled and restorable.
 
 | | |
@@ -22,7 +22,7 @@ straight to deletion). Every session is journalled and restorable.
 - **💧 Buildup report** — regenerable caches (browser, app, cargo, brew…), logs, crash
   reports, orphaned downloads — grouped, sized, and separated from *your data*.
 - **🗑️ App uninstaller — one app or a whole batch** — pick an app (or check
-  several and press *Uninstall selected*): Descale collects the binary plus its scattered
+  several and press *Uninstall selected*): wPurge collects the binary plus its scattered
   traces (preferences, appdata, caches) for one confirmed Trash move. Batch
   uninstalls write one restorable journal entry per app; running apps and
   AppDeck apps (their removal is permanent) are skipped with a reason —
@@ -48,14 +48,14 @@ straight to deletion). Every session is journalled and restorable.
 ### The easy way — with the AppDeck launcher
 
 1. Put this folder in the launcher's `Apps/` directory (or import its zip).
-2. Start the launcher — it builds Descale on first start — and click the **💧 Descale** tile.
+2. Start the launcher — it builds wPurge on first start — and click the **💧 wPurge** tile.
 
 ### Build it yourself
 
 Requires [Go](https://go.dev/dl/):
 
 ```sh
-cd Descale
+cd wPurge
 go build -o wpurge ./cmd/wpurge
 ./wpurge 8212
 # open http://127.0.0.1:8212

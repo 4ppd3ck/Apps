@@ -118,7 +118,10 @@ func main() {
 		port = 3000
 	}
 
-	dataDir := os.Getenv("REPOLENS_DATA")
+	dataDir := os.Getenv("WLENS_DATA")
+	if dataDir == "" {
+		dataDir = os.Getenv("REPOLENS_DATA") // pre-rename name, still honored
+	}
 	if dataDir == "" {
 		dataDir = os.Getenv("APPDECK_DATA")
 	}

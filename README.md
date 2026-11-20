@@ -7,22 +7,23 @@ start AppDeck from its own folder next to this one and every app below
 appears on its dashboard.
 
 For a first run, keep `Apps/` beside the `Appdeck/` launcher folder, then
-start AppDeck with `go run .` from inside `Appdeck/`.
+start AppDeck with `go run ./cmd/appdeck` from inside `Appdeck/`.
 
 ## The apps
 
 | App folder | Purpose | How to run |
 |---|---|---|
-| [AppScopeMonitor](AppScopeMonitor/README.md) | Local device, privacy, and network activity dashboard | Start from AppDeck; Go can also run it directly |
-| [Sentinel](Sentinel/README.md) | Host checks and security alerts | Start from AppDeck; Go can also run it directly |
-| [Descale](Descale/README.md) | Review cleanup candidates and restore items from Trash | Start from AppDeck; Go can also run it directly |
-| [SpaceLens](SpaceLens/README.md) | See what's eating your disk — sunburst, treemap and bars — then send the hogs to Trash | Start from AppDeck; Go can also run it directly |
-| [RepoLens](RepoLens/README.md) | Search GitHub for open-source applications | Start from AppDeck or run the Go server directly |
+| [wTower](wTower/README.md) | Local device, privacy, and network activity dashboard | Start from AppDeck; Go can also run it directly |
+| [wHawk](wHawk/README.md) | Host checks and security alerts | Start from AppDeck; Go can also run it directly |
+| [wGrid](wGrid/README.md) | Known-IP intel feed — provider network ranges for wHawk and wTower | Start from AppDeck; Go can also run it directly |
+| [wPurge](wPurge/README.md) | Review cleanup candidates and restore items from Trash | Start from AppDeck; Go can also run it directly |
+| [wGauge](wGauge/README.md) | See what's eating your disk — sunburst, treemap and bars — then send the hogs to Trash | Start from AppDeck; Go can also run it directly |
+| [wLens](wLens/README.md) | Search GitHub for open-source applications | Start from AppDeck or run the Go server directly |
 | [TokenReport](TokenReport/README.md) | Analyze selected local AI-agent logs | Start from AppDeck |
 | [WifiGuard](WifiGuard/README.md) | View which AppDeck apps are shared on Wi-Fi | Start from AppDeck |
 
-AppScopeMonitor, Sentinel, Descale, SpaceLens and RepoLens are Go apps the
-launcher builds on first start; TokenReport and Wi-Fi Guard are static pages
+wTower, wHawk, wGrid, wPurge, wGauge and wLens are Go apps the launcher
+builds on first start; TokenReport and Wi-Fi Guard are static pages
 served by AppDeck itself, with no separate runtime.
 
 ## Screenshots
@@ -32,15 +33,15 @@ workstation, network, or file details.*
 
 | | |
 |---|---|
-| ![AppScope Monitor activity dashboard](AppScopeMonitor/docs/screenshots/dashboard.png)<br>**AppScope Monitor** — device, privacy and network activity | ![Sentinel checks](Sentinel/docs/screenshots/checks.png)<br>**Sentinel** — host checks and alerts |
-| ![Descale home view](Descale/docs/screenshots/home.png)<br>**Descale** — cleanup candidates | ![SpaceLens sunburst view](SpaceLens/docs/screenshots/sunburst.png)<br>**SpaceLens** — sunburst disk map |
-| ![RepoLens results](RepoLens/docs/screenshots/results.png)<br>**RepoLens** — GitHub app search | ![Token Report dashboard](TokenReport/docs/screenshots/dashboard.png)<br>**Token Report** — AI-agent log analysis |
-| ![Wi-Fi Guard shared apps](WifiGuard/docs/screenshots/shared.png)<br>**Wi-Fi Guard** — apps shared on Wi-Fi | |
+| ![wTower activity dashboard](wTower/docs/screenshots/dashboard.png)<br>**wTower** — device, privacy and network activity | ![wHawk checks](wHawk/docs/screenshots/checks.png)<br>**wHawk** — host checks and alerts |
+| ![wGrid intel feed](wGrid/docs/screenshots/intel.png)<br>**wGrid** — known-IP provider ranges | ![wPurge home view](wPurge/docs/screenshots/home.png)<br>**wPurge** — cleanup candidates |
+| ![wGauge sunburst view](wGauge/docs/screenshots/sunburst.png)<br>**wGauge** — sunburst disk map | ![wLens results](wLens/docs/screenshots/results.png)<br>**wLens** — GitHub app search |
+| ![Token Report dashboard](TokenReport/docs/screenshots/dashboard.png)<br>**Token Report** — AI-agent log analysis | ![Wi-Fi Guard shared apps](WifiGuard/docs/screenshots/shared.png)<br>**Wi-Fi Guard** — apps shared on Wi-Fi |
 
-More views are in each app's `docs/screenshots/` folder — Sentinel's alert
-feed, Descale's guardrails and batch uninstall, SpaceLens's treemap,
-RepoLens's search page, and AppScope Monitor's privacy, files and
-blocked-connections screens.
+More views are in each app's `docs/screenshots/` folder — wHawk's alert
+feed, wPurge's guardrails and batch uninstall, wGauge's treemap,
+wLens's search page, and wTower's privacy, files and blocked-connections
+screens.
 
 ## Get AppDeck from the releases
 
@@ -66,7 +67,7 @@ working.
 2. Start the launcher from `Appdeck/`:
 
    ```sh
-   go run .
+   go run ./cmd/appdeck
    ```
 
 3. Open <http://127.0.0.1:9090> if the browser did not open automatically.

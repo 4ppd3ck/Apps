@@ -1,8 +1,8 @@
-# 🛡️ AppScope Monitor
+# 🛡️ wTower
 
 **See what your computer is really doing — and cut off anything you don't like.**
 
-wTower (AppScope Monitor) is a live dashboard for your Mac, Windows PC, or Linux box that
+wTower is a live dashboard for your Mac, Windows PC, or Linux box that
 answers three questions in real time: *who is using my camera and mic?*, *which apps are talking
 to the internet (and where)?*, and *how do I block them?* — all on one page, all stored on your
 machine, nothing sent anywhere. (The host watchdog lives in the companion **wHawk** app and the
@@ -54,7 +54,7 @@ no cloud, no telemetry.
 
 1. Put this folder in the launcher's `Apps/` directory (or import its zip).
 2. Start the launcher — it builds the app automatically on first start.
-3. Click the **🛡️ AppScope Monitor** tile. Your browser opens the dashboard. Done.
+3. Click the **🛡️ wTower** tile. Your browser opens the dashboard. Done.
 
 ### The standalone way — just Go
 
@@ -62,9 +62,9 @@ Requires [Go](https://go.dev/dl/) 1.27+. No C compiler, no extra installs — th
 is pure Go.
 
 ```sh
-cd AppScopeMonitor
-go build -o monitor ./cmd/monitor   # builds the binary
-./monitor --open                     # start it and open the dashboard
+cd wTower
+go build -o wtower ./cmd/wtower   # builds the binary
+./wtower --open                     # start it and open the dashboard
 ```
 
 The dashboard lives at `http://127.0.0.1:8765` (change with `--port`).
