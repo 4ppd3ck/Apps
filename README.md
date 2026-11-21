@@ -59,7 +59,8 @@ binaries for Windows, macOS, and Linux in two flavors:
 
 Both flavors include per-platform zips plus a `SHA256SUMS` file; the
 All-in-One builds are the ones to hand to someone who just wants the deck
-working.
+working. Releases are built and published by the maintainer only — whoever
+has release access; there is no release automation.
 
 ## First-time setup
 
