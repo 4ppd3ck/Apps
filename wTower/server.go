@@ -208,6 +208,8 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 	switch path {
 	case "/api/collectors":
 		postCollectors(ctx, w, r)
+	case "/api/rules/import":
+		postRulesImport(ctx, w, r)
 	case "/api/theme":
 		data, ok := readBody(r)
 		if !ok {
@@ -642,6 +644,12 @@ func apiGet(ctx *Ctx, path string, r *http.Request) (any, int, error) {
 		}
 		out["available"] = len(info) > 0
 		return out, 200, nil
+	case "/api/rules/export":
+		doc, err := buildRuleExport(ctx)
+		if err != nil {
+			return nil, 500, err
+		}
+		return doc, 200, nil
 	case "/api/blocks":
 		mode, reason := "", "enforcer unavailable"
 		if ctx.Enforcer != nil {

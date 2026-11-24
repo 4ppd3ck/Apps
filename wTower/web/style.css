@@ -261,9 +261,9 @@ header { display: flex; align-items: center; justify-content: space-between; fle
 @keyframes panel-in { from { opacity: 0; transform: translateY(6px); } }
 .dashboard-layout > .panel { animation: panel-in .35s ease both; }
 .dashboard-layout > .panel { margin: 0; min-width: 0; position: relative; transition: background-color .18s ease, border-color .18s ease; }
-.dashboard-layout > .panel.layout-full { grid-column: span 12; }
-.dashboard-layout > .panel.layout-half { grid-column: span 6; }
-.dashboard-layout > .panel.layout-third { grid-column: span 4; }
+/* width = 1–12 column spans, applied via the --span custom property
+   (legacy full/half/third names map to the 12/6/4 spans in app.js) */
+.dashboard-layout > .panel { grid-column: span var(--span, 12); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .panel[hidden] { display: none; }
 /* two-row head: title + Move/width/Lock controls on row 1, filters on row 2 */
@@ -316,12 +316,17 @@ header { display: flex; align-items: center; justify-content: space-between; fle
 .layout-controls button:disabled, .layout-controls select:disabled { opacity: .5; cursor: not-allowed; }
 .panel-dragging { opacity: .55; }
 .panel-resize-handle {
-  position: absolute; right: 2px; bottom: 2px; z-index: 2;
-  width: 15px; height: 15px; cursor: ns-resize; touch-action: none;
+  position: absolute; right: 0; bottom: 0; z-index: 2;
+  width: 18px; height: 18px; cursor: nwse-resize; touch-action: none;
+  border-radius: 0 0 10px 0;
 }
 .panel-resize-handle::after {
-  content: ""; position: absolute; right: 3px; bottom: 3px; width: 7px; height: 7px;
+  content: ""; position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px;
   border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim); opacity: .7;
+  transition: border-color .15s ease, opacity .15s ease;
+}
+.panel-resize-handle:hover::after {
+  border-right-color: var(--accent); border-bottom-color: var(--accent); opacity: 1;
 }
 .tag { font-size: 10px; text-transform: none; letter-spacing: 0; padding: 2px 7px; border-radius: 10px; margin-left: 6px; vertical-align: 1px; }
 .tag-priv { background: color-mix(in srgb, var(--purple) 16%, var(--panel2)); color: var(--purple); }
@@ -457,8 +462,7 @@ th.sortable[data-dir="desc"]::after { content: " ▼"; opacity: .75; font-size: 
 #traffic-totals-panel .tbl-wrap { height: auto; }
 .summary-table-wrap { height: 220px; }
 @media (max-width: 900px) {
-  .dashboard-layout > .panel.layout-half,
-  .dashboard-layout > .panel.layout-third { grid-column: span 12; }
+  .dashboard-layout > .panel { grid-column: span 12; }
 }
 .connection-summary-count { color: var(--dim); font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .protocol-label, .scope-label {
@@ -564,13 +568,10 @@ img.flag {
 
 .report-view { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: start; gap: 12px; margin: 0; }
 .report-view[hidden] { display: none; }
-.report-view > .panel { margin: 0; min-width: 0; grid-column: span 12; }
+.report-view > .panel { margin: 0; min-width: 0; position: relative; grid-column: span var(--span, 12); }
 .report-view > .report-period-panel { grid-column: span 12; }
-/* arrangement widths (dashboard parity): full/half/third applied from the
-   saved report layout; halves let two tables sit side by side */
-.report-view > .panel.layout-full { grid-column: span 12; }
-.report-view > .panel.layout-half { grid-column: span 6; }
-.report-view > .panel.layout-third { grid-column: span 4; }
+/* arrangement widths (dashboard parity): 1–12 column spans from the saved
+   report layout; halves let two tables sit side by side */
 @media (max-width: 900px) { .report-view > .panel { grid-column: span 12; } }
 .report-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; }
 .report-window { margin-left: 4px; }

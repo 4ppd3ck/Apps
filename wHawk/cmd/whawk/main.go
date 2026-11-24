@@ -26,13 +26,13 @@ const Version = "1.0"
 
 func main() {
 	var (
-		host      = flag.String("host", "127.0.0.1", "bind address")
-		port      = flag.Int("port", 8899, "port to serve on")
-		dataFl    = flag.String("data", "", "data directory (default APPDECK_DATA or ./data)")
+		host     = flag.String("host", "127.0.0.1", "bind address")
+		port     = flag.Int("port", 8899, "port to serve on")
+		dataFl   = flag.String("data", "", "data directory (default APPDECK_DATA or ./data)")
 		wtowerFl = flag.String("wtower", "", "wTower base URL (default MONITOR_URL env, then rules)")
-		wgridFl   = flag.String("wgrid", "", "wGrid base URL (default IPOLICE_URL env, then rules)")
-		once      = flag.Bool("once", false, "run one full scan, print findings, exit")
-		_         = flag.Bool("debug", false, "verbose logging (reserved)")
+		wgridFl  = flag.String("wgrid", "", "wGrid base URL (default IPOLICE_URL env, then rules)")
+		once     = flag.Bool("once", false, "run one full scan, print findings, exit")
+		_        = flag.Bool("debug", false, "verbose logging (reserved)")
 	)
 	flag.Parse()
 
@@ -89,6 +89,15 @@ func main() {
 	fmt.Printf("  monitor  : %s\n", rules.MonitorURL)
 	fmt.Printf("  intel    : %s\n", rules.IntelURL)
 	fmt.Printf("  ticks    : fast %ds / slow %dm\n", rules.TickSeconds, rules.SlowMinutes)
+	if rules.FixedTicks {
+		fmt.Printf("  power    : fixed ticks (adaptive scanning off)\n")
+	} else {
+		if st := NewPowerReader().Snapshot(); st.Mode != PowerUnknown {
+			fmt.Printf("  power    : %s — ticks ×%d (adaptive)\n", st.Mode, st.Factor)
+		} else {
+			fmt.Printf("  power    : adaptive (state unreadable — ticks unchanged)\n")
+		}
+	}
 
 	hub := NewHub()
 	store, err := NewStore(dataDir, hub)

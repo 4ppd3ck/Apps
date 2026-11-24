@@ -25,6 +25,7 @@
     <nav class="tabs" aria-label="Dashboard views">
       <button id="dashboardTab" class="btn tab selected" aria-selected="true">Watchdog</button>
       <button id="sensitiveTab" class="btn tab" aria-selected="false">Live Access</button>
+      <button id="portsTab" class="btn tab" aria-selected="false">Ports</button>
       <button id="permissionsTab" class="btn tab" aria-selected="false">App Access</button>
       <button id="firewallTab" class="btn tab" aria-selected="false">Firewall Rules</button>
     <button id="exclusionsTab" class="btn tab" aria-selected="false">Exclusions</button>
@@ -101,6 +102,49 @@
       </section>
     </div>
   </div>
+
+  <section id="portsView" class="panel permission-view" hidden>
+    <div class="panel-head">
+      <div>
+        <h2>Local ports</h2>
+        <p class="muted small">Local TCP listeners and UDP sockets, plus active connections when wTower is available. App attribution comes from the OS or wTower; remote IPs are labeled by address scope. Bind scope does not guarantee firewall or router reachability.</p>
+      </div>
+      <div class="btnrow">
+        <button id="refreshPorts" class="btn ghost small">⟳ Refresh</button>
+        <button id="scanPorts" class="btn ghost small">Scan now</button>
+      </div>
+    </div>
+    <div id="portSummary" class="permission-summary"></div>
+    <div class="permission-toolbar">
+      <input id="portAppFilter" type="search" placeholder="Filter by app/process" aria-label="Filter by app or process">
+      <input id="portRemoteFilter" type="search" placeholder="Filter remote IP or port" aria-label="Filter by remote endpoint">
+      <select id="portProtocol" aria-label="Filter by protocol">
+        <option value="">All protocols</option>
+        <option value="tcp">TCP</option>
+        <option value="udp">UDP</option>
+      </select>
+      <select id="portState" aria-label="Filter by connection state">
+        <option value="">All states</option>
+      </select>
+      <select id="portExposure" aria-label="Filter by network exposure">
+        <option value="">All bind scopes</option>
+        <option value="loopback">Loopback only</option>
+        <option value="network_interface">Network interface</option>
+        <option value="all_interfaces">All interfaces</option>
+        <option value="unknown">Unknown scope</option>
+      </select>
+      <select id="portRisk" aria-label="Filter by risk">
+        <option value="">All risk levels</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <button id="clearPortFilters" class="btn ghost small" type="button">Clear filters</button>
+    </div>
+    <div id="portWarnings" class="permission-warnings"></div>
+    <div id="portList" class="port-list"><p class="muted">Select Ports to load the local inventory.</p></div>
+  </section>
 
   <section id="permissionsView" class="panel permission-view" hidden>
     <div class="panel-head">

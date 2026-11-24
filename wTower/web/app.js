@@ -576,14 +576,95 @@ function applyPanelDisplay() {
   }
 }
 
-const LAYOUT_WIDTHS = ["full", "half", "third"];
+/* Panel widths are column spans on the 12-column grid (1–12): the select
+   offers named presets and the corner resize handle can set any span, which
+   the select then shows as a dynamic "Custom" option. Widths saved by older
+   builds as "full"/"half"/"third" map to the 12/6/4 spans. */
+const WIDTH_PRESETS = [[12, "Full"], [8, "Two-thirds"], [6, "Half"], [4, "Third"], [3, "Quarter"]];
+const LEGACY_WIDTHS = { full: 12, half: 6, third: 4 };
+
+function clampSpan(span) {
+  const n = Math.round(Number(span));
+  if (!Number.isFinite(n)) return 12;
+  return Math.max(1, Math.min(12, n));
+}
+
+function panelSpan(panel) {
+  return clampSpan(panel.dataset.layoutWidth);
+}
+
+function syncWidthSelect(panel) {
+  const select = panel.querySelector(".panel-width");
+  if (!select) return;
+  const span = String(panelSpan(panel));
+  for (const option of [...select.options]) {
+    if (!WIDTH_PRESETS.some(([value]) => String(value) === option.value)) {
+      option.remove();
+    }
+  }
+  if (!select.querySelector(`option[value="${span}"]`)) {
+    const option = document.createElement("option");
+    option.value = span;
+    option.textContent = `Custom · ${span} cols`;
+    select.append(option);
+  }
+  select.value = span;
+}
+
+function applyPanelWidth(panel, span) {
+  panel.dataset.layoutWidth = String(clampSpan(span));
+  panel.style.setProperty("--span", panelSpan(panel));
+  syncWidthSelect(panel);
+}
+
+/* Corner drag resizes both axes: vertical is free-form pixels clamped like
+   the old height-only handle, horizontal snaps to the 12-column grid so the
+   panel keeps playing well with its neighbours. */
+function setupPanelResize(panel, handle, save) {
+  handle.title = "Drag to resize panel (height and width)";
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-label", "Resize panel height and width");
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startHeight = panel.getBoundingClientRect().height;
+    const startWidth = panel.getBoundingClientRect().width;
+    const grid = panel.parentElement;
+    const style = getComputedStyle(grid);
+    const gap = parseFloat(style.columnGap) || 12;
+    const inner = grid.clientWidth -
+      parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const col = (inner - 11 * gap) / 12;
+    // capture keeps the drag alive when the cursor leaves the handle; some
+    // environments refuse it for synthetic pointers, so fall back to
+    // window-level listeners (idempotent end() covers both delivery paths)
+    try { handle.setPointerCapture(event.pointerId); } catch { /* keep going */ }
+    const move = (moveEvent) => {
+      const height = Math.max(180, Math.min(1200, startHeight + moveEvent.clientY - startY));
+      panel.style.height = `${height}px`;
+      panel.style.overflow = "auto";
+      panel.dataset.layoutHeight = String(Math.round(height));
+      const span = clampSpan((startWidth + moveEvent.clientX - startX + gap) / (col + gap));
+      if (String(span) !== panel.dataset.layoutWidth) applyPanelWidth(panel, span);
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      save();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
 
 async function saveDashboardLayout() {
   const panels = [...$("dashboard-layout").querySelectorAll(":scope > .panel")];
   const layout = {
     order: panels.map((panel) => panel.id),
-    widths: Object.fromEntries(panels.map((panel) =>
-      [panel.id, panel.dataset.layoutWidth || "full"])),
+    widths: Object.fromEntries(panels.map((panel) => [panel.id, panelSpan(panel)])),
     heights: Object.fromEntries(panels.filter((panel) => panel.dataset.layoutHeight)
       .map((panel) => [panel.id, Number(panel.dataset.layoutHeight)])),
     locked: state.dashboardLayout?.locked === true,
@@ -627,11 +708,8 @@ function applyDashboardLayout(layout) {
     for (const panel of ordered) container.append(panel);
   }
   for (const panel of validPanels) {
-    const width = LAYOUT_WIDTHS.includes(layout.widths?.[panel.id])
-      ? layout.widths[panel.id] : "full";
-    panel.dataset.layoutWidth = width;
-    panel.classList.remove("layout-full", "layout-half", "layout-third");
-    panel.classList.add(`layout-${width}`);
+    const saved = layout.widths?.[panel.id];
+    applyPanelWidth(panel, typeof saved === "string" ? LEGACY_WIDTHS[saved] : saved);
     const height = Number(layout.heights?.[panel.id]);
     if (Number.isFinite(height) && height >= 180 && height <= 1200) {
       panel.dataset.layoutHeight = String(height);
@@ -712,16 +790,15 @@ function setupDashboardLayoutControls() {
       `<button type="button" class="layout-step" data-step="up" title="Move up">↑</button>` +
       `<button type="button" class="layout-step" data-step="down" title="Move down">↓</button>` +
       `<select class="filter panel-width" title="panel width">` +
-      `<option value="full">Full</option><option value="half">Half</option>` +
-      `<option value="third">Third</option></select>` +
+      WIDTH_PRESETS.map(([span, label]) =>
+        `<option value="${span}">${label}</option>`).join("") +
+      `</select>` +
       `<button type="button" class="panel-lock" aria-pressed="false" title="lock this panel arrangement">Lock</button>`;
     head.append(controls);
     const select = controls.querySelector("select");
-    select.value = panel.dataset.layoutWidth || "full";
+    syncWidthSelect(panel);
     select.addEventListener("change", () => {
-      panel.dataset.layoutWidth = select.value;
-      panel.classList.remove("layout-full", "layout-half", "layout-third");
-      panel.classList.add(`layout-${select.value}`);
+      applyPanelWidth(panel, Number(select.value));
       saveDashboardLayout();
     });
     controls.querySelectorAll(".layout-step").forEach((button) => {
@@ -736,29 +813,8 @@ function setupDashboardLayoutControls() {
     });
     const handle = document.createElement("div");
     handle.className = "panel-resize-handle";
-    handle.title = "Drag to resize panel height";
-    handle.setAttribute("role", "separator");
-    handle.setAttribute("aria-label", "Resize panel height");
+    setupPanelResize(panel, handle, saveDashboardLayout);
     panel.append(handle);
-    handle.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      const startY = event.clientY;
-      const startHeight = panel.getBoundingClientRect().height;
-      handle.setPointerCapture(event.pointerId);
-      const move = (moveEvent) => {
-        const height = Math.max(180, Math.min(1200, startHeight + moveEvent.clientY - startY));
-        panel.style.height = `${height}px`;
-        panel.style.overflow = "auto";
-        panel.dataset.layoutHeight = String(Math.round(height));
-      };
-      const end = () => {
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", end);
-        saveDashboardLayout();
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", end, { once: true });
-    });
     const drag = controls.querySelector(".layout-drag");
     drag.addEventListener("dragstart", (event) => {
       if (layoutLocked() || panelLocked(panel)) {
@@ -786,13 +842,7 @@ function setupDashboardLayoutControls() {
         ? event.clientX < rect.left + rect.width / 2
         : event.clientY < rect.top + rect.height / 2;
       if (horizontal) {
-        dragged.dataset.layoutWidth = "half";
-        panel.dataset.layoutWidth = "half";
-        for (const item of [dragged, panel]) {
-          item.classList.remove("layout-full", "layout-half", "layout-third");
-          item.classList.add("layout-half");
-          item.querySelector(".panel-width").value = "half";
-        }
+        for (const item of [dragged, panel]) applyPanelWidth(item, 6);
       }
       // both panels are on the active tab (only those are visible to drop
       // on) — splice them within the tab's slots of the flat panel order
@@ -827,12 +877,7 @@ function movePanel(panel, direction) {
   const target = panels[targetIndex];
   if (!target || target === panel || panelLocked(target)) return;
   if (direction === "left" || direction === "right") {
-    for (const item of [panel, target]) {
-      item.dataset.layoutWidth = "half";
-      item.classList.remove("layout-full", "layout-half", "layout-third");
-      item.classList.add("layout-half");
-      item.querySelector(".panel-width").value = "half";
-    }
+    for (const item of [panel, target]) applyPanelWidth(item, 6);
   }
   // up/left lands the panel before its neighbour, down/right after it
   reorderPanelInOrder(panel, target, offset < 0);
@@ -869,8 +914,7 @@ async function loadDashboardLayout() {
     const layout = await getJSON("/api/dashboard-layout");
     applyDashboardLayout(layout);
     for (const panel of $("dashboard-layout").querySelectorAll(":scope > .panel")) {
-      const select = panel.querySelector(".panel-width");
-      if (select) select.value = panel.dataset.layoutWidth || "full";
+      syncWidthSelect(panel);
     }
   } catch (error) {
     console.warn("dashboard layout", error);
@@ -889,8 +933,7 @@ $("layout-default").addEventListener("click", () => {
   const layout = defaultDashboardLayout();
   applyDashboardLayout(layout);
   for (const panel of $("dashboard-layout").querySelectorAll(":scope > .panel")) {
-    const select = panel.querySelector(".panel-width");
-    if (select) select.value = panel.dataset.layoutWidth || "full";
+    syncWidthSelect(panel);
     if (!layout.heights[panel.id]) {
       delete panel.dataset.layoutHeight;
       panel.style.removeProperty("height");
@@ -901,9 +944,9 @@ $("layout-default").addEventListener("click", () => {
 });
 
 function defaultDashboardLayout() {
-  const widths = Object.fromEntries(Object.keys(VISIBILITY_LABELS).map((id) => [id, "full"]));
-  widths["top-apps-panel"] = "half";
-  widths["connection-summary-panel"] = "half";
+  const widths = Object.fromEntries(Object.keys(VISIBILITY_LABELS).map((id) => [id, 12]));
+  widths["top-apps-panel"] = 6;
+  widths["connection-summary-panel"] = 6;
   return {
     order: defaultPanelOrder(),
     widths,
@@ -4502,11 +4545,11 @@ const REPORT_PANEL_IDS = ["report-screen-panel", "report-protos-panel",
   "report-sites-panel", "report-usage-panel", "report-byapp-panel"];
 
 function defaultReportLayout() {
-  const widths = Object.fromEntries(REPORT_PANEL_IDS.map((id) => [id, "full"]));
-  widths["report-screen-panel"] = "half";
-  widths["report-protos-panel"] = "half";
-  widths["report-usage-panel"] = "half";
-  widths["report-byapp-panel"] = "half";
+  const widths = Object.fromEntries(REPORT_PANEL_IDS.map((id) => [id, 12]));
+  widths["report-screen-panel"] = 6;
+  widths["report-protos-panel"] = 6;
+  widths["report-usage-panel"] = 6;
+  widths["report-byapp-panel"] = 6;
   return {
     order: [...REPORT_PANEL_IDS], widths, heights: {},
     locked: false,
@@ -4540,11 +4583,8 @@ function applyReportLayout(layout) {
     for (const panel of ordered) container.append(panel);
   }
   for (const panel of validPanels) {
-    const width = LAYOUT_WIDTHS.includes(layout.widths?.[panel.id])
-      ? layout.widths[panel.id] : "full";
-    panel.dataset.layoutWidth = width;
-    panel.classList.remove("layout-full", "layout-half", "layout-third");
-    panel.classList.add(`layout-${width}`);
+    const saved = layout.widths?.[panel.id];
+    applyPanelWidth(panel, typeof saved === "string" ? LEGACY_WIDTHS[saved] : saved);
     const height = Number(layout.heights?.[panel.id]);
     if (Number.isFinite(height) && height >= 180 && height <= 1200) {
       panel.dataset.layoutHeight = String(height);
@@ -4565,11 +4605,24 @@ function applyReportLayout(layout) {
   for (const panel of validPanels) {
     panel.dataset.layoutLocked = String(layout.panel_locks?.[panel.id] === true);
     setPanelCollapsed(panel, layout.collapsed?.[panel.id] === true);
-    const select = panel.querySelector(".panel-width");
-    if (select) select.value = panel.dataset.layoutWidth || "full";
-    const lock = panel.querySelector(".panel-lock");
-    if (lock) {
-      lock.setAttribute("aria-pressed", String(reportPanelLocked(panel)));
+    syncWidthSelect(panel);
+    // disabled controls + hidden handle mirror the dashboard's lock handling
+    const controls = panel.querySelector(".layout-controls");
+    if (controls) {
+      controls.querySelectorAll("button, select").forEach((control) => {
+        control.disabled = layout.locked === true || panel.dataset.layoutLocked === "true";
+      });
+      const lock = controls.querySelector(".panel-lock");
+      if (lock) {
+        lock.textContent = panel.dataset.layoutLocked === "true" ? "Unlock" : "Lock";
+        lock.setAttribute("aria-pressed", panel.dataset.layoutLocked);
+        lock.disabled = layout.locked === true;
+      }
+    }
+    const handle = panel.querySelector(".panel-resize-handle");
+    if (handle) {
+      handle.hidden = layout.locked === true || panel.dataset.layoutLocked === "true";
+      handle.setAttribute("aria-disabled", String(handle.hidden));
     }
   }
 }
@@ -4579,10 +4632,14 @@ function reportPanelsInDom() {
 }
 
 async function saveReportLayout() {
+  const panels = reportPanelsInDom();
   const layout = state.reportLayout || defaultReportLayout();
-  layout.order = reportPanelsInDom().map((panel) => panel.id);
-  layout.widths = Object.fromEntries(reportPanelsInDom().map((panel) =>
-    [panel.id, panel.dataset.layoutWidth || "full"]));
+  layout.order = panels.map((panel) => panel.id);
+  layout.widths = Object.fromEntries(panels.map((panel) => [panel.id, panelSpan(panel)]));
+  // heights ride along — the corner handle only sets dataset.layoutHeight,
+  // so without collecting them here report height edits were lost on reload
+  layout.heights = Object.fromEntries(panels.filter((panel) => panel.dataset.layoutHeight)
+    .map((panel) => [panel.id, Number(panel.dataset.layoutHeight)]));
   try {
     const response = await fetch("/api/report-layout", {
       method: "POST",
@@ -4619,12 +4676,7 @@ function moveReportPanel(panel, direction) {
   const target = panels[targetIndex];
   if (!target || target === panel || reportPanelLocked(target)) return;
   if (direction === "left" || direction === "right") {
-    for (const item of [panel, target]) {
-      item.dataset.layoutWidth = "half";
-      item.classList.remove("layout-full", "layout-half", "layout-third");
-      item.classList.add("layout-half");
-      item.querySelector(".panel-width").value = "half";
-    }
+    for (const item of [panel, target]) applyPanelWidth(item, 6);
   }
   panels.splice(index, 1);
   panels.splice(targetIndex, 0, panel);
@@ -4671,16 +4723,15 @@ function setupReportLayoutControls() {
       `<button type="button" class="layout-step" data-step="up" title="Move up">↑</button>` +
       `<button type="button" class="layout-step" data-step="down" title="Move down">↓</button>` +
       `<select class="filter panel-width" title="panel width">` +
-      `<option value="full">Full</option><option value="half">Half</option>` +
-      `<option value="third">Third</option></select>` +
+      WIDTH_PRESETS.map(([span, label]) =>
+        `<option value="${span}">${label}</option>`).join("") +
+      `</select>` +
       `<button type="button" class="panel-lock" aria-pressed="false" title="lock this panel arrangement">Lock</button>`;
     head.append(controls);
     const select = controls.querySelector("select");
-    select.value = panel.dataset.layoutWidth || "full";
+    syncWidthSelect(panel);
     select.addEventListener("change", () => {
-      panel.dataset.layoutWidth = select.value;
-      panel.classList.remove("layout-full", "layout-half", "layout-third");
-      panel.classList.add(`layout-${select.value}`);
+      applyPanelWidth(panel, Number(select.value));
       saveReportLayout();
     });
     controls.querySelectorAll(".layout-step").forEach((button) => {
@@ -4695,29 +4746,8 @@ function setupReportLayoutControls() {
     });
     const handle = document.createElement("div");
     handle.className = "panel-resize-handle";
-    handle.title = "Drag to resize panel height";
-    handle.setAttribute("role", "separator");
-    handle.setAttribute("aria-label", "Resize panel height");
+    setupPanelResize(panel, handle, saveReportLayout);
     panel.append(handle);
-    handle.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      const startY = event.clientY;
-      const startHeight = panel.getBoundingClientRect().height;
-      handle.setPointerCapture(event.pointerId);
-      const move = (moveEvent) => {
-        const height = Math.max(180, Math.min(1200, startHeight + moveEvent.clientY - startY));
-        panel.style.height = `${height}px`;
-        panel.style.overflow = "auto";
-        panel.dataset.layoutHeight = String(Math.round(height));
-      };
-      const end = () => {
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", end);
-        saveReportLayout();
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", end, { once: true });
-    });
     const drag = controls.querySelector(".layout-drag");
     drag.addEventListener("dragstart", (event) => {
       if (reportLayoutLocked() || reportPanelLocked(panel)) {
@@ -4746,13 +4776,7 @@ function setupReportLayoutControls() {
         ? event.clientX < rect.left + rect.width / 2
         : event.clientY < rect.top + rect.height / 2;
       if (horizontal) {
-        dragged.dataset.layoutWidth = "half";
-        panel.dataset.layoutWidth = "half";
-        for (const item of [dragged, panel]) {
-          item.classList.remove("layout-full", "layout-half", "layout-third");
-          item.classList.add("layout-half");
-          item.querySelector(".panel-width").value = "half";
-        }
+        for (const item of [dragged, panel]) applyPanelWidth(item, 6);
       }
       container.insertBefore(dragged, before ? panel : panel.nextElementSibling);
     });

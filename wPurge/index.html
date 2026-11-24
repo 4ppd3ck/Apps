@@ -26,6 +26,7 @@
     </div>
     <div class="machine" id="machine"></div>
     <button id="guardBtn" class="btn ghost theme-btn" title="Guardrails">🛡️</button>
+    <button id="settingsBtn" class="btn ghost theme-btn" title="Settings — Downloads age, extra rules, import/export" aria-label="Settings">⚙️</button>
     <button id="themeBtn" class="btn ghost theme-btn" title="Toggle light/dark" aria-label="Toggle light or dark theme">🌙</button>
   </div>
   <nav class="tabs">
@@ -53,9 +54,12 @@
     <div class="toolbar">
       <button id="scanBtn" class="btn primary">🔍 Scan this machine</button>
       <div class="progress" id="scanProgress" hidden><div class="bar" id="scanBar"></div></div>
+      <input id="buildupFilter" class="search" type="search" placeholder="Filter rules…" hidden>
+      <button id="vgExpandAll" class="btn small ghost" hidden title="Expand every result group">▾ Expand all</button>
+      <button id="vgCollapseAll" class="btn small ghost" hidden title="Collapse every result group">▴ Collapse all</button>
       <span id="scanMeta" class="muted"></span>
     </div>
-    <div id="results" hidden></div>
+    <div id="results" hidden aria-live="polite"></div>
     <details class="journal" id="journalBox">
       <summary>🧾 Cleaning journal <span class="muted" id="journalCount"></span></summary>
       <div id="journal"></div>
@@ -145,20 +149,9 @@
     <div id="saList"></div>
   </section>
 
-      <aside class="an-side">
-        <div class="an-crumbs" id="an-crumbs"></div>
-        <div class="an-sel" id="an-sel">
-          <p class="muted" id="an-selEmpty">Scan a folder, then click any segment to zoom in; click the middle to go back up.</p>
-        </div>
-        <h3>Biggest files <span class="muted small" id="an-bigMeta"></span></h3>
-        <div id="an-bigList" class="an-big-list"></div>
-      </aside>
-    </div>
-  </section>
-
   <footer>
     <p>wPurge separates buildup from your data. <b>safe</b> items are regenerable caches and are pre-selected; <b class="amber">review</b> items are never pre-checked. Cleaning moves files to the Trash — except Empty-the-Trash, which is permanent, review-only, and must run alone. Every session is journalled and restorable.</p>
-    <p class="muted">🔒 Localhost-only, zero telemetry — nothing about your machine leaves it. Rules live in <code>rules/wpurge-rules.json</code> — edit and rescan, no rebuild needed. <button class="btn small ghost" id="trustBtn">What wPurge knows</button></p>
+    <p class="muted">🔒 Localhost-only, zero telemetry — nothing about your machine leaves it. Rules live in per-OS files: <code id="rulesFileNote">rules/</code> — edit and rescan, no rebuild needed. <button class="btn small ghost" id="trustBtn">What wPurge knows</button></p>
   </footer>
 </main>
 
@@ -170,11 +163,83 @@
 
 <dialog id="confirmDialog">
   <h3>Confirm cleaning</h3>
-  <p class="muted">Files are moved to the Trash (restorable from the journal). Permanent rules are called out.</p>
+  <p class="muted">Files are moved to the Trash (restorable from the journal — space frees when the Trash is emptied). Permanent rules are called out.</p>
   <div id="planList"></div>
+  <div id="planWarn"></div>
   <div class="dialog-actions">
     <button class="btn ghost" id="cancelClean">Cancel</button>
     <button class="btn danger" id="confirmClean">Clean now</button>
+  </div>
+</dialog>
+
+<dialog id="ruleDialog" aria-labelledby="ruleDlgTitle">
+  <h3 id="ruleDlgTitle">Rule</h3>
+  <div id="ruleDlgChips" class="chips"></div>
+  <p class="desc" id="ruleDlgDesc"></p>
+  <div id="ruleDlgComeback" hidden>
+    <h4 class="dlg-h">How it comes back</h4>
+    <p class="desc" id="ruleDlgComebackText"></p>
+  </div>
+  <div id="ruleDlgSource" hidden>
+    <h4 class="dlg-h">Source</h4>
+    <p><a id="ruleDlgSourceLink" href="#" target="_blank" rel="noopener noreferrer"></a></p>
+  </div>
+  <div id="ruleDlgSamplesWrap" hidden>
+    <h4 class="dlg-h">Biggest items</h4>
+    <ul class="samples" id="ruleDlgSamples"></ul>
+  </div>
+  <div class="dialog-actions">
+    <button class="btn ghost" id="ruleDlgClose">Close</button>
+  </div>
+</dialog>
+
+<dialog id="settingsDialog" aria-labelledby="settingsTitle">
+  <h3 id="settingsTitle">⚙️ Settings</h3>
+
+  <h4 class="dlg-h">Downloads — offer installers older than</h4>
+  <div class="setting-row">
+    <select id="dlAge" aria-label="Downloads age cutoff">
+      <option value="1">1 day</option>
+      <option value="5">5 days</option>
+      <option value="15">15 days</option>
+      <option value="30">30 days (default)</option>
+      <option value="custom">Custom…</option>
+    </select>
+    <input type="number" id="dlAgeCustom" class="search" min="1" max="3650" style="width:7rem" hidden
+           aria-label="Custom age in days">
+    <span class="muted small">days</span>
+  </div>
+  <p class="muted small">Applies to the “Old installers in Downloads” rule (its files are never pre-checked either way). Changes wait for the Apply button below — a fresh scan follows.</p>
+
+  <h4 class="dlg-h">Custom &amp; extra rules <span class="muted small" id="extraRuleMeta"></span></h4>
+  <p class="muted small">Rules beyond the built-in per-OS set — the extra catalog and anything you imported. Checked = the rule is scanned; unchecked = the default built-ins apply (an imported rule that replaced a built-in falls back to that built-in). Rules whose tool has never written anything here stay dormant and need no switch.</p>
+  <div id="extraRuleWrap"><div id="extraRuleList" class="extra-rules"></div></div>
+  <details id="dormantWrap" class="group" hidden>
+    <summary>Not on this machine <span class="muted small" id="dormantMeta"></span></summary>
+    <div id="dormantRuleList" class="extra-rules dormant-list"></div>
+  </details>
+
+  <h4 class="dlg-h">Folders to scan</h4>
+  <p class="muted small">Point wPurge at any folder — an external drive, a project dir. Its <b>contents</b> are scanned as <b class="amber">review</b> (nothing pre-checked), the guardrails still apply inside, and the folder itself is never moved. Removed folders are not deleted — they just stop being scanned.</p>
+  <div class="setting-row wrap">
+    <button class="btn small primary" id="customFolderPick">📂 Choose folder…</button>
+    <span class="muted small">opens Finder / Explorer / the desktop dialog — the folder's contents are scanned as review</span>
+  </div>
+  <div id="customFolderList" class="extra-rules"></div>
+
+  <h4 class="dlg-h">Imported ruleset</h4>
+  <div class="setting-row wrap">
+    <button class="btn small ghost" id="rulesExportBtn">⬇️ Export rules</button>
+    <button class="btn small ghost" id="rulesImportBtn">⬆️ Import rules</button>
+    <input type="file" id="rulesImportFile" accept=".json,application/json" hidden>
+    <button class="btn small ghost" id="rulesClearBtn" hidden>🗑️ Clear imported</button>
+  </div>
+  <p class="muted small" id="rulesImportNote">Imported rules are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.</p>
+
+  <div class="dialog-actions">
+    <span class="muted small grow" id="settingsDirtyNote" hidden>unsaved changes</span>
+    <button class="btn primary" id="settingsApply" disabled>Apply</button>
+    <button class="btn ghost" id="settingsClose">Close</button>
   </div>
 </dialog>
 
@@ -204,7 +269,7 @@
     <li>The server binds to <b>127.0.0.1 only</b> — unreachable from your network.</li>
     <li><b>Zero telemetry</b>: no analytics, no crash reporting, no file inventories — nothing about your machine leaves it.</li>
     <li>Cleaning moves files to the <b>Trash</b> first and every session is journalled and restorable. The one permanent action (Empty the Trash / Recycle Bin) is review-only and always requires a separate confirmation.</li>
-    <li>The rules database is a local file: <code>rules/wpurge-rules.json</code>. <span id="trustSigned"></span></li>
+    <li>The rules database ships as per-OS files under <code>rules/</code>: <code id="trustRulesFiles">wpurge-<your OS>-rules.json</code> (built-ins) plus an <code>-extra-rules.json</code> catalog, and an optional operator-imported ruleset. <span id="trustSigned"></span></li>
     <li><b>Guardrails</b> keep system and shared locations (Library roots, Containers, your user folders) out of every scan and deletion. Experts can lift that protection from the 🛡️ button in the header; the home directory itself stays protected either way.</li>
     <li>The journal lives at <code id="trustJournal"></code>.</li>
     <li>Scans never send anything anywhere; every endpoint listed in the README runs on this machine, for this machine.</li>

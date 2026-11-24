@@ -9,6 +9,8 @@ let alertFilter = { sev: "", hideAcked: true, state: "", check: "" };
 let seenIds = new Set();
 let permissionData = null;
 let sensitiveData = null;
+let portsData = null;
+let portSort = { key: "local", direction: "asc" };
 let exclusions = []; // [{app, watchdog, live, app_access}] — server-persisted
 let alertAppFilter = "";
 let guardrailsOff = false; // 🛡 Guardrails toggle: when true, remediation
@@ -96,7 +98,9 @@ function renderStatus() {
   i.hidden = !intel.up;
   i.textContent = `wGrid: ${intel.up ? `${intel.networks} nets` : "offline"}`;
   i.className = "pill " + (intel.up ? "on" : "off");
-  $("#scanState").textContent = `scans every ${status.tick_s || "?"}s`;
+  const pw = status.power || {};
+  const slow = pw.factor > 1 ? ` (×${pw.factor} ${pw.mode === "lowpower" ? "low power mode" : "battery"})` : "";
+  $("#scanState").textContent = `scans every ${status.tick_s || "?"}s${slow}`;
   renderChecks();
   renderFindings();
   renderMonitor();
@@ -127,9 +131,146 @@ function renderFindings() {
   $("#findingList").innerHTML = rows.slice(0, 40).map((f) => `
     <div class="finding">
       <span class="tag sev-${esc(f.severity)}">${esc(f.severity)}</span><span class="tag">${esc(f.check)}</span>
+      ${f.verdict ? `<span class="tag verdict-${esc(f.verdict)}">${verdictLabel(f.verdict)}</span>` : ""}
       <span class="t">${esc(f.title)}</span>
       <div class="d">${esc(f.detail)}</div>
+      ${f.plain ? `<div class="d plain">${esc(f.plain)}</div>` : ""}
     </div>`).join("");
+}
+
+function renderPorts() {
+  if (!portsData) return;
+  const rows = (portsData.ports || []).map((p) => ({
+    local_ip: p.local_ip,
+    local_port: p.port,
+    remote_ip: p.remote_ip || "",
+    remote_port: p.remote_port || 0,
+    app: p.process || (p.pid ? `Unknown process (PID ${p.pid})` : "Process name unavailable"),
+    pid: p.pid,
+    protocol: p.protocol,
+    state: p.state,
+    exposure: p.exposure,
+    risk: p.risk,
+    remote_type: p.remote_type || "",
+    service: p.service,
+    purpose: p.purpose,
+    advice: p.advice,
+    source: "Local socket scan",
+  }));
+  for (const c of portsData.connections || []) {
+    rows.push({
+      local_ip: c.local_ip,
+      local_port: c.local_port,
+      remote_ip: c.remote_ip,
+      remote_port: c.remote_port,
+      app: c.app || (c.pid ? `Unknown process (PID ${c.pid})` : "App name unavailable"),
+      pid: c.pid,
+      protocol: c.protocol,
+      state: c.state || "connection",
+      exposure: c.local_ip ? (c.local_ip === "127.0.0.1" || c.local_ip === "::1" ? "loopback" : "network_interface") : "unknown",
+      risk: c.risk,
+      remote_type: c.remote_type,
+      service: c.remote_type === "public" ? "External connection" : "Local network connection",
+      purpose: `Remote address is ${c.remote_type || "unclassified"}`,
+      advice: c.remote_type === "public"
+        ? "A public remote address is not proof of a threat. Check whether this app and destination are expected."
+        : "Review the app and destination if this connection is unexpected.",
+      source: c.source || "Connection monitor",
+    });
+  }
+  const normalizeState = (state) => String(state || "").trim().toLowerCase().replace(/^estab$/, "established");
+  const stateSelect = $("#portState");
+  const selectedState = stateSelect.value;
+  const states = [...new Set(rows.map((p) => normalizeState(p.state)).filter(Boolean))];
+  if (selectedState && !states.includes(selectedState)) states.push(selectedState);
+  states.sort((a, b) => a.localeCompare(b));
+  stateSelect.innerHTML = `<option value="">All states</option>` +
+    states.map((state) => `<option value="${esc(state)}">${esc(state.replace(/_/g, " "))}</option>`).join("");
+  stateSelect.value = selectedState;
+
+  const summary = [
+    `<div class="port-scan-state ${portsData.complete ? "complete" : "incomplete"}">${portsData.complete ? "Socket scan complete" : "Socket scan incomplete"}</div>`,
+    `<div class="muted small">${esc(portsData.method || "local scanner")} · ${(portsData.ports || []).length} local sockets · ${(portsData.connections || []).length} active connections · ${timeOf(portsData.scanned_at)}</div>`,
+  ];
+  $("#portSummary").innerHTML = summary.join("");
+
+  const warnings = [];
+  if (!portsData.complete) {
+    warnings.push(`<div class="permission-warning"><strong>Inventory may be partial:</strong> ${esc(portsData.error || "The scanner could not inspect all socket tables.")} Check the platform tool and permissions; do not treat this result as complete.</div>`);
+  }
+  for (const note of portsData.warnings || []) {
+    warnings.push(`<div class="permission-warning">${esc(note)}</div>`);
+  }
+  if (!portsData.connections_available) {
+    warnings.push(`<div class="permission-warning">Active remote endpoints and per-connection app names are provided by wTower and are unavailable while it is offline. Local socket ownership is still shown when the OS permits it.</div>`);
+  }
+  $("#portWarnings").innerHTML = warnings.join("");
+
+  const appQuery = $("#portAppFilter").value.trim().toLowerCase();
+  const remoteQuery = $("#portRemoteFilter").value.trim().toLowerCase();
+  const proto = $("#portProtocol").value;
+  const state = stateSelect.value;
+  const exposure = $("#portExposure").value;
+  const risk = $("#portRisk").value;
+  const filtered = rows.filter((p) => {
+    const remote = [p.remote_ip, p.remote_port].join(":").toLowerCase();
+    return (!appQuery || p.app.toLowerCase().includes(appQuery)) &&
+      (!remoteQuery || remote.includes(remoteQuery)) &&
+      (!proto || p.protocol === proto) &&
+      (!state || normalizeState(p.state) === state) &&
+      (!exposure || p.exposure === exposure) &&
+      (!risk || p.risk === risk);
+  });
+  const riskOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4, unknown: 5 };
+  const sortValue = (p) => {
+    if (portSort.key === "local") return [p.local_ip, p.local_port].join(":");
+    if (portSort.key === "app") return p.app;
+    if (portSort.key === "protocol") return p.protocol;
+    if (portSort.key === "remote") return [p.remote_ip, p.remote_port].join(":");
+    if (portSort.key === "risk") return String(riskOrder[p.risk] ?? 6).padStart(2, "0");
+    return normalizeState(p.state);
+  };
+  const direction = portSort.direction === "desc" ? -1 : 1;
+  filtered.sort((a, b) => String(sortValue(a)).localeCompare(String(sortValue(b)), undefined, { numeric: true, sensitivity: "base" }) * direction);
+  if (!filtered.length) {
+    $("#portList").innerHTML = `<p class="muted">${rows.length ? "No ports match these filters." : "No local TCP listeners or bound UDP ports were found."}</p>`;
+    return;
+  }
+  const address = (ip, port) => ip ? `${ip}${port ? `:${port}` : ""}` : "—";
+  const remoteTypeLabel = (type) => ({
+    public: "external · public",
+    private: "internal · private",
+    loopback: "internal · loopback",
+    linklocal: "internal · link-local",
+    cgnat: "shared address",
+    multicast: "multicast",
+    reserved: "reserved",
+    invalid: "unclassified",
+    unknown: "unclassified",
+  }[type] || type);
+  const sortHeader = (key, label) => `<button type="button" class="port-sort-head" data-sort-key="${key}" aria-label="Sort by ${label}" aria-sort="${portSort.key === key ? (portSort.direction === "asc" ? "ascending" : "descending") : "none"}">${label}<span aria-hidden="true">${portSort.key === key ? (portSort.direction === "asc" ? "▴" : "▾") : ""}</span></button>`;
+  $("#portList").innerHTML = `<div class="port-table-wrap"><table class="port-table">
+    <thead><tr><th>${sortHeader("local", "Local IP : port")}</th><th>${sortHeader("app", "App / process")}</th><th>${sortHeader("protocol", "Type")}</th><th>${sortHeader("remote", "Remote endpoint")}</th><th>${sortHeader("risk", "Threat")}</th><th>${sortHeader("state", "State / guidance")}</th></tr></thead>
+    <tbody>${filtered.map((p) => {
+      const remote = address(p.remote_ip, p.remote_port);
+      const remoteType = p.remote_ip ? ` <span class="tag">${esc(remoteTypeLabel(p.remote_type))}</span>` : "";
+      return `<tr>
+        <td class="mono port-address">${esc(address(p.local_ip, p.local_port))}</td>
+        <td><strong>${esc(p.app)}</strong>${p.pid ? `<div class="muted small">PID ${esc(p.pid)}</div>` : ""}</td>
+        <td><span class="tag">${esc(String(p.protocol || "unknown").toUpperCase())}</span><div class="muted small">${esc(p.source)}</div></td>
+        <td class="mono">${esc(remote)}${remoteType}</td>
+        <td><span class="permission-status port-risk-${esc(p.risk)}">${esc(p.risk)} risk</span></td>
+        <td><strong>${esc(p.state)}</strong>${p.service ? `<div class="muted small">${esc(p.service)} · ${esc(p.purpose)}</div>` : ""}
+          <div class="port-advice">${esc(p.advice)}</div></td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table></div>`;
+}
+
+// verdictLabel renders the plain-English badge ("safe" / "suspicious" /
+// "info") that the engine stamps on every finding.
+function verdictLabel(v) {
+  return v === "safe" ? "✓ safe" : v === "suspicious" ? "⚠ suspicious" : "ℹ info";
 }
 
 function renderMonitor() {
@@ -212,9 +353,11 @@ function renderAlerts() {
       ${alertBlockBtn(a.evidence)}
       <div class="row1">
         <span class="sev">${esc(a.severity)}</span>
+        ${a.verdict ? `<span class="tag verdict-${esc(a.verdict)}">${verdictLabel(a.verdict)}</span>` : ""}
         <span class="title">${esc(a.title)}</span>
       </div>
       <div class="detail">${esc(a.detail)}</div>
+      ${a.plain ? `<div class="detail plain">${esc(a.plain)}</div>` : ""}
       <div class="meta">
         <span>#${a.id}</span><span>${esc(a.check)}</span>
         <span>×${a.count}</span><span>${timeOf(a.first_ts)} → ${timeOf(a.ts)}</span>
@@ -1300,17 +1443,21 @@ function selectView(view) {
   const firewall = view === "firewall";
   const sensitive = view === "sensitive";
   const exclusions = view === "exclusions";
-  $("#dashboardView").hidden = permissions || firewall || sensitive || exclusions;
+  const ports = view === "ports";
+  $("#dashboardView").hidden = permissions || firewall || sensitive || exclusions || ports;
+  $("#portsView").hidden = !ports;
   $("#permissionsView").hidden = !permissions;
   $("#firewallView").hidden = !firewall;
   $("#sensitiveView").hidden = !sensitive;
   $("#exclusionsView").hidden = !exclusions;
-  $("#dashboardTab").classList.toggle("selected", !permissions && !firewall && !sensitive && !exclusions);
+  $("#dashboardTab").classList.toggle("selected", !permissions && !firewall && !sensitive && !exclusions && !ports);
+  $("#portsTab").classList.toggle("selected", ports);
   $("#permissionsTab").classList.toggle("selected", permissions);
   $("#firewallTab").classList.toggle("selected", firewall);
   $("#sensitiveTab").classList.toggle("selected", sensitive);
   $("#exclusionsTab").classList.toggle("selected", exclusions);
-  $("#dashboardTab").setAttribute("aria-selected", String(!permissions && !firewall && !sensitive && !exclusions));
+  $("#dashboardTab").setAttribute("aria-selected", String(!permissions && !firewall && !sensitive && !exclusions && !ports));
+  $("#portsTab").setAttribute("aria-selected", String(ports));
   $("#permissionsTab").setAttribute("aria-selected", String(permissions));
   $("#firewallTab").setAttribute("aria-selected", String(firewall));
   $("#sensitiveTab").setAttribute("aria-selected", String(sensitive));
@@ -1318,6 +1465,7 @@ function selectView(view) {
   if ((permissions || firewall) && !permissionData) loadPermissions();
   if (sensitive) loadSensitive();
   if (exclusions) loadExclusions();
+  if (ports) loadPorts();
 }
 
 // data loading -------------------------------------------------------------
@@ -1333,11 +1481,22 @@ async function loadAlerts() {
   renderAlerts();
 }
 
+async function loadPorts() {
+  $("#portList").innerHTML = `<p class="muted">Loading local port inventory…</p>`;
+  try {
+    portsData = await api("/api/ports");
+    renderPorts();
+  } catch (e) {
+    $("#portList").innerHTML = `<p class="permission-warning">Could not load local port inventory: ${esc(e.message)}</p>`;
+  }
+}
+
 // events --------------------------------------------------------------------
 $("#sevFilter").addEventListener("change", (e) => { alertFilter.sev = e.target.value; renderAlerts(); });
 $("#alertApp").addEventListener("change", (e) => { alertAppFilter = e.target.value; renderAlerts(); });
 $("#hideAcked").addEventListener("change", (e) => { alertFilter.hideAcked = e.target.checked; renderAlerts(); });
 $("#dashboardTab").addEventListener("click", () => selectView("dashboard"));
+$("#portsTab").addEventListener("click", () => selectView("ports"));
 $("#sensitiveTab").addEventListener("click", () => selectView("sensitive"));
 $("#permissionsTab").addEventListener("click", () => selectView("permissions"));
 $("#firewallTab").addEventListener("click", () => selectView("firewall"));
@@ -1355,6 +1514,46 @@ $("#exclusionsTab").addEventListener("click", () => selectView("exclusions"));
 $("#refreshPermissions").addEventListener("click", loadPermissions);
 $("#refreshFirewall").addEventListener("click", loadPermissions);
 $("#refreshSensitive").addEventListener("click", loadSensitive);
+$("#refreshPorts").addEventListener("click", loadPorts);
+$("#scanPorts").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  button.disabled = true;
+  try {
+    await api("/api/scan", { method: "POST" });
+    $("#portWarnings").innerHTML = `<div class="permission-warning">A full wHawk scan was requested. This view updates when the scan completes.</div>`;
+  } catch (err) {
+    $("#portWarnings").innerHTML = `<div class="permission-warning">Could not request a scan: ${esc(err.message)}</div>`;
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#portAppFilter").addEventListener("input", renderPorts);
+$("#portRemoteFilter").addEventListener("input", renderPorts);
+$("#portProtocol").addEventListener("change", renderPorts);
+$("#portState").addEventListener("change", renderPorts);
+$("#portExposure").addEventListener("change", renderPorts);
+$("#portRisk").addEventListener("change", renderPorts);
+$("#portList").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-sort-key]");
+  if (!button) return;
+  const key = button.dataset.sortKey;
+  if (portSort.key === key) {
+    portSort.direction = portSort.direction === "asc" ? "desc" : "asc";
+  } else {
+    portSort = { key, direction: "asc" };
+  }
+  renderPorts();
+});
+$("#clearPortFilters").addEventListener("click", () => {
+  $("#portAppFilter").value = "";
+  $("#portRemoteFilter").value = "";
+  $("#portProtocol").value = "";
+  $("#portState").value = "";
+  $("#portExposure").value = "";
+  $("#portRisk").value = "";
+  portSort = { key: "local", direction: "asc" };
+  renderPorts();
+});
 $("#sensitiveSearch").addEventListener("input", renderSensitive);
 $("#sensitiveApp").addEventListener("change", renderSensitive);
 $("#sensitiveKind").addEventListener("change", renderSensitive);
@@ -1498,6 +1697,7 @@ function connectSSE() {
       if (msg.type === "ack") loadAlerts();
       // Live Access mirrors the fast scan cadence while its tab is open
       if (msg.type === "scan" && !$("#sensitiveView").hidden) loadSensitive();
+      if (msg.type === "scan" && !$("#portsView").hidden) loadPorts();
     }
   };
   es.onerror = () => { es.close(); setTimeout(connectSSE, 4000); };

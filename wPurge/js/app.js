@@ -6,12 +6,18 @@
 
 const $ = s => document.querySelector(s);
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const CAT_ICON = { Caches: '🗃️', Development: '🛠️', Logs: '📜', System: '⚙️', Trash: '🗑️', Downloads: '📥', Docker: '🐳' };
+const CAT_ICON = { Caches: '🗃️', Development: '🛠️', Logs: '📜', System: '⚙️', Trash: '🗑️', Downloads: '📥', Docker: '🐳', AI: '🤖', Custom: '📁' };
+const OS_NAME = { darwin: 'macOS', windows: 'Windows', linux: 'Linux' };
 let report = null;
+let info = null; // /api/info payload — the disk stat in the stats grid reads it
 const selected = new Set();
 let tab = localStorage.getItem('wpurge.tab') || 'buildup';
 let pollTimer = null;
 let onboardShown = false; // assigned in initOnboarding; must be declared — this is a strict-mode script
+
+function appResource(path) {
+  return new URL(path.replace(/^\/+/, ''), document.baseURI).href;
+}
 
 function fmtBytes(n) {
   if (!n) return '0 B';
@@ -22,7 +28,7 @@ function fmtBytes(n) {
 
 async function api(path, body) {
   const opt = body ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) } : {};
-  const r = await fetch(path, opt);
+  const r = await fetch(appResource(path), opt);
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const err = new Error(data.error || ('HTTP ' + r.status));
@@ -33,12 +39,33 @@ async function api(path, body) {
 }
 
 function toast(msg, isErr) {
+  toastAction(msg, null, isErr);
+}
+
+// toastAction shows a message with an optional inline action button
+// (label + fn), e.g. the post-clean Undo. Auto-dismisses a little faster
+// when an action is pending so the choice stays timely.
+function toastAction(msg, action, isErr) {
   const t = $('#toast');
-  t.textContent = msg;
+  t.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  t.appendChild(span);
+  if (action && action.label && action.fn) {
+    const b = document.createElement('button');
+    b.className = 'btn small ghost toast-act';
+    b.textContent = action.label;
+    b.addEventListener('click', () => {
+      clearTimeout(t._h);
+      t.hidden = true;
+      action.fn();
+    });
+    t.appendChild(b);
+  }
   t.classList.toggle('err', !!isErr);
   t.hidden = false;
   clearTimeout(t._h);
-  t._h = setTimeout(() => { t.hidden = true; }, 4200);
+  t._h = setTimeout(() => { t.hidden = true; }, action ? 9000 : 4200);
 }
 
 function showError(msg) {
@@ -177,14 +204,25 @@ async function revealPath(path) {
 /* ---------- Buildup: scanning (background job + polling) ---------- */
 
 async function init() {
-  let info = null;
+  info = null;
   try {
     info = await api('/api/info');
-    const bits = [info.osVersion ? `macOS ${info.osVersion}` : info.os, info.archLabel].filter(Boolean);
-    if (info.diskFreeBytes) bits.push(fmtBytes(info.diskFreeBytes) + ' free');
+    const osName = OS_NAME[info.os] || info.os;
+    const bits = [info.osVersion ? `${osName} · ${info.osVersion}` : osName, info.archLabel].filter(Boolean);
+    if (info.diskFreeBytes && info.diskTotalBytes) {
+      const pct = Math.max(0, Math.min(100, Math.round((1 - info.diskFreeBytes / info.diskTotalBytes) * 100)));
+      bits.push(`${fmtBytes(info.diskFreeBytes)} free of ${fmtBytes(info.diskTotalBytes)} (${pct}% used)`);
+    } else if (info.diskFreeBytes) {
+      bits.push(fmtBytes(info.diskFreeBytes) + ' free');
+    }
     $('#machine').textContent = `${bits.join(' · ')}\n${info.rulesActive} active rules · ${info.rulesSigned ? 'rules signed' : 'rules unsigned'} · v${info.version}`;
+    const rulesNames = `wpurge-${info.os}-rules.json + wpurge-${info.os}-extra-rules.json`;
+    $('#rulesFileNote').textContent = `rules/${rulesNames}`;
+    $('#trustRulesFiles').textContent = `rules/${rulesNames}`;
     if (info.os === 'windows') {
       $('#startupNote').textContent = 'These are Windows autostart entries: your user Run key (HKCU\\…\\Run) and the Startup folder. Deactivating a Run-key entry stores its value and removes it (reversible via Activate); Startup-folder items are renamed. Machine-wide HKLM entries are read-only — they need an administrator.';
+    } else if (info.os === 'linux') {
+      $('#startupNote').textContent = 'These are XDG autostart entries — programs your desktop starts when you log in (~/.config/autostart/*.desktop). Deactivating renames the entry to .desktop.disabled (reversible, no admin needed); activating restores it. System-wide entries in /etc/xdg/autostart are read-only: they need an administrator.';
     }
     $('#trustJournal').textContent = info.os === 'windows'
       ? info.home + '\\.wpurge\\journal.json'
@@ -210,11 +248,24 @@ function scan() {
   $('#error').hidden = true;
   $('#results').hidden = true;
   $('#stats').hidden = true;
+  $('#buildupFilter').hidden = true;
+  $('#buildupFilter').value = '';
   $('#scanBtn').disabled = true;
   if (pollTimer) clearInterval(pollTimer);
   api('/api/scan', {})
     .then(() => { pollTimer = setInterval(pollScan, 350); pollScan(); })
     .catch(e => { showError('Scan failed: ' + e.message); $('#scanBtn').disabled = false; });
+}
+
+// Friendly phase names for the scan progress line — derived from how far
+// through the rule list the background job is, the way Leftover narrates
+// its scan instead of a bare fraction.
+function scanPhase(done, total) {
+  const pct = total ? done / total : 0;
+  if (done === 0) return 'Getting ready…';
+  if (pct < 0.55) return 'Checking caches and tools…';
+  if (pct < 0.9) return 'Measuring what was found…';
+  return 'Finishing up…';
 }
 
 async function pollScan() {
@@ -223,8 +274,11 @@ async function pollScan() {
   catch (e) { return; }
   if (d.running) {
     $('#scanProgress').hidden = false;
+    $('#buildupFilter').hidden = true;
     $('#scanBar').style.width = (d.total ? Math.round(d.done * 100 / d.total) : 0) + '%';
-    $('#scanMeta').textContent = `scanned ${d.done}/${d.total} rules…`;
+    const partialBytes = (d.completed || []).reduce((n, r) => n + (r.sizeBytes || 0), 0);
+    $('#scanMeta').textContent = `${scanPhase(d.done, d.total)} ${d.done}/${d.total} rules` +
+      (partialBytes ? ` · ${fmtBytes(partialBytes)} found so far` : '');
     return;
   }
   clearInterval(pollTimer);
@@ -244,14 +298,18 @@ async function pollScan() {
 
 function cardHTML(res) {
   const blocked = res.status === 'blocked';
+  const verdict = res.regen === 'rebuild' ? 'rebuilds locally'
+    : res.regen === 'redownload' ? 're-downloads' : '';
   const chips = [
     `<span class="chip ${esc(res.safety)}">${esc(res.safety)}</span>`,
+    verdict ? `<span class="chip verdict">${verdict}</span>` : '',
     `<span class="chip">${CAT_ICON[res.category] || '•'} ${esc(res.category || '')}</span>`,
     (res.action === 'delete' || res.permanent) ? `<span class="chip review">permanent</span>` : '',
     blocked ? `<span class="chip review">can’t see inside</span>`
       : res.status === 'ok' ? `<span class="chip size">${fmtBytes(res.sizeBytes)} · ${res.fileCount} files</span>` : ''
   ].join('');
-  const samples = (res.samples || []).map(s =>
+  // the card shows the biggest four; the detail dialog shows them all
+  const samples = (res.samples || []).slice(0, 4).map(s =>
     `<li><span title="${esc(s.name)}">${esc(s.name)}</span><span>${fmtBytes(s.sizeBytes)}</span></li>`).join('');
 
   let control, dim = false;
@@ -268,7 +326,9 @@ function cardHTML(res) {
   }
 
   return `
-  <div class="card${dim ? ' dim' : ''}${blocked ? ' blocked' : ''}">
+  <div class="card${dim ? ' dim' : ''}${blocked ? ' blocked' : ''}" role="button" tabindex="0"
+       data-rule-card="${esc(res.id)}" data-search="${esc((res.title + ' ' + (res.category || '')).toLowerCase())}"
+       title="Click for details — what this is, where it comes from, how it comes back">
     <label class="row">
       ${control}
       <span><span class="t">${esc(res.title)}</span>
@@ -280,21 +340,97 @@ function cardHTML(res) {
   </div>`;
 }
 
+// render draws the full report: stats, blocked banner, safe/review groups,
+// skipped details — then wires checkboxes, group toggles, the text filter
+// and the per-rule detail dialog.
+// groupOf assigns each result its display group: the safe tier splits by
+// verdict — rebuilds locally (build output, indexes) vs re-downloads
+// (fetched caches) — with a generic safe group for rules that regenerate
+// in neither way (crash reports and other one-off artifacts).
+function groupOf(r) {
+  if (r.safety !== 'safe' || r.status !== 'ok') return 'review';
+  if (r.regen === 'rebuild') return 'rebuild';
+  if (r.regen === 'redownload') return 'download';
+  return 'safe';
+}
+
+const GROUP_LABEL = {
+  rebuild: '⚙️ Rebuilds locally',
+  download: '⬇️ Re-downloads',
+  safe: 'Safe to purge',
+  review: 'Review before touching',
+};
+
+// collapsible verdict groups: default open for content groups, closed for
+// the skipped details; the operator's choice persists per group
+const VGROUP_DEFAULT = { rebuild: true, download: true, safe: true, review: true, skipped: false };
+
+function vgroupOpen(g) {
+  try {
+    const v = localStorage.getItem('wpurge.vg.' + g);
+    if (v === 'open' || v === 'closed') return v === 'open';
+  } catch (e) {}
+  return !!VGROUP_DEFAULT[g];
+}
+
+function setAllVGroups(open) {
+  document.querySelectorAll('details[data-vgroup]').forEach(d => { d.open = open; });
+}
+
 function render() {
   const isForeign = r => r.status === 'unavailable' && (r.reason || '').includes('different OS/arch');
   const ok = report.rules.filter(r => r.status === 'ok' || r.status === 'command');
-  const safe = ok.filter(r => r.safety === 'safe' && r.status === 'ok');
-  const review = ok.filter(r => !(r.safety === 'safe' && r.status === 'ok'));
+  const groups = { rebuild: [], download: [], safe: [], review: [] };
+  ok.forEach(r => groups[groupOf(r)].push(r));
   const blocked = report.rules.filter(r => r.status === 'blocked');
   // Rules for another OS are config, not skips — keep them out of the UI.
   const others = report.rules.filter(r => r.status !== 'ok' && r.status !== 'command' && r.status !== 'blocked' && !isForeign(r));
 
+  // One summary panel: the disk bar leads, its used portion split into
+  // colored segments per verdict (rebuilds / re-downloads / review) so the
+  // operator sees their whole disk with wPurge's actionable share
+  // highlighted; the two verdict buttons below select a whole group.
+  const diskTotal = (info && info.diskTotalBytes) || 0;
+  const diskFree = info ? (info.diskFreeBytes || 0) : 0;
+  const used = diskTotal ? Math.max(0, diskTotal - diskFree) : 0;
+  const pctOf = b => diskTotal ? (b * 100 / diskTotal) : 0;
+  const segs = [];
+  if (report.rebuildBytes > 0) segs.push({ cls: 'seg-rebuild', label: 'Rebuilds locally', bytes: report.rebuildBytes });
+  if (report.downloadBytes > 0) segs.push({ cls: 'seg-download', label: 'Re-downloads', bytes: report.downloadBytes });
+  if (report.reviewBytes > 0) segs.push({ cls: 'seg-review', label: 'Review only', bytes: report.reviewBytes });
+  const classified = segs.reduce((n, s) => n + s.bytes, 0);
+  const otherUsed = Math.max(0, used - classified);
+  const pctUsed = diskTotal ? Math.round(pctOf(used)) : null;
+
+  const diskbar = diskTotal ? `
+    <div class="diskbar" role="img"
+         aria-label="Disk: ${pctUsed}% used, ${fmtBytes(diskFree)} free of ${fmtBytes(diskTotal)}">
+      ${segs.map(s => `<span class="${s.cls}" style="width:${pctOf(s.bytes)}%" title="${s.label} · ${fmtBytes(s.bytes)} (${pctOf(s.bytes).toFixed(1)}% of disk)"></span>`).join('')}
+      <span class="seg-other" style="width:${pctOf(otherUsed)}%" title="Other used · ${fmtBytes(otherUsed)} (${pctOf(otherUsed).toFixed(1)}% of disk)"></span>
+    </div>
+    <div class="disklabel">${pctUsed}% used · ${fmtBytes(diskFree)} free of ${fmtBytes(diskTotal)}</div>
+    <div class="legend">
+      ${segs.map(s => `<span class="li"><i class="dot ${s.cls}"></i>${esc(s.label)} ${fmtBytes(s.bytes)}</span>`).join('')}
+      <span class="li"><i class="dot seg-other"></i>Other used ${fmtBytes(otherUsed)}</span>
+    </div>` : '';
+
+  const vbtn = (g, icon, title, sub, bytes) => bytes > 0 ? `
+    <button class="vbtn" data-stat-group="${g}" title="Click to select everything in this group">
+      <span class="vi">${icon}</span>
+      <span class="vb"><b>${esc(title)} · ${fmtBytes(bytes)}</b><span class="vs">${esc(sub)}</span><span class="vsel">select all ↗</span></span>
+    </button>` : '';
+  const verdicts = vbtn('rebuild', '⚙️', 'Rebuilds locally', 'recreated on this machine — the next build is slower', report.rebuildBytes) +
+    vbtn('download', '⬇️', 'Re-downloads', 'fetched again from the internet when your tools need it', report.downloadBytes);
+
   $('#stats').hidden = false;
-  $('#stats').innerHTML = `
-    <div class="stat"><div class="v">${fmtBytes(report.totalBytes)}</div><div class="k">Reclaimable · ${report.totalFiles} files</div></div>
-    <div class="stat"><div class="v">${fmtBytes(report.safeBytes)}</div><div class="k">Safe (pre-selected)</div></div>
-    <div class="stat amber"><div class="v">${fmtBytes(report.reviewBytes)}</div><div class="k">Review only</div></div>
-    <div class="stat"><div class="v">${report.rules.filter(r => r.status === 'ok').length}</div><div class="k">Rules with buildup</div></div>`;
+  $('#stats').innerHTML = `<div class="sumpanel">
+    ${diskbar ? `<div class="sum-disk">${diskbar}</div>` : ''}
+    <div class="sumhero">
+      <span class="v">${fmtBytes(report.totalBytes)}</span>
+      <span class="k">reclaimable · ${report.totalFiles.toLocaleString()} files · ${report.rules.filter(r => r.status === 'ok').length} rules with buildup</span>
+    </div>
+    ${verdicts ? `<div class="sum-verdicts">${verdicts}</div>` : ''}
+  </div>`;
 
   let html = '';
   if (blocked.length) {
@@ -309,18 +445,41 @@ function render() {
   const groupTools = g => `
     <button class="btn small ghost" data-grp="${g}" data-on="1">all</button>
     <button class="btn small ghost" data-grp="${g}" data-on="0">none</button>`;
-  if (safe.length) {
-    html += `<h2>Safe to purge — ${safe.length} rules &nbsp;${groupTools('safe')}</h2><div class="grid">${safe.map(cardHTML).join('')}</div>`;
+  // every verdict group renders as a collapsible <details> — the summary
+  // carries the count and the group's total, and the collapsed/expanded
+  // state is remembered per group in localStorage
+  const groupBytes = list => list.reduce((n, r) => n + (r.sizeBytes || 0), 0);
+  const vgroup = (g, list) => `
+    <details class="vgroup" data-vgroup="${g}" ${vgroupOpen(g) ? 'open' : ''}>
+      <summary>${esc(GROUP_LABEL[g])} — ${list.length} rule${list.length > 1 ? 's' : ''} · ${fmtBytes(groupBytes(list))}
+        <span class="vtools">${groupTools(g)}</span></summary>
+      <div class="grid">${list.map(cardHTML).join('')}</div>
+    </details>`;
+  for (const g of ['rebuild', 'download', 'safe']) {
+    if (groups[g].length) html += vgroup(g, groups[g]);
   }
-  if (review.length) {
-    html += `<h2>Review before touching — ${review.length} rules &nbsp;${groupTools('review')}</h2><div class="grid">${review.map(cardHTML).join('')}</div>`;
+  if (groups.review.length) {
+    html += vgroup('review', groups.review);
   }
   if (others.length) {
-    html += `<details class="group"><summary>Skipped / not applicable — ${others.length} rules</summary>
+    html += `<details class="vgroup" data-vgroup="skipped" ${vgroupOpen('skipped') ? 'open' : ''}>
+      <summary>Skipped / not applicable — ${others.length} rules</summary>
       <div class="grid">${others.map(cardHTML).join('')}</div></details>`;
+  }
+  if (!groups.rebuild.length && !groups.download.length && !groups.safe.length && !groups.review.length && !blocked.length) {
+    html += `<div class="banner okbanner">✨ All clean here — nothing reclaimable found. Scan again later, or check the 🧹 Traces tab for leftovers of apps that are already gone.</div>`;
   }
   $('#results').innerHTML = html;
   $('#results').hidden = false;
+  $('#buildupFilter').hidden = report.rules.length === 0;
+  $('#vgCollapseAll').hidden = $('#vgExpandAll').hidden = report.rules.length === 0;
+  applyBuildupFilter();
+
+  // remember each group's collapsed/expanded state across renders
+  document.querySelectorAll('details[data-vgroup]').forEach(d =>
+    d.addEventListener('toggle', () => {
+      try { localStorage.setItem('wpurge.vg.' + d.dataset.vgroup, d.open ? 'open' : 'closed'); } catch (e) {}
+    }));
 
   document.querySelectorAll('input[data-rule]').forEach(cb =>
     cb.addEventListener('change', () => {
@@ -348,18 +507,95 @@ function render() {
       updateBar();
     }));
   document.querySelectorAll('[data-grp]').forEach(b =>
-    b.addEventListener('click', () => {
-      const on = b.dataset.on === '1';
-      report.rules.forEach(r => {
-        if (r.status === 'ok' && r.safety === b.dataset.grp && !(r.action === 'delete' || r.permanent)) {
-          const cb = document.querySelector('input[data-rule="' + r.id + '"]');
-          if (cb) cb.checked = on;
-          if (on) selected.add(r.id); else selected.delete(r.id);
-        }
-      });
-      updateBar();
+    b.addEventListener('click', (e) => {
+      // the buttons live inside the collapsible <summary> — keep the click
+      // from also toggling the group open/closed
+      e.preventDefault();
+      e.stopPropagation();
+      setGroupSelection(b.dataset.grp, b.dataset.on === '1');
     }));
+  // the verdict stat blocks double as select-this-group buttons
+  document.querySelectorAll('[data-stat-group]').forEach(el => {
+    const pick = () => setGroupSelection(el.dataset.statGroup, true);
+    el.addEventListener('click', pick);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+  });
+  // card click (not the checkbox) opens the detail dialog — the
+  // explain-first pattern: what it is, source, how it comes back
+  document.querySelectorAll('[data-rule-card]').forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('input')) return;
+      openRuleDialog(card.dataset.ruleCard);
+    });
+    card.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && !e.target.closest('input')) {
+        e.preventDefault();
+        openRuleDialog(card.dataset.ruleCard);
+      }
+    });
+  });
   updateBar();
+}
+
+// setGroupSelection checks or clears every rule in one verdict group —
+// the per-group "all / none" buttons and the clickable stat blocks.
+function setGroupSelection(g, on) {
+  report.rules.forEach(r => {
+    if (groupOf(r) === g && !(r.action === 'delete' || r.permanent)) {
+      const cb = document.querySelector('input[data-rule="' + r.id + '"]');
+      if (cb) cb.checked = on;
+      if (on) selected.add(r.id); else selected.delete(r.id);
+    }
+  });
+  updateBar();
+}
+
+// applyBuildupFilter hides result cards whose title/category don't match
+// the filter box; hidden cards keep their checkbox state.
+function applyBuildupFilter() {
+  const q = ($('#buildupFilter').value || '').trim().toLowerCase();
+  let visible = 0, total = 0;
+  document.querySelectorAll('[data-rule-card]').forEach(card => {
+    total++;
+    const hit = !q || card.dataset.search.includes(q);
+    card.style.display = hit ? '' : 'none';
+    if (hit) visible++;
+  });
+  if (q && total) $('#scanMeta').textContent = `${visible} of ${total} rules shown`;
+}
+
+function openRuleDialog(id) {
+  const res = report && report.rules.find(x => x.id === id);
+  if (!res) return;
+  $('#ruleDlgTitle').textContent = res.title;
+  $('#ruleDlgChips').innerHTML =
+    `<span class="chip ${esc(res.safety)}">${esc(res.safety)}</span>` +
+    (res.regen ? `<span class="chip verdict">${esc(res.regen === 'rebuild' ? 'rebuilds locally' : 're-downloads')}</span>` : '') +
+    `<span class="chip">${CAT_ICON[res.category] || '•'} ${esc(res.category || '')}</span>` +
+    (res.status === 'ok' ? `<span class="chip size">${fmtBytes(res.sizeBytes)} · ${res.fileCount} files</span>` : '') +
+    ((res.action === 'delete' || res.permanent) ? '<span class="chip review">permanent</span>' : '');
+  $('#ruleDlgDesc').textContent = res.description || '';
+  const comeback = $('#ruleDlgComeback');
+  if (res.comeback) {
+    $('#ruleDlgComebackText').textContent = res.comeback;
+    comeback.hidden = false;
+  } else { comeback.hidden = true; }
+  const src = $('#ruleDlgSource');
+  if (res.source) {
+    const a = $('#ruleDlgSourceLink');
+    a.href = res.source;
+    a.textContent = res.source;
+    src.hidden = false;
+  } else { src.hidden = true; }
+  const wrap = $('#ruleDlgSamplesWrap');
+  if ((res.samples || []).length) {
+    $('#ruleDlgSamples').innerHTML = res.samples.map(s =>
+      `<li><span title="${esc(s.name)}">${esc(s.name)}</span><span>${fmtBytes(s.sizeBytes)}</span></li>`).join('');
+    wrap.hidden = false;
+  } else { wrap.hidden = true; }
+  const dlg = $('#ruleDialog');
+  dlg.returnValue = '';
+  dlg.showModal();
 }
 
 function updateBar() {
@@ -386,6 +622,25 @@ function openConfirm() {
       $('#planList').innerHTML = plan.plan.map(p => `
         <div class="p"><span>${esc(p.title)}${(p.action === 'delete' || p.permanent) ? ' <b class="amber">(permanent)</b>' : ''}</span>
         <span>${fmtBytes(p.sizeBytes)} · ${p.fileCount} files</span></div>`).join('');
+      // per-category summary of what is about to move, plus the two
+      // warnings worth seeing before a confirm: review-tier items and
+      // large re-downloadable piles
+      const byCat = {};
+      let reviewSelected = 0;
+      for (const p of plan.plan) {
+        if (p.status !== 'ok') continue;
+        byCat[p.category || 'other'] = (byCat[p.category || 'other'] || 0) + p.sizeBytes;
+        if (p.safety !== 'safe') reviewSelected += p.sizeBytes;
+      }
+      const catLine = Object.entries(byCat)
+        .sort((a, b) => b[1] - a[1])
+        .map(([c, n]) => `${CAT_ICON[c] || '•'} ${esc(c)} ${fmtBytes(n)}`)
+        .join(' · ');
+      let warns = '';
+      if (catLine) warns += `<div class="p muted small"><span>${catLine}</span></div>`;
+      if (reviewSelected > 0) warns += `<div class="p"><span class="amber">⚠️ Includes ${fmtBytes(reviewSelected)} of review-tier content — it does not regenerate on its own. Make sure you can let it go.</span></div>`;
+      if (plan.totalBytes >= 1 << 30) warns += `<div class="p"><span class="amber">⬇️ Over 1 GB selected — much of it will be downloaded or rebuilt the next time the tools that own it run.</span></div>`;
+      $('#planWarn').innerHTML = warns;
       const dlg = $('#confirmDialog');
       dlg.returnValue = '';
       dlg.showModal();
@@ -405,9 +660,20 @@ async function doClean(ids) {
     if (res.husks) msg += ` · ${res.husks} empty folder${res.husks === 1 ? '' : 's'} removed`;
     if ((res.commands || []).length) msg += ' · command ran';
     if (failed) msg += ` · ${failed} failed`;
-    if (res.logPath) msg += `\nlog: ${res.logPath}`;
-    logDone(failed ? 'Clean finished (with failures)' : 'Clean finished', box, msg.replace(/\n/, ' · '));
-    toast(msg, failed > 0);
+    msg += ' — space frees when the Trash is emptied';
+    logDone(failed ? 'Clean finished (with failures)' : 'Clean finished', box, msg);
+    // Undo right after cleaning: restores this session's journal entry.
+    toastAction(msg, failed ? null : {
+      label: 'Undo',
+      fn: async () => {
+        try {
+          const r = await api('/api/restore', { id: res.journalId });
+          toast(`Restored ${r.restored} file(s) (${r.skipped} skipped, ${r.failed} failed)`, r.failed > 0);
+          loadJournalCount();
+          scan();
+        } catch (e) { toast('Undo failed: ' + e.message, true); }
+      }
+    }, failed > 0);
     scan();
   } catch (e) {
     if (e.payload && e.payload.log) logRender(box, e.payload.log);
@@ -422,17 +688,20 @@ async function loadJournalCount() {
   try {
     const j = await api('/api/journal');
     $('#journalCount').textContent = j.entries.length ? `(${j.entries.length})` : '(empty)';
-    $('#journal').innerHTML = j.entries.slice().reverse().map(e => `
+    $('#journal').innerHTML = j.entries.length
+      ? j.entries.slice().reverse().map(e => `
       <div class="entry">
         <div class="meta">
           <span>${esc(e.at.replace('T', ' ').replace('Z', ' UTC'))}</span>
           <span class="pill">${esc(e.action || 'clean')}${e.name ? ' · ' + esc(e.name) : ''}</span>
           <span>${e.restored ? '↩️ restored' : ''}</span>
+          ${e.action === 'clean' && e.complete === false ? '<span class="chip review" title="The app was interrupted mid-clean — everything recorded here has already moved and is still restorable.">interrupted — still restorable</span>' : ''}
           <span><b>${fmtBytes(e.bytes)}</b> · ${e.files} files</span>
           <span class="muted">${esc((e.rules || []).join(', '))}</span>
           ${!e.restored && e.items && e.items.length ? `<button class="btn small ghost" data-restore="${esc(e.id)}">Restore</button>` : ''}
         </div>
-      </div>`).join('');
+      </div>`).join('')
+      : '<p class="muted">Nothing yet — wPurge hasn’t changed anything on this machine. Every clean lands here first, restorable.</p>';
     document.querySelectorAll('[data-restore]').forEach(b =>
       b.addEventListener('click', async () => {
         try {
@@ -498,7 +767,7 @@ async function loadApps(force) {
 
 function appIcon(a, big) {
   return `<span class="appicon${big ? ' big' : ''}">
-    <img src="/api/app/icon?path=${encodeURIComponent(a.path)}" alt="" loading="lazy"
+    <img src="${esc(appResource('/api/app/icon?path=' + encodeURIComponent(a.path)))}" alt="" loading="lazy"
          onerror="this.remove(); this.parentNode.textContent='📦'"></span>`;
 }
 
@@ -1083,6 +1352,240 @@ async function loadStartup() {
   } catch (e) { toast('Could not list startup items: ' + e.message, true); }
 }
 
+/* ---------- settings dialog (downloads age, extra rules, import/export) ---------- */
+
+let dlAgeCurrent = 30;
+let settingsSaved = null; // last applied state: { days, disabled: [ids] } — pending edits compare against it
+let extraRulesCache = [];
+
+function renderDlAge(days) {
+  dlAgeCurrent = days;
+  const presets = ['1', '5', '15', '30'];
+  const s = $('#dlAge');
+  if (presets.includes(String(days))) {
+    s.value = String(days);
+    $('#dlAgeCustom').hidden = true;
+    $('#dlAgeCustom').value = '';
+  } else {
+    s.value = 'custom';
+    $('#dlAgeCustom').hidden = false;
+    $('#dlAgeCustom').value = days;
+  }
+}
+
+function renderExtraRules(extraRules) {
+  extraRulesCache = extraRules;
+  const box = $('#extraRuleList');
+  const boxWrap = $('#extraRuleWrap');
+  // Only rules with targets on this machine get a checkbox — a rule for a
+  // tool that was never installed is dormant (its scan reports "not
+  // present"), and toggling it would be noise. The exception: an imported
+  // rule that replaced a built-in keeps its checkbox even when dormant,
+  // because unchecking it changes what the default built-in does.
+  const saved = new Set(settingsSaved ? settingsSaved.disabled : []);
+  const active = extraRules.filter(r => r.available || r.overriding);
+  const dormant = extraRules.filter(r => !r.available && !r.overriding);
+  $('#extraRuleMeta').textContent = extraRules.length
+    ? `${active.filter(r => r.available).length} of ${extraRules.length} extra rule(s) have targets on this machine`
+    : '';
+  box.innerHTML = active.length
+    ? active.map(r => `
+      <label class="rowline extra-rule">
+        <input type="checkbox" data-extra="${esc(r.id)}" ${saved.has(r.id) ? '' : 'checked'}>
+        <span class="grow"><b>${esc(r.title)}</b>
+          <span class="chip">${CAT_ICON[r.category] || '•'} ${esc(r.category || '')}</span>
+          ${r.origin === 'user' ? '<span class="chip">imported</span>' : '<span class="chip">extra</span>'}
+          ${r.overriding ? '<span class="chip review" title="This imported rule replaces a built-in with the same id — unchecking falls back to that built-in">replaces built-in</span>'
+            : (!r.available ? '<span class="chip">no data here yet</span>' : '')}</span>
+      </label>`).join('')
+    : `<p class="muted small">No extra rule has targets on this machine — nothing to toggle yet. Rules appear here once their tool writes data (e.g. after the first <span class="mono">ollama pull</span>).</p>`;
+  box.querySelectorAll('input[data-extra]').forEach(cb =>
+    cb.addEventListener('change', markSettingsDirty));
+  const d = $('#dormantRuleList');
+  if (d) {
+    d.innerHTML = dormant.length
+      ? dormant.map(r => `
+        <div class="rowline extra-rule dormant">
+          <span class="grow muted"><b>${esc(r.title)}</b>
+            <span class="chip">${CAT_ICON[r.category] || '•'} ${esc(r.category || '')}</span>
+            <span class="muted small">tool not on this machine — nothing to clean</span></span>
+        </div>`).join('')
+      : '';
+    $('#dormantWrap').hidden = dormant.length === 0;
+    $('#dormantMeta').textContent = dormant.length ? `— ${dormant.length}` : '';
+  }
+  boxWrap.hidden = active.length === 0;
+}
+
+// pending-edit plumbing: the age choice and the extra-rule checkboxes are
+// local until Apply; Close (or Esc) discards them.
+function currentDlAge() {
+  const v = $('#dlAge').value;
+  return v === 'custom' ? parseInt($('#dlAgeCustom').value, 10) : parseInt(v, 10);
+}
+
+function currentDisabledExtras() {
+  return [...document.querySelectorAll('#extraRuleList input[data-extra]')]
+    .filter(cb => !cb.checked)
+    .map(cb => cb.dataset.extra);
+}
+
+function settingsDirty() {
+  if (!settingsSaved) return false;
+  if (currentDlAge() !== settingsSaved.days) return true;
+  return currentDisabledExtras().slice().sort().join(',') !==
+    settingsSaved.disabled.slice().sort().join(',');
+}
+
+function markSettingsDirty() {
+  const dirty = settingsDirty();
+  $('#settingsApply').disabled = !dirty;
+  $('#settingsDirtyNote').hidden = !dirty;
+}
+
+function applySettings() {
+  const days = currentDlAge();
+  if (!days || days < 1 || days > 3650) {
+    toast('Age must be between 1 and 3650 days.', true);
+    return;
+  }
+  api('/api/settings', { downloadsMinAgeDays: days, disabledExtras: currentDisabledExtras() })
+    .then(() => {
+      toast('Settings applied — rescanning…');
+      $('#settingsDialog').close();
+      scan();
+    })
+    .catch(e => toast(e.message, true));
+}
+
+async function openSettings() {
+  try {
+    const s = await api('/api/settings');
+    settingsSaved = {
+      days: s.downloadsMinAgeDays || 30,
+      disabled: s.disabledExtras || [],
+    };
+    renderDlAge(settingsSaved.days);
+    renderExtraRules(s.extraRules || []);
+    renderCustomFolders(s.customFolders || []);
+    $('#rulesClearBtn').hidden = !(s.extraRules || []).some(r => r.origin === 'user');
+    $('#rulesImportNote').textContent = (s.extraRules || []).some(r => r.origin === 'user')
+      ? 'Imported rules are in effect. They are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.'
+      : 'No imported ruleset. Imported rules are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.';
+    markSettingsDirty();
+  } catch (e) { toast('Could not load settings: ' + e.message, true); }
+  $('#settingsDialog').showModal();
+}
+
+/* ---------- folders to scan (custom folders) ---------- */
+
+function renderCustomFolders(folders) {
+  const box = $('#customFolderList');
+  box.innerHTML = folders.length
+    ? folders.map(p => `
+      <div class="rowline extra-rule">
+        <span class="grow mono" title="${esc(p)}">${esc(p)}</span>
+        ${info && info.home && p.startsWith(info.home) ? `<button class="btn small ghost icon" data-reveal="${esc(p)}" title="Show this folder in your file manager">📂</button>` : ''}
+        <button class="btn small ghost icon" data-unfolder="${esc(p)}" title="Stop scanning this folder (deletes nothing)">🗑️</button>
+      </div>`).join('')
+    : '<p class="muted small">No extra folders — the rules above define what is scanned.</p>';
+  box.querySelectorAll('[data-reveal]').forEach(b =>
+    b.addEventListener('click', () => revealPath(b.dataset.reveal)));
+  box.querySelectorAll('[data-unfolder]').forEach(b =>
+    b.addEventListener('click', async () => {
+      try {
+        const r = await fetch(appResource('/api/folders'), {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: b.dataset.unfolder }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        toast(data.note || 'Removed from the scan — nothing was deleted from disk.');
+        openSettings();
+        scan();
+      } catch (e) { toast(e.message, true); }
+    }));
+}
+
+// Native picker: the SERVER opens the OS dialog (Finder / Explorer /
+// zenity) and returns the picked path, which goes through the same
+// validation as any rule. The request blocks while the dialog is open,
+// so the button shows that state.
+async function pickCustomFolder() {
+  const btn = $('#customFolderPick');
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '…pick in the dialog';
+  try {
+    const r = await fetch(appResource('/api/folders/pick'), { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    if (data.cancelled) { toast('No folder chosen.'); return; }
+    toast(data.note || 'Folder added — rescanning…');
+    openSettings();
+    scan();
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = old; }
+}
+
+// Import/clear are discrete file operations and take effect immediately
+// (with their own rescan); the age and checkbox edits wait for Apply.
+function discardSettingsIfDirty() {
+  if (settingsSaved && settingsDirty() &&
+    !confirm('Discard unsaved settings changes?\n\nThe age choice and extra-rule toggles you changed were not applied yet.')) {
+    return false;
+  }
+  return true;
+}
+
+function downloadRulesExport() {
+  fetch(appResource('/api/rules/export'))
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'wpurge-rules-export.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      toast('Rules exported — import them into any wPurge under ⚙️ Settings.');
+    })
+    .catch(e => toast('Export failed: ' + e.message, true));
+}
+
+async function importRulesFile(file) {
+  let text;
+  try { text = await file.text(); }
+  catch (e) { toast('Could not read the file: ' + e.message, true); return; }
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (e) { toast('Not valid JSON: ' + e.message, true); return; }
+  try {
+    const r = await fetch(appResource('/api/rules/user'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    toast(`Imported ${data.count} rule(s) — takes effect on the next scan.`);
+    openSettings();
+    scan();
+  } catch (e) { toast('Import failed: ' + e.message, true); }
+}
+
+async function clearImportedRules() {
+  if (!confirm('Remove the imported ruleset?\n\nAny rule that replaced a built-in falls back to that built-in; rules you added disappear from scans. This cannot be undone.')) return;
+  try {
+    const r = await fetch(appResource('/api/rules/user'), { method: 'DELETE' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    toast('Imported rules cleared — the built-in per-OS set is in effect.');
+    openSettings();
+    scan();
+  } catch (e) { toast(e.message, true); }
+}
+
 /* ---------- trust dialog ---------- */
 
 function initTrust() {
@@ -1163,5 +1666,56 @@ $('#appsDeselect').addEventListener('click', () => {
 $('#appsUninstall').addEventListener('click', uninstallBatchFlow);
 $('#trustBtn').addEventListener('click', () => $('#trustDialog').showModal());
 $('#trustClose').addEventListener('click', () => $('#trustDialog').close());
+
+// rule detail dialog
+$('#ruleDlgClose').addEventListener('click', () => $('#ruleDialog').close());
+$('#ruleDialog').addEventListener('cancel', e => e.target.close());
+
+// settings dialog
+$('#settingsBtn').addEventListener('click', openSettings);
+$('#settingsApply').addEventListener('click', applySettings);
+$('#settingsClose').addEventListener('click', () => {
+  if (!discardSettingsIfDirty()) return;
+  $('#settingsDialog').close();
+});
+$('#settingsDialog').addEventListener('cancel', (e) => {
+  if (!discardSettingsIfDirty()) e.preventDefault();
+});
+$('#dlAge').addEventListener('change', () => {
+  $('#dlAgeCustom').hidden = $('#dlAge').value !== 'custom';
+  if (!$('#dlAgeCustom').hidden) $('#dlAgeCustom').focus();
+  markSettingsDirty();
+});
+$('#dlAgeCustom').addEventListener('input', markSettingsDirty);
+$('#rulesExportBtn').addEventListener('click', downloadRulesExport);
+$('#rulesImportBtn').addEventListener('click', () => $('#rulesImportFile').click());
+$('#rulesImportFile').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (f) importRulesFile(f);
+});
+$('#rulesClearBtn').addEventListener('click', clearImportedRules);
+
+// folders to scan
+$('#customFolderPick').addEventListener('click', pickCustomFolder);
+
+// expand / collapse all verdict groups
+$('#vgExpandAll').addEventListener('click', () => setAllVGroups(true));
+$('#vgCollapseAll').addEventListener('click', () => setAllVGroups(false));
+
+// buildup filter
+$('#buildupFilter').addEventListener('input', applyBuildupFilter);
+
+// keyboard: ⌘R / Ctrl+R scans, / focuses the filter (unless typing)
+document.addEventListener('keydown', (e) => {
+  const typing = /^(input|textarea|select)$/i.test(e.target.tagName);
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'r') {
+    e.preventDefault();
+    if (!$('#scanBtn').disabled) scan();
+  } else if (e.key === '/' && !typing && tab === 'buildup' && !$('#buildupFilter').hidden) {
+    e.preventDefault();
+    $('#buildupFilter').focus();
+  }
+});
 
 init();

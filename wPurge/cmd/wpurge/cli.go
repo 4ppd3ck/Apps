@@ -395,7 +395,7 @@ func (s *server) handleNudgeToggle(w http.ResponseWriter, r *http.Request) {
 
 /* ---------- signed rules database ---------- */
 
-const rulesKeyPath = ".descale/rules-ed25519.key" // under home; keep private
+const rulesKeyPath = ".wpurge/rules-ed25519.key" // under home; keep private
 
 func rulesPrivKeyPath() string {
 	return filepath.Join(homeDir(), filepath.FromSlash(rulesKeyPath))

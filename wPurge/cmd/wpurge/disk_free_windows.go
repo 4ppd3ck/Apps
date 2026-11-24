@@ -36,3 +36,25 @@ func diskFree(path string) uint64 {
 	}
 	return avail
 }
+
+// diskTotal returns the volume's total size (GetDiskFreeSpaceExW's total form).
+func diskTotal(path string) uint64 {
+	if err := procGetDiskFreeSpaceExW.Find(); err != nil {
+		return 0
+	}
+	ptr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return 0
+	}
+	var avail, total, free uint64
+	r1, _, _ := procGetDiskFreeSpaceExW.Call(
+		uintptr(unsafe.Pointer(ptr)),
+		uintptr(unsafe.Pointer(&avail)),
+		uintptr(unsafe.Pointer(&total)),
+		uintptr(unsafe.Pointer(&free)),
+	)
+	if r1 == 0 {
+		return 0
+	}
+	return total
+}

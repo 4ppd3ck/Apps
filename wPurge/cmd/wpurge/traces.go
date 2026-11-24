@@ -359,6 +359,10 @@ func traceLocationsLinux(ids map[string]bool) []Trace {
 		{filepath.Join(home, ".cache"), "caches"},
 		{filepath.Join(home, ".local", "share"), "data"},
 		{filepath.Join(home, ".local", "state"), "state"},
+		// per-app data of Flatpak sandboxed apps, and snap data — the same
+		// roots the uninstaller collects, so orphans surface in both places
+		{filepath.Join(home, ".var", "app"), "flatpak data"},
+		{filepath.Join(home, "snap"), "snap data"},
 	} {
 		out = addDirOrphans(out, loc.root, loc.kind, ids)
 	}

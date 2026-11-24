@@ -33,10 +33,15 @@ func SevGE(a, b string) bool { return sevRank[a] >= sevRank[b] }
 
 // Finding is one observation from a check on one scan.
 type Finding struct {
-	Check    string         `json:"check"`
-	Severity string         `json:"severity"`
-	Title    string         `json:"title"`
-	Detail   string         `json:"detail"`
+	Check    string `json:"check"`
+	Severity string `json:"severity"`
+	// Verdict is the plain-English badge ("safe", "suspicious", "info"),
+	// set by the engine before findings are shown or recorded.
+	Verdict string `json:"verdict,omitempty"`
+	Title   string `json:"title"`
+	Detail  string `json:"detail"`
+	// Plain is the one-sentence explanation for non-technical readers.
+	Plain    string         `json:"plain,omitempty"`
 	Evidence map[string]any `json:"evidence,omitempty"`
 	// Fingerprint links repeat observations of the same underlying issue;
 	// empty means the finding is scan-transient (not converted to an alert).
@@ -49,9 +54,11 @@ type Alert struct {
 	Ts          float64        `json:"ts"`
 	FirstTs     float64        `json:"first_ts"`
 	Severity    string         `json:"severity"`
+	Verdict     string         `json:"verdict,omitempty"`
 	Check       string         `json:"check"`
 	Title       string         `json:"title"`
 	Detail      string         `json:"detail"`
+	Plain       string         `json:"plain,omitempty"`
 	Evidence    map[string]any `json:"evidence,omitempty"`
 	Fingerprint string         `json:"fingerprint"`
 	Count       int            `json:"count"`
@@ -159,8 +166,10 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 			a.Count++
 			a.Ts = now
 			a.Severity = f.Severity
+			a.Verdict = f.Verdict
 			a.Title = f.Title
 			a.Detail = f.Detail
+			a.Plain = f.Plain
 			a.Evidence = f.Evidence
 			// Acked means "seen, stop nudging me": the alert row still counts
 			// occurrences, but desktop/webhook re-notifications stay off until
@@ -180,9 +189,11 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 		Ts:          now,
 		FirstTs:     now,
 		Severity:    f.Severity,
+		Verdict:     f.Verdict,
 		Check:       f.Check,
 		Title:       f.Title,
 		Detail:      f.Detail,
+		Plain:       f.Plain,
 		Evidence:    f.Evidence,
 		Fingerprint: f.Fingerprint,
 		Count:       1,

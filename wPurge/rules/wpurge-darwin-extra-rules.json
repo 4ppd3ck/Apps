@@ -1,0 +1,443 @@
+{
+ "version": 1,
+ "note": "Descale EXTRA rules — macOS. Additional cleanup rules beyond the built-in per-OS set (AI model caches, dev-tool caches, extra Docker pruning), translated from the Leftover project's public catalog. Every rule cites a 'source' doc page and a 'comeback' line (how the content regenerates). These load on top of wpurge-darwin-rules.json; each can be switched off under ⚙️ Settings without editing this file. AI rules are review-tier: models are huge re-downloads, so they are never pre-selected.",
+ "vars": [],
+ "rules": [
+  {
+   "id": "ai-ollama-models",
+   "title": "Ollama — pulled models",
+   "description": "Models you pulled with Ollama (~/.ollama/models). They are re-downloadable but can be many GB each, so this is never pre-selected. Skipped while Ollama is running.",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.ollama/models"
+   ],
+   "runningApps": [
+    "ollama",
+    "Ollama"
+   ],
+   "comeback": "Pull any model again with: ollama pull <model>. To remove just one instead of everything, use: ollama rm <model>",
+   "source": "https://github.com/ollama/ollama/blob/main/docs/faq.md#where-are-models-stored"
+  },
+  {
+   "id": "ai-huggingface-hub",
+   "title": "Hugging Face — model cache",
+   "description": "Model weights and files downloaded from the Hugging Face Hub by transformers, diffusers and other libraries (~/.cache/huggingface/hub).",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/huggingface/hub"
+   ],
+   "comeback": "Downloaded again the next time code loads the model (as long as it is still on the Hub).",
+   "source": "https://huggingface.co/docs/huggingface_hub/guides/manage-cache"
+  },
+  {
+   "id": "ai-huggingface-datasets",
+   "title": "Hugging Face — datasets cache",
+   "description": "Datasets downloaded and processed by the datasets library (~/.cache/huggingface/datasets).",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/huggingface/datasets"
+   ],
+   "comeback": "Downloaded and processed again the next time code loads the dataset.",
+   "source": "https://huggingface.co/docs/datasets/cache"
+  },
+  {
+   "id": "ai-lmstudio-models",
+   "title": "LM Studio — model library",
+   "description": "Models in LM Studio's library (~/.lmstudio/models, ~/.cache/lm-studio/models). Some may have been imported from your own files rather than downloaded, so they cannot be promised to come back. Skipped while LM Studio is running.",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.lmstudio/models",
+    "~/.cache/lm-studio/models"
+   ],
+   "runningApps": [
+    "LM Studio",
+    "lms"
+   ],
+   "comeback": "Models downloaded inside LM Studio can be downloaded again from its Discover tab.",
+   "source": "https://lmstudio.ai/docs/app/advanced/import-model"
+  },
+  {
+   "id": "ai-torch-hub",
+   "title": "PyTorch — Hub cache",
+   "description": "Models and weights downloaded through torch.hub and torchvision (~/.cache/torch).",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/torch"
+   ],
+   "comeback": "Downloaded again the next time code loads them.",
+   "source": "https://pytorch.org/docs/stable/hub.html#where-are-my-downloaded-models-saved"
+  },
+  {
+   "id": "ai-whisper-models",
+   "title": "Whisper — models",
+   "description": "Speech recognition models downloaded by OpenAI's Whisper package (~/.cache/whisper).",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/whisper"
+   ],
+   "comeback": "Downloaded again the first time you load a model.",
+   "source": "https://github.com/openai/whisper/blob/main/whisper/__init__.py"
+  },
+  {
+   "id": "ai-llamacpp-models",
+   "title": "llama.cpp — downloaded models",
+   "description": "Models llama.cpp downloaded with -hf or --hf-repo (~/Library/Caches/llama.cpp). Newer versions use the Hugging Face cache instead.",
+   "category": "AI",
+   "os": [
+    "darwin"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/llama.cpp"
+   ],
+   "comeback": "llama.cpp downloads a model again the next time you run it with -hf. Check that nothing points at these files by path first.",
+   "source": "https://github.com/ggml-org/llama.cpp"
+  },
+  {
+   "id": "dev-jetbrains-caches",
+   "title": "JetBrains IDEs — version caches",
+   "description": "Indexes and caches for each JetBrains IDE version (~/Library/Caches/JetBrains). Folders for versions you no longer use stay behind after every upgrade. Skipped while a JetBrains IDE or Android Studio is open.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/Library/Caches/JetBrains/*"
+   ],
+   "runningApps": [
+    "idea",
+    "idea64",
+    "pycharm",
+    "pycharm64",
+    "webstorm",
+    "webstorm64",
+    "goland",
+    "goland64",
+    "clion",
+    "clion64",
+    "rider",
+    "rider64",
+    "phpstorm",
+    "phpstorm64",
+    "rubymine",
+    "rubymine64",
+    "datagrip",
+    "datagrip64",
+    "rustrover",
+    "rustrover64",
+    "studio",
+    "Android Studio",
+    "IntelliJ IDEA",
+    "PyCharm",
+    "WebStorm",
+    "GoLand",
+    "CLion",
+    "DataGrip",
+    "PhpStorm",
+    "RubyMine",
+    "Rider"
+   ],
+   "comeback": "The IDE rebuilds its indexes the next time it opens a project. Your settings live elsewhere and are not touched.",
+   "source": "https://www.jetbrains.com/help/idea/directories-used-by-the-ide-to-store-settings-caches-plugins-and-logs.html"
+  },
+  {
+   "id": "dev-playwright-browsers",
+   "title": "Playwright — browser builds",
+   "description": "Chromium, Firefox and WebKit builds Playwright downloaded for testing (~/Library/Caches/ms-playwright). Each Playwright upgrade adds new ones.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/ms-playwright/*"
+   ],
+   "comeback": "Run: npx playwright install — it downloads the versions your project needs.",
+   "source": "https://playwright.dev/docs/browsers#managing-browser-binaries"
+  },
+  {
+   "id": "dev-puppeteer-browsers",
+   "title": "Puppeteer — browser builds",
+   "description": "Chrome builds Puppeteer downloaded when it was installed (~/Library/Caches/puppeteer).",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/puppeteer/*"
+   ],
+   "comeback": "Run: npx puppeteer browsers install chrome — or reinstall the package.",
+   "source": "https://pptr.dev/guides/configuration"
+  },
+  {
+   "id": "dev-cypress-cache",
+   "title": "Cypress — app binaries",
+   "description": "Cypress app versions downloaded by your projects (~/Library/Caches/Cypress). Old versions are never removed on their own.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/Cypress/*"
+   ],
+   "comeback": "Run: npx cypress install — it downloads the version a project needs.",
+   "source": "https://docs.cypress.io/app/references/advanced-installation#Binary-cache"
+  },
+  {
+   "id": "dev-electron-cache",
+   "title": "Electron — download cache",
+   "description": "Electron releases downloaded when installing Electron apps you are developing (~/Library/Caches/electron).",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/electron/*"
+   ],
+   "comeback": "Downloaded again the next time a project installs Electron.",
+   "source": "https://www.electronjs.org/docs/latest/tutorial/installation#cache"
+  },
+  {
+   "id": "dev-yarn-cache",
+   "title": "Yarn — package cache",
+   "description": "Packages Yarn has downloaded (~/Library/Caches/Yarn and ~/.yarn/berry/cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/Yarn/*",
+    "~/.yarn/berry/cache/*"
+   ],
+   "comeback": "Yarn fetches packages again on the next install.",
+   "source": "https://classic.yarnpkg.com/en/docs/cli/cache"
+  },
+  {
+   "id": "dev-bun-cache",
+   "title": "Bun — install cache",
+   "description": "Packages Bun has downloaded (~/.bun/install/cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.bun/install/cache/*"
+   ],
+   "comeback": "Bun downloads packages again on the next install.",
+   "source": "https://bun.sh/docs/install/cache"
+  },
+  {
+   "id": "dev-deno-cache",
+   "title": "Deno — module cache",
+   "description": "Remote modules and compiled code Deno has cached (~/Library/Caches/deno). Re-fetched when a script needs them.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/deno/*"
+   ],
+   "comeback": "Deno downloads and compiles modules again when a script needs them.",
+   "source": "https://docs.deno.com/runtime/fundamentals/modules/"
+  },
+  {
+   "id": "dev-node-gyp-headers",
+   "title": "node-gyp — headers",
+   "description": "Node.js headers downloaded to compile native add-ons (~/Library/Caches/node-gyp).",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/node-gyp/*"
+   ],
+   "comeback": "node-gyp downloads the headers again the next time a native package builds.",
+   "source": "https://github.com/nodejs/node-gyp#options"
+  },
+  {
+   "id": "dev-go-mod-cache",
+   "title": "Go — module cache",
+   "description": "Go's downloaded module cache (~/go/pkg/mod). Moved to Trash as one restorable folder; modules are re-downloaded when needed.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "trashRoots": true,
+   "paths": [
+    "~/go/pkg/mod"
+   ],
+   "comeback": "The go command downloads modules again when a build needs them.",
+   "source": "https://go.dev/ref/mod#module-cache"
+  },
+  {
+   "id": "dev-ccache",
+   "title": "ccache — compiler cache",
+   "description": "Compiled C and C++ objects ccache keeps so rebuilding the same code is instant (~/Library/Caches/ccache, ~/.ccache).",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/Library/Caches/ccache/*",
+    "~/.ccache/*"
+   ],
+   "comeback": "ccache fills it again as you compile. The first builds afterwards are slower.",
+   "source": "https://ccache.dev/manual/latest.html#config_cache_dir"
+  },
+  {
+   "id": "dev-sccache",
+   "title": "sccache — compiler cache",
+   "description": "Compiled Rust, C and C++ output sccache keeps on disk (~/Library/Caches/Mozilla.sccache). Skipped while the sccache server is running.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/Library/Caches/Mozilla.sccache/*"
+   ],
+   "runningApps": [
+    "sccache"
+   ],
+   "comeback": "sccache fills it again as you compile. The first builds afterwards are slower.",
+   "source": "https://github.com/mozilla/sccache/blob/main/docs/Local.md"
+  },
+  {
+   "id": "dev-composer-cache",
+   "title": "Composer — package cache",
+   "description": "PHP packages Composer has downloaded (~/Library/Caches/composer). Re-downloaded when an install needs them.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/composer/*"
+   ],
+   "comeback": "Composer downloads packages again when an install needs them.",
+   "source": "https://getcomposer.org/doc/03-cli.md#clear-cache-clearcache-cc"
+  },
+  {
+   "id": "dev-cocoapods-cache",
+   "title": "CocoaPods — download cache",
+   "description": "Podspecs and downloaded pods CocoaPods keeps between installs (~/Library/Caches/CocoaPods). Re-fetched on the next pod install.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/CocoaPods/*"
+   ],
+   "comeback": "CocoaPods re-downloads what your Podfile needs on the next pod install.",
+   "source": "https://guides.cocoapods.org/using/using-cocoapods.html"
+  },
+  {
+   "id": "dev-poetry-cache",
+   "title": "Poetry — package cache",
+   "description": "Package metadata and downloaded files Poetry keeps between installs (~/Library/Caches/pypoetry). Re-downloaded on the next install.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/Library/Caches/pypoetry/cache/*",
+    "~/Library/Caches/pypoetry/artifacts/*"
+   ],
+   "comeback": "Poetry downloads them again on the next install.",
+   "source": "https://python-poetry.org/docs/configuration/#cache-dir"
+  },
+  {
+   "id": "dev-uv-cache",
+   "title": "uv — package cache",
+   "description": "Packages, wheels and Python builds uv has downloaded (~/.cache/uv). Re-downloaded on the next sync or install.",
+   "category": "Development",
+   "os": [
+    "darwin"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/uv/*"
+   ],
+   "comeback": "uv downloads what it needs again on the next sync or install.",
+   "source": "https://docs.astral.sh/uv/concepts/cache/"
+  },
+  {
+   "id": "docker-builder-cache",
+   "title": "Docker — build cache",
+   "description": "Runs 'docker builder prune -f' — removes Docker's build cache only (the layers docker build compiled and stored). Images, containers and volumes are never touched. Disabled by default: set \"enabled\": true on this rule after reviewing.",
+   "category": "Development",
+   "os": [
+    "darwin",
+    "windows",
+    "linux"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "docker builder prune -f",
+   "requires": {
+    "binary": "docker"
+   },
+   "comeback": "Docker rebuilds the cache the next time you build the same images — the first build afterwards is slower.",
+   "source": "https://docs.docker.com/build/cache/#prune"
+  }
+ ]
+}

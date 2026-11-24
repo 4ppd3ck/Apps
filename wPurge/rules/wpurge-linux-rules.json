@@ -1,0 +1,251 @@
+{
+ "version": 1,
+ "note": "Descale rules DB — Linux. Every rule is evaluated against the running OS, arch and machine (vars, requires, running apps) — a rule that does not apply simply reports 'unavailable'. Safety tiers: 'safe' = pre-selected and regenerable content; 'review' = never pre-checked, the user must opt in. Cleaning moves files to the freedesktop Trash (~/.local/share/Trash/files, with .trashinfo metadata so your file manager can restore them); action 'delete' is permanent; action 'command' runs an explicit shell command and is disabled until you set enabled=true. Optional per-rule fields: source (docs link), comeback (how the content regenerates), minAgeSetting (read a user setting instead of minAgeDays — 'downloads' = the Downloads-age setting).",
+ "vars": [],
+ "rules": [
+  {
+   "id": "linux-app-caches",
+   "title": "Application caches (~/.cache)",
+   "description": "App caches under XDG_CACHE_HOME (~/.cache). Regenerated on demand; apps may be slower on first relaunch. Caches that have their own rule below are excluded, so nothing is counted twice.",
+   "category": "Caches",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/*"
+   ],
+   "exclude": [
+    "~/.cache/go-build",
+    "~/.cache/pip",
+    "~/.cache/mozilla",
+    "~/.cache/google-chrome",
+    "~/.cache/chromium",
+    "~/.cache/BraveSoftware",
+    "~/.cache/thunderbird",
+    "~/.cache/thumbnails",
+    "~/.cache/JetBrains",
+    "~/.cache/deno",
+    "~/.cache/node-gyp",
+    "~/.cache/ccache",
+    "~/.cache/sccache",
+    "~/.cache/composer",
+    "~/.cache/ms-playwright",
+    "~/.cache/puppeteer",
+    "~/.cache/Cypress",
+    "~/.cache/electron",
+    "~/.cache/yarn",
+    "~/.cache/huggingface",
+    "~/.cache/lm-studio",
+    "~/.cache/torch",
+    "~/.cache/whisper",
+    "~/.cache/llama.cpp",
+    "~/.cache/uv",
+    "~/.cache/pypoetry"
+   ]
+  },
+  {
+   "id": "linux-browser-caches",
+   "title": "Browser caches (Firefox, Chrome, Chromium, Brave, Thunderbird)",
+   "description": "Cached pages and images only — never cookies, passwords or history. Skipped entirely while any listed browser or mail client is running, because live profile databases must not be touched.",
+   "category": "Caches",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/mozilla/*",
+    "~/.cache/google-chrome/*",
+    "~/.cache/chromium/*",
+    "~/.cache/BraveSoftware/*",
+    "~/.cache/thunderbird/*"
+   ],
+   "runningApps": [
+    "firefox",
+    "chrome",
+    "chromium",
+    "brave",
+    "brave-browser",
+    "thunderbird"
+   ]
+  },
+  {
+   "id": "linux-thumbnails",
+   "title": "Thumbnail cache",
+   "description": "Thumbnails your file manager builds for folder previews (~/.cache/thumbnails, freedesktop spec). They regenerate as you browse.",
+   "category": "Caches",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/thumbnails/*"
+   ]
+  },
+  {
+   "id": "linux-state-logs",
+   "title": "Application state & logs",
+   "description": "Log files and regenerated state apps wrote under XDG_STATE_HOME (~/.local/state) — crash tails, render logs, session state. Starts unchecked: a few apps keep less-regenerable state here, so give it a look before cleaning.",
+   "category": "Logs",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "paths": [
+    "~/.local/state/*"
+   ]
+  },
+  {
+   "id": "linux-crash-dumps",
+   "title": "Crash dumps",
+   "description": "Kernel and systemd coredumps (/var/crash, /var/lib/systemd/coredump). Useful only while a bug is being debugged. Files you have no permission to move simply fail and are reported, never forced — clean them with sudo from a terminal if needed.",
+   "category": "Logs",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "paths": [
+    "/var/crash/*",
+    "/var/lib/systemd/coredump/*"
+   ]
+  },
+  {
+   "id": "go-build-cache",
+   "title": "Go — build cache",
+   "description": "Compiled package cache (~/.cache/go-build). Regenerated from source on the next build; builds get slower once.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/go-build/*"
+   ]
+  },
+  {
+   "id": "pip-cache",
+   "title": "pip — download cache",
+   "description": "Downloaded wheels/packages (~/.cache/pip). Re-downloaded on the next install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/pip/*"
+   ]
+  },
+  {
+   "id": "npm-cache",
+   "title": "npm — package cache",
+   "description": "The content-addressed package store (~/.npm/_cacache) and npm logs. Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.npm/_cacache/*",
+    "~/.npm/_logs/*"
+   ]
+  },
+  {
+   "id": "cargo-cache",
+   "title": "Rust — cargo registry cache",
+   "description": "Downloaded crate archives and extracted sources (~/.cargo/registry). Re-downloaded by the next build.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cargo/registry/cache/*",
+    "~/.cargo/registry/src/*"
+   ]
+  },
+  {
+   "id": "gradle-cache",
+   "title": "Gradle — caches",
+   "description": "Dependency and build caches in ~/.gradle/caches. Re-downloaded/rebuilt on the next Gradle run.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.gradle/caches/*"
+   ]
+  },
+  {
+   "id": "maven-cache",
+   "title": "Maven — repository cache",
+   "description": "Downloaded artifacts in ~/.m2/repository. Re-downloaded on the next build.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.m2/repository/*"
+   ]
+  },
+  {
+   "id": "trash-empty",
+   "title": "Empty the Trash",
+   "description": "Permanently deletes everything currently in ~/.local/share/Trash (files and the .trashinfo records that go with them) — including items you trashed yourself before this scan, and files other rules moved there earlier in the same session. For that reason it can only be run alone, is never pre-selected, and cannot be undone.",
+   "category": "Trash",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "action": "delete",
+   "paths": [
+    "~/.local/share/Trash/files/*",
+    "~/.local/share/Trash/info/*.trashinfo"
+   ]
+  },
+  {
+   "id": "downloads-installers",
+   "title": "Old installers in Downloads",
+   "description": ".deb/.rpm/.AppImage files in Downloads older than the configured age — typically packages already installed. Files newer than that are never listed. The age (default 30 days) is set under ⚙️ Settings.",
+   "category": "Downloads",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "minAgeDays": 30,
+   "minAgeSetting": "downloads",
+   "paths": [
+    "~/Downloads/*.deb",
+    "~/Downloads/*.rpm",
+    "~/Downloads/*.AppImage"
+   ]
+  },
+  {
+   "id": "docker-prune",
+   "title": "Docker — prune unused images/containers",
+   "description": "Runs 'docker system prune -f' (dangling images, stopped containers, unused networks). Disabled by default: set \"enabled\": true on this rule after reading what the command removes. Requires the Docker daemon to be running.",
+   "category": "Development",
+   "os": [
+    "darwin",
+    "windows",
+    "linux"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "docker system prune -f",
+   "requires": {
+    "binary": "docker"
+   }
+  }
+ ]
+}

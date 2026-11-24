@@ -179,6 +179,39 @@ textarea { width: 100%; resize: vertical; }
 .permission-summary > .muted { margin-left: auto; }
 .permission-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
 .permission-warnings { margin: 10px 0; }
+.port-list { max-height: 70vh; overflow: auto; }
+.port-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+.port-table { width: 100%; min-width: 920px; border-collapse: collapse; background: var(--card-deep); }
+.port-table th, .port-table td {
+  text-align: left; vertical-align: top; padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.port-table th {
+  position: sticky; top: 0; z-index: 1; background: var(--card);
+  color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+}
+.port-sort-head {
+  display: inline-flex; align-items: center; gap: 5px; padding: 0;
+  background: transparent; border: 0; color: inherit; font: inherit;
+  text-align: left; text-transform: inherit; letter-spacing: inherit; cursor: pointer;
+}
+.port-sort-head:hover, .port-sort-head:focus-visible { color: var(--accent); }
+.port-sort-head span { color: var(--accent); font-size: 13px; line-height: 1; }
+.port-table tr:last-child td { border-bottom: 0; }
+.port-table tbody tr:hover { background: var(--card); }
+.port-table td:first-child { white-space: nowrap; }
+.port-table td:nth-child(2) { min-width: 150px; overflow-wrap: anywhere; }
+.port-table td:nth-child(4) { min-width: 170px; }
+.port-table td:last-child { min-width: 290px; }
+.port-address { font-weight: 650; }
+.port-advice { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.port-scan-state { font-size: 13px; font-weight: 650; }
+.port-scan-state.complete { color: var(--ok); }
+.port-scan-state.incomplete { color: var(--critical); }
+.port-risk-high { color: var(--critical); border-color: var(--critical); }
+.port-risk-medium { color: var(--medium); border-color: var(--medium); }
+.port-risk-low { color: var(--ok); border-color: var(--ok); }
+.port-risk-unknown { color: var(--muted); }
 .permission-warning {
   background: var(--card-deep);
   border: 1px solid var(--medium);
@@ -360,3 +393,9 @@ footer { text-align: center; padding: 14px; }
 }
 .ex-target .chk { white-space: nowrap; }
 #exclusionCleanup:disabled { opacity: .5; cursor: default; }
+
+/* verdict badges (plain-English layer) + the italic explanation line */
+.verdict-safe { color: var(--ok); border-color: var(--ok); }
+.verdict-suspicious { color: var(--high); border-color: var(--high); }
+.verdict-info { color: var(--muted); }
+.plain { font-style: italic; }

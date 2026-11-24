@@ -17,10 +17,14 @@ type Rules struct {
 	// provider: "label" (record at info, labelled — never notifies),
 	// "suppress" (never alert at all), "autoack" (alert lands pre-acked),
 	// "off" (ignore wGrid entirely).
-	IntelURL       string   `json:"wgrid_url"`
-	IntelMatch     string   `json:"wgrid_match"`
-	TickSeconds    int      `json:"tick_seconds"`
-	SlowMinutes    int      `json:"slow_minutes"`
+	IntelURL    string `json:"wgrid_url"`
+	IntelMatch  string `json:"wgrid_match"`
+	TickSeconds int    `json:"tick_seconds"`
+	SlowMinutes int    `json:"slow_minutes"`
+	// FixedTicks disables power-adaptive scanning: when false (default) the
+	// fast/slow ticks stretch ×3 on battery and ×5 in Low Power Mode, so a
+	// laptop unplugged stops burning charge on 15-second scans.
+	FixedTicks     bool     `json:"fixed_ticks"`
 	LearnMinutes   int      `json:"learn_minutes"`
 	Notify         Notify   `json:"notify"`
 	BadPorts       []int    `json:"bad_ports"`
@@ -170,6 +174,9 @@ func LoadRules(dataDir string) *Rules {
 	}
 	if overlay.SlowMinutes > 0 {
 		r.SlowMinutes = overlay.SlowMinutes
+	}
+	if overlay.FixedTicks {
+		r.FixedTicks = true
 	}
 	if overlay.Notify.MinSeverity != "" {
 		r.Notify.MinSeverity = overlay.Notify.MinSeverity

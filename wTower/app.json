@@ -13,5 +13,10 @@
     "--port",
     "{port}"
   ],
+  "trayToggle": {
+    "label": "wTower blocking",
+    "status": "/api/blocks",
+    "action": "/api/blocks"
+  },
   "version": "1.6"
 }

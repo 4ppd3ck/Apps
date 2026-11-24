@@ -172,7 +172,11 @@ func darwinNotifyCmd(title, body string, sound bool) *exec.Cmd {
 // Notify sends a desktop notification for an alert. Best effort everywhere.
 func NotifyAlert(a *Alert, sound bool) {
 	title := fmt.Sprintf("🚨 wHawk: %s", strings.ToUpper(a.Severity))
+	// the plain-English sentence reads better in a toast than raw detail
 	body := fmt.Sprintf("%s — %s", a.Title, a.Detail)
+	if a.Plain != "" {
+		body = fmt.Sprintf("%s — %s", a.Title, a.Plain)
+	}
 	if len(body) > 180 {
 		body = body[:180] + "…"
 	}

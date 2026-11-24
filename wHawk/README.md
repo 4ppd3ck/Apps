@@ -29,6 +29,12 @@ exactly the way malware stages itself.)*
 - **⚓ Persistence checks** — new launch agents/daemons, cron, autostart, systemd units,
   Run keys, startup folders.
 - **🧱 Firewall checks** — firewall state, default policies, per-app allow rules.
+- **🔌 Local ports** — searchable TCP listeners and bound UDP ports, owning process
+  when visible, likely service, bind scope and risk guidance. Network-bound
+  databases, admin/remote-access services, development servers and unattributed
+  owners are highlighted; loopback-only ports do not create port alerts. The
+  table also includes per-app active connection endpoints from wTower when it is
+  running, with public/private/loopback address classification.
 - **🚨 A working alert pipeline** — severities CRITICAL→INFO, ack/exclude/auto-ack per
   finding, silencing windows, notifications, export; scans every 15 s.
 - **⛔ The wTower bridge** — alerts that name a public remote IP carry a **⛔ block**
@@ -70,6 +76,36 @@ go build -o whawk ./cmd/whawk
    **auto-ack** its future occurrences.
 4. Scan the **CHECKS** list — each shows what it looks for and how long it took.
 5. Try **⇨ Export** to keep an incident record.
+6. Open **Ports** to review TCP listeners and UDP endpoints. Filter by protocol,
+   bind scope, risk, connection state, app, or remote endpoint; choose a
+   table heading to sort ascending, then click it again to reverse the order.
+   **Scan now** requests a normal wHawk scan.
+
+The port inventory is collected locally and offline; it does not depend on wTower
+or wGrid. “Network interface” and “All interfaces” describe the socket's bind
+address only and do not guarantee reachability through the OS firewall, router,
+or other network controls. A flagged service is a prompt to verify its purpose,
+authentication, and network exposure—not proof of compromise.
+
+### Port-scan platform notes
+
+- **Linux:** reads `/proc/net` socket tables and maps socket inodes to process
+  file descriptors. Systems using `hidepid` or other `/proc` restrictions may
+  show ports without process names or mark a scan partial.
+- **macOS:** uses the built-in `lsof` command for TCP listeners and UDP sockets. Full command names are
+requested (instead of lsof's default shortened display), and process
+enumeration is a fallback. It can only attribute processes visible to the
+wHawk user; permissions and socket-table access affect coverage.
+- **Windows:** uses PowerShell's `Get-NetTCPConnection` and `Get-NetUDPEndpoint`
+  cmdlets and process enumeration. If PowerShell or either networking cmdlet is
+  unavailable or denied, wHawk marks the scan incomplete instead of presenting
+  an empty inventory as complete.
+
+The scan inventories TCP listeners and bound UDP endpoints, not established
+outbound connections. The optional active-connection rows and their app names
+come from wTower's local connection feed; UDP sockets may also include a remote
+endpoint when the operating system reports one. No process-killing or firewall
+changes are offered from the Ports view.
 
 ---
 
@@ -81,6 +117,7 @@ cmd/whawk/
 │   beacon-periodicity, exfil-heuristics and integrity checks
 ├─ firewall.go / intel.go / peers.go — firewall state; provider intelligence via loopback
 │   wGrid; launcher-registry peer discovery + one-time state migration
+├─ ports.go — local TCP/UDP inventory, per-OS discovery and port-risk guidance
 ├─ alert.go / exclusions.go — severity pipeline, ack/exclude/auto-ack persistence
 └─ main.go — loopback server + UI
 Scripts/tcc.sh — macOS TCC helper

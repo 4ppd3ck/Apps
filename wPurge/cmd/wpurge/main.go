@@ -1,8 +1,9 @@
 // Command descale is a stdlib-only local server for the wPurge desktop
 // utility: an OS/arch-aware buildup (junk) analyzer with Trash-based
-// cleaning, driven by a rules database (rules/wpurge-rules.json) that can
-// be edited without rebuilding. It serves the static GUI plus a small JSON
-// API.
+// cleaning, driven by a rules database (per-OS files under rules/ —
+// wpurge-<os>-rules.json + wpurge-<os>-extra-rules.json, plus an optional
+// operator-imported ruleset) that can be edited without rebuilding. It
+// serves the static GUI plus a small JSON API.
 //
 // The server binds to 127.0.0.1 only. Unlike a plain content server this
 // process can move files to the Trash, so it must never be reachable from
@@ -11,9 +12,12 @@
 // Safety model (see README):
 //   - the API never accepts paths from the client — only rule IDs; every
 //     path is derived fresh from the rules DB and re-validated;
-//   - cleaning moves files to ~/.Trash (recoverable), never deletes in
-//     place, except rules whose action is explicitly "delete";
-//   - every clean session is journalled and restorable via /api/restore.
+//   - cleaning moves files to the Trash (recoverable — the freedesktop
+//     Trash with .trashinfo metadata on Linux, ~/.Trash on macOS), never
+//     deletes in place, except rules whose action is explicitly "delete";
+//   - every clean session is journalled — the journal is saved after each
+//     rule finishes, so a crash mid-session still leaves every completed
+//     rule restorable — and restorable via /api/restore.
 package main
 
 import (
@@ -33,12 +37,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const (
 	defaultPort = 8212
-	appVersion  = "0.6.0"
+	appVersion  = "0.8.0"
 )
 
 /* ---------- rules database ---------- */
@@ -63,25 +68,43 @@ type Rule struct {
 	OS            []string `json:"os"`
 	Arch          []string `json:"arch"`
 	Safety        string   `json:"safety"`
+	Regen         string   `json:"regen,omitempty"` // rebuild | redownload — how safe-tier content comes back
 	Paths         []string `json:"paths"`
 	Exclude       []string `json:"exclude"`
 	Requires      *Require `json:"requires,omitempty"`
 	RunningApps   []string `json:"runningApps,omitempty"`
 	MinAgeDays    int      `json:"minAgeDays,omitempty"`
+	MinAgeSetting string   `json:"minAgeSetting,omitempty"` // "downloads" = the operator's Downloads-age setting
 	RequiresAdmin bool     `json:"requiresAdmin,omitempty"`
-	Permanent     bool     `json:"permanent,omitempty"` // command rules that are irreversible (e.g. Recycle Bin)
+	TrashRoots    bool     `json:"trashRoots,omitempty"` // move one exact directory target to Trash as a unit
+	Permanent     bool     `json:"permanent,omitempty"`  // command rules that are irreversible (e.g. Recycle Bin)
 	Action        string   `json:"action,omitempty"`
 	Command       string   `json:"command,omitempty"`
+	Source        string   `json:"source,omitempty"`   // documentation link the rule's facts come from
+	Comeback      string   `json:"comeback,omitempty"` // how the content regenerates after a clean
 	Enabled       *bool    `json:"enabled,omitempty"`
+
+	origin string `json:"-"` // builtin | extra | user | custom — set at load time, never from JSON
 }
 
 type RulesDB struct {
 	Version int    `json:"version"`
+	Note    string `json:"note,omitempty"`
 	Vars    []Var  `json:"vars"`
 	Rules   []Rule `json:"rules"`
 }
 
 func (r *Rule) enabled() bool { return r.Enabled == nil || *r.Enabled }
+
+// effectiveMinAgeDays is the age cutoff the rule evaluates with: a rule
+// tagged with a minAgeSetting follows the operator's setting (falling back
+// to its own minAgeDays as the default); every other rule uses its own.
+func (r *Rule) effectiveMinAgeDays() int {
+	if r.MinAgeSetting == "downloads" {
+		return downloadsMinAge()
+	}
+	return r.MinAgeDays
+}
 
 /* ---------- scan / report types ---------- */
 
@@ -96,6 +119,7 @@ type RuleResult struct {
 	Description string   `json:"description"`
 	Category    string   `json:"category"`
 	Safety      string   `json:"safety"`
+	Regen       string   `json:"regen,omitempty"` // rebuild | redownload
 	Action      string   `json:"action"`
 	Permanent   bool     `json:"permanent,omitempty"`
 	Status      string   `json:"status"` // ok | skipped | unavailable | disabled | command
@@ -104,6 +128,8 @@ type RuleResult struct {
 	FileCount   int      `json:"fileCount"`
 	DurationMs  int64    `json:"durationMs"`
 	Samples     []Sample `json:"samples,omitempty"`
+	Source      string   `json:"source,omitempty"`
+	Comeback    string   `json:"comeback,omitempty"`
 }
 
 type Report struct {
@@ -120,7 +146,11 @@ type Report struct {
 	TotalFiles  int          `json:"totalFiles"`
 	SafeBytes   int64        `json:"safeBytes"`
 	ReviewBytes int64        `json:"reviewBytes"`
-	DurationMs  int64        `json:"durationMs"`
+	// verdict split of the safe tier: rebuilt from what's on this machine
+	// (build output, indexes) vs fetched again from the internet
+	RebuildBytes  int64 `json:"rebuildBytes"`
+	DownloadBytes int64 `json:"downloadBytes"`
+	DurationMs    int64 `json:"durationMs"`
 }
 
 type JournalItem struct {
@@ -139,6 +169,11 @@ type JournalEntry struct {
 	Items    []JournalItem `json:"items,omitempty"`
 	Commands []string      `json:"commands,omitempty"`
 	Restored bool          `json:"restored"`
+	// Complete is written false by the per-rule journal saves during a
+	// clean and flipped true by the final save. A crash mid-session leaves
+	// a complete:false entry — every completed rule in it is still
+	// restorable. Absent (older entries) counts as complete.
+	Complete bool `json:"complete"`
 }
 
 /* ---------- server ---------- */
@@ -233,6 +268,14 @@ func serve(args []string) error {
 	mux.HandleFunc("POST /api/traces/exclusions/remove", srv.handleTracesExclusionsRemove)
 	mux.HandleFunc("GET /api/guardrails", srv.handleGuardrailsGet)
 	mux.HandleFunc("POST /api/guardrails", srv.handleGuardrailsSet)
+	mux.HandleFunc("GET /api/settings", srv.handleSettingsGet)
+	mux.HandleFunc("POST /api/settings", srv.handleSettingsSet)
+	mux.HandleFunc("GET /api/rules/user", srv.handleUserRulesGet)
+	mux.HandleFunc("PUT /api/rules/user", srv.handleUserRulesPut)
+	mux.HandleFunc("DELETE /api/rules/user", srv.handleUserRulesDelete)
+	mux.HandleFunc("GET /api/rules/export", srv.handleRulesExport)
+	mux.HandleFunc("DELETE /api/folders", srv.handleCustomFolderDelete)
+	mux.HandleFunc("POST /api/folders/pick", srv.handleCustomFolderPick)
 	mux.HandleFunc("POST /api/onboarded", srv.handleOnboarded)
 	mux.HandleFunc("GET /api/nudge", srv.handleNudgeStatus)
 	mux.HandleFunc("POST /api/nudge", srv.handleNudgeToggle)
@@ -394,6 +437,16 @@ func (s *server) osVersionString() string {
 		}
 	case "windows":
 		s.osVersion = ""
+	case "linux":
+		// /etc/os-release is the one stable identity across distros
+		if raw, err := os.ReadFile("/etc/os-release"); err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				if v, ok := strings.CutPrefix(line, "PRETTY_NAME="); ok {
+					s.osVersion = strings.Trim(strings.TrimSpace(v), `"`)
+					break
+				}
+			}
+		}
 	}
 	return s.osVersion
 }
@@ -504,62 +557,123 @@ func binaryKnownAt(name string) bool {
 	return false
 }
 
-// trashDirPath is where cleaned files become recoverable. macOS and Linux
-// have a per-user Trash; Windows' Recycle Bin needs a shell API, so wPurge
-// keeps its own restorable trash folder instead.
+// trashDirPath is the Trash root where cleaned files become recoverable:
+// the freedesktop Trash on Linux (files/ + info/), ~/.Trash on macOS, and
+// a private restorable folder on Windows (the Recycle Bin needs a shell
+// API wPurge does not use).
 func trashDirPath() string {
-	home := homeDir()
-	if runtime.GOOS == "windows" {
+	return trashDirPathFor(runtime.GOOS, homeDir())
+}
+
+// trashDirPathFor is the pure form, so the Linux XDG behavior is testable
+// on any OS.
+func trashDirPathFor(goos, home string) string {
+	switch goos {
+	case "windows":
 		return filepath.Join(home, ".wpurge", "trash")
+	case "linux":
+		return filepath.Join(home, ".local", "share", "Trash")
+	default:
+		return filepath.Join(home, ".Trash")
 	}
-	return filepath.Join(home, ".Trash")
+}
+
+// trashFilesDir is where trashed items land. On Linux the freedesktop spec
+// keeps files and their .trashinfo records in sibling folders; the other
+// OSes have no info sidecar.
+func trashFilesDir() string {
+	return trashFilesDirFor(runtime.GOOS, trashDirPath())
+}
+
+func trashFilesDirFor(goos, trashDir string) string {
+	if goos == "linux" {
+		return filepath.Join(trashDir, "files")
+	}
+	return trashDir
+}
+
+// trashInfoPath is the .trashinfo sidecar for a trashed item (Linux only;
+// empty string elsewhere).
+func trashInfoPath(trashDir, name string) string {
+	return trashInfoPathFor(runtime.GOOS, trashDir, name)
+}
+
+func trashInfoPathFor(goos, trashDir, name string) string {
+	if goos != "linux" {
+		return ""
+	}
+	return filepath.Join(trashDir, "info", name+".trashinfo")
+}
+
+// trashInfoContent is the freedesktop .trashinfo body: original path and
+// deletion date, so a file manager's "Restore" works.
+func trashInfoContent(origPath string, deletedAt time.Time) string {
+	return fmt.Sprintf("[Trash Info]\nPath=%s\nDeletionDate=%s\n",
+		origPath, deletedAt.Format("2006-01-02"))
+}
+
+// writeTrashInfo records the sidecar (Linux only; a no-op elsewhere).
+func writeTrashInfo(trashDir, name, origPath string) {
+	info := trashInfoPath(trashDir, name)
+	if info == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(info), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(info, []byte(trashInfoContent(origPath, time.Now())), 0o644)
+}
+
+// removeTrashInfo drops the sidecar when the item is restored (Linux only).
+func removeTrashInfo(trashDir, name string) {
+	if info := trashInfoPath(trashDir, name); info != "" {
+		_ = os.Remove(info)
+	}
+}
+
+// pgrepBinary locates pgrep the way binaryKnownAt does — GUI-launched
+// processes get a minimal PATH, so the well-known dirs are stat'ed too.
+// Empty string means the machine has no pgrep at all.
+func pgrepBinary() string {
+	if p, err := exec.LookPath("pgrep"); err == nil {
+		return p
+	}
+	for _, dir := range []string{"/usr/bin", "/bin", "/usr/sbin", "/snap/bin"} {
+		if _, err := os.Stat(filepath.Join(dir, "pgrep")); err == nil {
+			return filepath.Join(dir, "pgrep")
+		}
+	}
+	return ""
 }
 
 // runningApps detects named processes (macOS/Linux via pgrep). On Windows
-// detection is not implemented in v0.1 and simply reports nothing running.
-func runningApps(names []string) []string {
+// detection is not implemented and simply reports nothing running.
+// ok=false means "cannot check" (no pgrep on this machine): callers must
+// then fail safe — a rule that skips itself while an app is running must
+// never clean just because the check was impossible.
+func runningApps(names []string) (running []string, ok bool) {
 	if runtime.GOOS == "windows" {
-		return nil
+		return nil, true // no detection on Windows; nothing to guard
 	}
-	var running []string
+	pgrep := pgrepBinary()
+	if pgrep == "" {
+		return nil, false
+	}
 	for _, name := range names {
-		if err := exec.Command("pgrep", "-x", name).Run(); err == nil {
+		if err := exec.Command(pgrep, "-x", name).Run(); err == nil {
 			running = append(running, name)
 		}
 	}
-	return running
+	return running, true
 }
 
 /* ---------- scanning ---------- */
 
-// rulesPubKey is the ed25519 public key that signs the rules database.
-// Empty string = unsigned local mode (any local edits are accepted).
-// Generate a keypair with `descale rules genkeys`; anyone holding the
+// rulesPubKey is the ed25519 public key that signs the built-in rules
+// files. Empty string = unsigned local mode (any local edits are accepted).
+// Generate a keypair with `wpurge rules genkeys`; anyone holding the
 // private key can sign rule updates, so keep it off shared machines.
-const rulesPubKey = "dc7f0e9cbea1a4d061a2868d5c955c6becc18a6e66dfc17b5dd5251ef41ab376"
-
-func (s *server) loadRules() (*RulesDB, bool, error) {
-	path := filepath.Join(s.root, "rules", "wpurge-rules.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false, err
-	}
-	signed := false
-	if sig, err := os.ReadFile(path + ".sig"); err == nil {
-		if rulesPubKey == "" {
-			return nil, false, errors.New("rules file carries a signature but no public key is embedded in this build")
-		}
-		if err := verifyRulesSignature(raw, sig); err != nil {
-			return nil, false, fmt.Errorf("rules signature INVALID: %w", err)
-		}
-		signed = true
-	}
-	var db RulesDB
-	if err := json.Unmarshal(raw, &db); err != nil {
-		return nil, signed, fmt.Errorf("rules file: %w", err)
-	}
-	return &db, signed, nil
-}
+const rulesPubKey = "57cfb7202a5b35c323f0767533087872fed4c84b05a3e6c9472a48e41c313f90"
 
 type collected struct {
 	roots   []string
@@ -677,8 +791,8 @@ func excluded(path string, ex []string) bool {
 func collect(r *Rule, vars map[string]string, home string) (*collected, error) {
 	c := &collected{samples: map[string]int64{}}
 	var cutoff time.Time
-	if r.MinAgeDays > 0 {
-		cutoff = time.Now().AddDate(0, 0, -r.MinAgeDays)
+	if days := r.effectiveMinAgeDays(); days > 0 {
+		cutoff = time.Now().AddDate(0, 0, -days)
 	}
 	ex := make([]string, 0, len(r.Exclude))
 	for _, e := range r.Exclude {
@@ -797,14 +911,55 @@ func topSamples(m map[string]int64, n int) []Sample {
 	return out
 }
 
+// globLiteralPrefix strips the first path segment carrying a glob
+// metacharacter, returning the literal path above it — the deepest
+// directory whose existence can be stat'ed without expanding the pattern.
+// A fully literal path returns itself.
+func globLiteralPrefix(pat string) string {
+	segs := strings.Split(filepath.ToSlash(pat), "/")
+	for i := len(segs) - 1; i >= 0; i-- {
+		if strings.ContainsAny(segs[i], "*?[") {
+			if i == 0 {
+				return ""
+			}
+			return strings.Join(segs[:i], "/")
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+// ruleTargetsPresent reports whether a rule points at anything that exists
+// on this machine: at least one of its paths (or the literal directory a
+// glob lives in) is on disk. A rule whose every target is absent is
+// dormant — it can never have anything to clean, so it reports
+// "not present" instead of a hollow "0 B · 0 files", and its Settings
+// checkbox would be noise.
+func ruleTargetsPresent(r *Rule, vars map[string]string, home string) bool {
+	for _, pattern := range r.Paths {
+		pat := expand(pattern, vars, home)
+		if strings.Contains(pat, "{") {
+			continue // unresolvable var — that target cannot exist here
+		}
+		prefix := globLiteralPrefix(pat)
+		if prefix == "" || prefix == "/" || prefix == "~" {
+			continue // nothing meaningful to stat
+		}
+		if _, err := os.Stat(prefix); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // scanRule evaluates one rule against this machine. It is used by both the
 // scan report and the clean plan, so the UI always shows what cleaning
 // would touch right now — never a stale number.
 func scanRule(r *Rule, vars map[string]string, home string) RuleResult {
 	res := RuleResult{
 		ID: r.ID, Title: r.Title, Description: r.Description,
-		Category: r.Category, Safety: r.Safety,
+		Category: r.Category, Safety: r.Safety, Regen: r.Regen,
 		Action: r.Action, Permanent: r.Permanent,
+		Source: r.Source, Comeback: r.Comeback,
 	}
 	if res.Action == "" {
 		res.Action = "trash"
@@ -844,7 +999,13 @@ func scanRule(r *Rule, vars map[string]string, home string) RuleResult {
 		}
 	}
 	if len(r.RunningApps) > 0 {
-		if running := runningApps(r.RunningApps); len(running) > 0 {
+		running, ok := runningApps(r.RunningApps)
+		if !ok {
+			res.Status = "unavailable"
+			res.Reason = "cannot verify running apps (pgrep not found on this machine)"
+			return res
+		}
+		if len(running) > 0 {
 			res.Status = "skipped"
 			res.Reason = "app running: " + strings.Join(running, ", ")
 			return res
@@ -855,6 +1016,16 @@ func scanRule(r *Rule, vars map[string]string, home string) RuleResult {
 		res.Reason = "runs: " + r.Command
 		return res
 	}
+	if !ruleTargetsPresent(r, vars, home) {
+		// Dormant: every folder this rule points at is absent — the tool
+		// was never installed (or never wrote data). There is nothing to
+		// clean today, and saying "0 B · 0 files" would be noise. If the
+		// tool shows up later, the next scan finds the rule again: this
+		// is re-checked fresh on every scan.
+		res.Status = "unavailable"
+		res.Reason = "not present on this machine yet — nothing to clean"
+		return res
+	}
 
 	c, err := collect(r, vars, home)
 	if err != nil {
@@ -862,11 +1033,10 @@ func scanRule(r *Rule, vars map[string]string, home string) RuleResult {
 		res.Reason = err.Error()
 		return res
 	}
-	if c.blocked > 0 && c.count == 0 {
-		// Everything the rule points at exists but is unreadable. Reporting
-		// "ok, 0 B · 0 files" here would pass an invisible-but-full Trash
-		// off as empty — for a permanent-delete rule that is dangerous.
-		// The notes already carry the OS-specific fix hint.
+	if (c.blocked > 0 && c.count == 0) || (r.TrashRoots && len(c.notes) > 0) {
+		// Whole-root moves require a complete scan: moving a tree with any
+		// unreadable branch would hide content the report could not account for.
+		// The notes carry the OS-specific access hint.
 		res.Status = "blocked"
 		res.SizeBytes = 0
 		res.FileCount = 0
@@ -876,7 +1046,9 @@ func scanRule(r *Rule, vars map[string]string, home string) RuleResult {
 	res.Status = "ok"
 	res.SizeBytes = c.bytes
 	res.FileCount = c.count
-	res.Samples = topSamples(c.samples, 4)
+	// twelve, not four: the card shows the biggest four, the detail dialog
+	// shows them all — one scan, two depths
+	res.Samples = topSamples(c.samples, 12)
 	if len(c.notes) > 0 {
 		res.Reason = strings.Join(dedupe(c.notes), "; ")
 	}
@@ -994,6 +1166,13 @@ func (s *server) buildReport(results []RuleResult, at time.Time, durationMs int6
 		rep.TotalFiles += res.FileCount
 		if res.Safety == "safe" {
 			rep.SafeBytes += res.SizeBytes
+			// verdict split: how the safe tier comes back
+			switch res.Regen {
+			case "rebuild":
+				rep.RebuildBytes += res.SizeBytes
+			case "redownload":
+				rep.DownloadBytes += res.SizeBytes
+			}
 		} else {
 			rep.ReviewBytes += res.SizeBytes
 		}
@@ -1106,7 +1285,7 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 	}
 
 	trashDir := trashDirPath()
-	_ = os.MkdirAll(trashDir, 0o755)
+	_ = os.MkdirAll(trashFilesDir(), 0o755)
 	entry := JournalEntry{
 		ID:     fmt.Sprintf("e%d", time.Now().UnixNano()),
 		At:     time.Now().UTC().Format(time.RFC3339),
@@ -1131,12 +1310,22 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 				log.addf("ok — output: %s", truncateStr(out, 200))
 			}
 			entry.Commands = append(entry.Commands, line+": "+out)
+			// journal checkpoint: commands are part of the restorable record
+			s.saveJournal(entry)
 		default:
 			// Enforce the running-app guard here too, not just in the
 			// report: a rule the UI shows as skipped must never be
-			// cleanable, even via a direct API call.
+			// cleanable, even via a direct API call. A machine that cannot
+			// check (no pgrep) is refused the same way — fail safe.
 			if len(rule.RunningApps) > 0 {
-				if running := runningApps(rule.RunningApps); len(running) > 0 {
+				running, ok := runningApps(rule.RunningApps)
+				if !ok {
+					log.addf("REFUSED: cannot verify running apps (pgrep not found) — rule skipped")
+					failures = append(failures, map[string]string{"rule": rule.ID, "path": "-", "error": "cannot verify running apps (pgrep not found) — fix pgrep, rescan and retry"})
+					ruleFailures++
+					continue
+				}
+				if len(running) > 0 {
 					log.addf("REFUSED: app running (%s) — rule skipped", strings.Join(running, ", "))
 					failures = append(failures, map[string]string{"rule": rule.ID, "path": "-", "error": "app running: " + strings.Join(running, ", ")})
 					ruleFailures++
@@ -1150,9 +1339,8 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 				ruleFailures++
 				continue
 			}
-			if c.blocked > 0 && c.count == 0 {
-				// Scan-blind clean: every target unreadable. Refuse rather
-				// than report a hollow success over an unknown pile.
+			if (c.blocked > 0 && c.count == 0) || (rule.TrashRoots && len(c.notes) > 0) {
+				// Refuse a whole-root move if any part of the tree was unreadable.
 				log.addf("REFUSED: targets unreadable (%s) — fix access, rescan and retry", strings.Join(dedupe(c.notes), "; "))
 				failures = append(failures, map[string]string{"rule": rule.ID, "path": "-",
 					"error": "targets unreadable (" + strings.Join(dedupe(c.notes), "; ") + ") — fix access, rescan and retry"})
@@ -1161,35 +1349,67 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 			}
 			var movedBytes int64
 			var moved int
-			for _, f := range c.files {
-				info, err := os.Lstat(f)
-				if err != nil {
-					log.addf("FAILED stat %s — %v", f, err)
-					failures = append(failures, map[string]string{"rule": rule.ID, "path": f, "error": err.Error()})
-					ruleFailures++
-					continue
-				}
-				if rule.Action == "delete" {
-					if err := os.Remove(f); err != nil {
-						log.addf("FAILED delete %s — %v", f, err)
-						failures = append(failures, map[string]string{"rule": rule.ID, "path": f, "error": err.Error()})
-						ruleFailures++
-						continue
-					}
-				} else {
-					dst, err := trashTo(trashDir, f)
+			if rule.TrashRoots {
+				if len(c.roots) == 1 {
+					root := c.roots[0]
+					info, err := os.Lstat(root)
 					if err != nil {
-						log.addf("FAILED trash %s — %v", f, err)
+						log.addf("FAILED stat %s — %v", root, err)
+						failures = append(failures, map[string]string{"rule": rule.ID, "path": root, "error": err.Error()})
+						ruleFailures++
+					} else if !info.IsDir() {
+						err := errors.New("whole-root Trash target is not a directory")
+						log.addf("REFUSED trash %s — %v", root, err)
+						failures = append(failures, map[string]string{"rule": rule.ID, "path": root, "error": err.Error()})
+						ruleFailures++
+					} else if dst, err := trashTo(trashDir, root); err != nil {
+						log.addf("FAILED trash %s — %v", root, err)
+						failures = append(failures, map[string]string{"rule": rule.ID, "path": root, "error": err.Error()})
+						ruleFailures++
+					} else {
+						entry.Items = append(entry.Items, JournalItem{Path: root, Trash: filepath.Base(dst)})
+						movedBytes = c.bytes
+						moved = c.count
+						entry.Bytes += c.bytes
+						entry.Files += c.count
+					}
+				} else if len(c.roots) > 1 {
+					err := errors.New("whole-root Trash rule matched more than one target")
+					log.addf("REFUSED trash — %v", err)
+					failures = append(failures, map[string]string{"rule": rule.ID, "path": "-", "error": err.Error()})
+					ruleFailures++
+				}
+			} else {
+				for _, f := range c.files {
+					info, err := os.Lstat(f)
+					if err != nil {
+						log.addf("FAILED stat %s — %v", f, err)
 						failures = append(failures, map[string]string{"rule": rule.ID, "path": f, "error": err.Error()})
 						ruleFailures++
 						continue
 					}
-					entry.Items = append(entry.Items, JournalItem{Path: f, Trash: filepath.Base(dst)})
+					if rule.Action == "delete" {
+						if err := os.Remove(f); err != nil {
+							log.addf("FAILED delete %s — %v", f, err)
+							failures = append(failures, map[string]string{"rule": rule.ID, "path": f, "error": err.Error()})
+							ruleFailures++
+							continue
+						}
+					} else {
+						dst, err := trashTo(trashDir, f)
+						if err != nil {
+							log.addf("FAILED trash %s — %v", f, err)
+							failures = append(failures, map[string]string{"rule": rule.ID, "path": f, "error": err.Error()})
+							ruleFailures++
+							continue
+						}
+						entry.Items = append(entry.Items, JournalItem{Path: f, Trash: filepath.Base(dst)})
+					}
+					movedBytes += info.Size()
+					moved++
+					entry.Bytes += info.Size()
+					entry.Files++
 				}
-				movedBytes += info.Size()
-				moved++
-				entry.Bytes += info.Size()
-				entry.Files++
 			}
 			// Husk cleanup: emptying a directory leaves the directory
 			// itself behind, so Empty-the-Trash piled up hollow shells
@@ -1209,9 +1429,15 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 			_ = moved
 			log.addf("rule %q: moved %d file(s) (%s), %d husk(s) removed, %d failed",
 				rule.Title, moved, fmtBytes(movedBytes), husksRemoved, ruleFailures)
+			// Journal checkpoint per rule: everything that has actually
+			// moved so far is on disk as restorable NOW, so a crash between
+			// rules (or a refused later rule) never loses an earlier rule's
+			// undo record. The entry is complete:false until the final save.
+			s.saveJournal(entry)
 		}
 	}
-	if entry.Files > 0 || len(entry.Commands) > 0 {
+	entry.Complete = true
+	if entry.Files > 0 || len(entry.Items) > 0 || len(entry.Commands) > 0 {
 		s.saveJournal(entry)
 		log.addf("journal %s saved (%d item(s), %s) — restorable", entry.ID, entry.Files, fmtBytes(entry.Bytes))
 	} else {
@@ -1239,32 +1465,31 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 
 // trashTo moves src into trashDir (the Trash) and returns the destination
 // path. A plain rename is tried first — atomic and instant on the same
-// volume. When the OS refuses the rename, fallbacks run in order:
-//   - macOS: hand the deletion to Finder, which holds the App Management
-//     permission modern macOS requires to modify /Applications and knows
-//     how to trash running-but-idle apps;
-//   - every OS: copy into the Trash, verify the copy, then remove the
-//     original — this is what makes cross-volume moves work at all
-//     (EXDEV: the app lives on a second disk/external volume), plus any
-//     permission case where rename is barred but read+delete are not.
+// volume. A copy-to-Trash fallback is used only when rename reports a
+// cross-device move; permission failures are returned directly. We deliberately do not ask
+// Finder to perform the move: Finder can trigger a Touch ID/password
+// authorization prompt for each protected item, outside wPurge's control.
+// The copy fallback handles cross-volume moves (EXDEV: the app lives on a
+// second disk/external volume) without leaving copies behind when the
+// original cannot be removed.
 //
 // A failed fallback never leaves a half-state silently: if the copy landed
 // but the original could not be removed, that exact situation is returned
 // as the error (the Trash copy exists; the app is still installed).
 func trashTo(trashDir, src string) (string, error) {
-	dst := filepath.Join(trashDir, filepath.Base(src))
+	filesDir := trashFilesDir()
+	dst := filepath.Join(filesDir, filepath.Base(src))
 	if _, err := os.Lstat(dst); err == nil {
-		dst = filepath.Join(trashDir, fmt.Sprintf("%s.d%d", filepath.Base(src), time.Now().UnixNano()))
+		dst = filepath.Join(filesDir, fmt.Sprintf("%s.d%d", filepath.Base(src), time.Now().UnixNano()))
 	}
 	err := os.Rename(src, dst)
 	if err == nil {
+		writeTrashInfo(trashDir, filepath.Base(dst), src)
 		return dst, nil
 	}
 	renameErr := err
-	if runtime.GOOS == "darwin" {
-		if ferr := finderTrash(src); ferr == nil {
-			return dst, nil
-		}
+	if !errors.Is(renameErr, syscall.EXDEV) {
+		return "", renameErr
 	}
 	if cerr := copyTree(src, dst); cerr != nil {
 		return "", fmt.Errorf("%v (copy-to-Trash fallback also failed: %v)", renameErr, cerr)
@@ -1272,21 +1497,8 @@ func trashTo(trashDir, src string) (string, error) {
 	if rmErr := os.RemoveAll(src); rmErr != nil {
 		return "", fmt.Errorf("a copy is in the Trash, but the original could not be removed: %v", rmErr)
 	}
+	writeTrashInfo(trashDir, filepath.Base(dst), src)
 	return dst, nil
-}
-
-// finderTrash asks Finder to delete src (macOS only). It needs the usual
-// one-time "wants to control Finder" automation approval; Finder itself
-// carries the App Management right, so this succeeds where a bare rename
-// into /Applications content gets EPERM.
-func finderTrash(src string) error {
-	script := fmt.Sprintf(`tell application "Finder" to delete (POSIX file %q as alias)`, src)
-	cmd := exec.Command("osascript", "-e", script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Finder hand-off: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // copyTree recursively copies src to dst (dirs, files, symlinks; modes
@@ -1487,11 +1699,24 @@ func (s *server) journalPath() string {
 	return filepath.Join(homeDir(), ".wpurge", "journal.json")
 }
 
+// saveJournal upserts one entry: an existing entry with the same ID is
+// replaced (the clean loop checkpoints its entry after every rule), a new
+// one is appended. Atomic tmp+rename write, 0600.
 func (s *server) saveJournal(entry JournalEntry) {
 	s.journalMu.Lock()
 	defer s.journalMu.Unlock()
 	entries := s.readJournal()
-	entries = append(entries, entry)
+	replaced := false
+	for i := range entries {
+		if entries[i].ID == entry.ID {
+			entries[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		entries = append(entries, entry)
+	}
 	data, err := json.MarshalIndent(entries, "", " ")
 	if err != nil {
 		return
@@ -1560,10 +1785,11 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			_ = os.MkdirAll(filepath.Dir(item.Path), 0o755)
-			if err := os.Rename(filepath.Join(trashDir, item.Trash), item.Path); err != nil {
+			if err := os.Rename(filepath.Join(trashFilesDir(), item.Trash), item.Path); err != nil {
 				failed++
 				continue
 			}
+			removeTrashInfo(trashDir, item.Trash)
 			restored++
 		}
 		entries[i].Restored = true
@@ -1599,18 +1825,20 @@ func (s *server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":          "wPurge",
-		"version":       appVersion,
-		"os":            runtime.GOOS,
-		"arch":          runtime.GOARCH,
-		"archLabel":     archLabel(),
-		"osVersion":     s.osVersionString(),
-		"home":          homeDir(),
-		"rulesActive":   ruleCount,
-		"rulesSigned":   signed,
-		"guardrails":    guardrailsEnabled(),
-		"onboarded":     onboardingDone(),
-		"diskFreeBytes": diskFree(homeDir()),
+		"name":                "wPurge",
+		"version":             appVersion,
+		"os":                  runtime.GOOS,
+		"arch":                runtime.GOARCH,
+		"archLabel":           archLabel(),
+		"osVersion":           s.osVersionString(),
+		"home":                homeDir(),
+		"rulesActive":         ruleCount,
+		"rulesSigned":         signed,
+		"guardrails":          guardrailsEnabled(),
+		"onboarded":           onboardingDone(),
+		"downloadsMinAgeDays": downloadsMinAge(),
+		"diskFreeBytes":       diskFree(homeDir()),
+		"diskTotalBytes":      diskTotal(homeDir()),
 	})
 }
 

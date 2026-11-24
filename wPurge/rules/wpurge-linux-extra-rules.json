@@ -1,0 +1,535 @@
+{
+ "version": 1,
+ "note": "Descale EXTRA rules — Linux. Additional cleanup rules beyond the built-in per-OS set (AI model caches, dev-tool caches, Flatpak/Docker pruning), translated from the Leftover project's public catalog. Every rule cites a 'source' doc page and a 'comeback' line (how the content regenerates). These load on top of wpurge-linux-rules.json; each can be switched off under ⚙️ Settings without editing this file. AI rules are review-tier: models are huge re-downloads, so they are never pre-selected.",
+ "vars": [],
+ "rules": [
+  {
+   "id": "ai-ollama-models",
+   "title": "Ollama — pulled models",
+   "description": "Models you pulled with Ollama (~/.ollama/models). They are re-downloadable but can be many GB each, so this is never pre-selected. Skipped while Ollama is running.",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.ollama/models"
+   ],
+   "runningApps": [
+    "ollama"
+   ],
+   "comeback": "Pull any model again with: ollama pull <model>. To remove just one instead of everything, use: ollama rm <model>",
+   "source": "https://github.com/ollama/ollama/blob/main/docs/faq.md#where-are-models-stored"
+  },
+  {
+   "id": "ai-huggingface-hub",
+   "title": "Hugging Face — model cache",
+   "description": "Model weights and files downloaded from the Hugging Face Hub by transformers, diffusers and other libraries (~/.cache/huggingface/hub).",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/huggingface/hub"
+   ],
+   "comeback": "Downloaded again the next time code loads the model (as long as it is still on the Hub).",
+   "source": "https://huggingface.co/docs/huggingface_hub/guides/manage-cache"
+  },
+  {
+   "id": "ai-huggingface-datasets",
+   "title": "Hugging Face — datasets cache",
+   "description": "Datasets downloaded and processed by the datasets library (~/.cache/huggingface/datasets).",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/huggingface/datasets"
+   ],
+   "comeback": "Downloaded and processed again the next time code loads the dataset.",
+   "source": "https://huggingface.co/docs/datasets/cache"
+  },
+  {
+   "id": "ai-lmstudio-models",
+   "title": "LM Studio — model library",
+   "description": "Models in LM Studio's library (~/.lmstudio/models, ~/.cache/lm-studio/models). Some may have been imported from your own files rather than downloaded, so they cannot be promised to come back. Skipped while LM Studio is running.",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.lmstudio/models",
+    "~/.cache/lm-studio/models"
+   ],
+   "runningApps": [
+    "LM Studio",
+    "lms"
+   ],
+   "comeback": "Models downloaded inside LM Studio can be downloaded again from its Discover tab.",
+   "source": "https://lmstudio.ai/docs/app/advanced/import-model"
+  },
+  {
+   "id": "ai-torch-hub",
+   "title": "PyTorch — Hub cache",
+   "description": "Models and weights downloaded through torch.hub and torchvision (~/.cache/torch).",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/torch"
+   ],
+   "comeback": "Downloaded again the next time code loads them.",
+   "source": "https://pytorch.org/docs/stable/hub.html#where-are-my-downloaded-models-saved"
+  },
+  {
+   "id": "ai-whisper-models",
+   "title": "Whisper — models",
+   "description": "Speech recognition models downloaded by OpenAI's Whisper package (~/.cache/whisper).",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/whisper"
+   ],
+   "comeback": "Downloaded again the first time you load a model.",
+   "source": "https://github.com/openai/whisper/blob/main/whisper/__init__.py"
+  },
+  {
+   "id": "ai-llamacpp-models",
+   "title": "llama.cpp — downloaded models",
+   "description": "Models llama.cpp downloaded with -hf or --hf-repo (~/.cache/llama.cpp). Newer versions use the Hugging Face cache instead.",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/llama.cpp"
+   ],
+   "comeback": "llama.cpp downloads a model again the next time you run it with -hf. Check that nothing points at these files by path first.",
+   "source": "https://github.com/ggml-org/llama.cpp"
+  },
+  {
+   "id": "ai-gpt4all-models",
+   "title": "GPT4All — models and LocalDocs",
+   "description": "Models the GPT4All app downloaded, and its LocalDocs index (~/.local/share/nomic.ai/GPT4All).",
+   "category": "AI",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "regen": "redownload",
+   "paths": [
+    "~/.local/share/nomic.ai/GPT4All"
+   ],
+   "comeback": "Remove models from inside GPT4All, which can download them again. Models you added by hand won't come back.",
+   "source": "https://gpt4all.io"
+  },
+  {
+   "id": "dev-jetbrains-caches",
+   "title": "JetBrains IDEs — version caches",
+   "description": "Indexes and caches for each JetBrains IDE version (~/.cache/JetBrains). Folders for versions you no longer use stay behind after every upgrade. Skipped while a JetBrains IDE or Android Studio is open.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/JetBrains/*"
+   ],
+   "runningApps": [
+    "idea",
+    "idea64",
+    "pycharm",
+    "pycharm64",
+    "webstorm",
+    "webstorm64",
+    "goland",
+    "goland64",
+    "clion",
+    "clion64",
+    "rider",
+    "rider64",
+    "phpstorm",
+    "phpstorm64",
+    "rubymine",
+    "rubymine64",
+    "datagrip",
+    "datagrip64",
+    "rustrover",
+    "rustrover64",
+    "studio",
+    "studio64"
+   ],
+   "comeback": "The IDE rebuilds its indexes the next time it opens a project. Your settings live elsewhere and are not touched.",
+   "source": "https://www.jetbrains.com/help/idea/directories-used-by-the-ide-to-store-settings-caches-plugins-and-logs.html"
+  },
+  {
+   "id": "dev-playwright-browsers",
+   "title": "Playwright — browser builds",
+   "description": "Chromium, Firefox and WebKit builds Playwright downloaded for testing (~/.cache/ms-playwright). Each Playwright upgrade adds new ones.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/ms-playwright/*"
+   ],
+   "comeback": "Run: npx playwright install — it downloads the versions your project needs.",
+   "source": "https://playwright.dev/docs/browsers#managing-browser-binaries"
+  },
+  {
+   "id": "dev-puppeteer-browsers",
+   "title": "Puppeteer — browser builds",
+   "description": "Chrome builds Puppeteer downloaded when it was installed (~/.cache/puppeteer).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/puppeteer/*"
+   ],
+   "comeback": "Run: npx puppeteer browsers install chrome — or reinstall the package.",
+   "source": "https://pptr.dev/guides/configuration"
+  },
+  {
+   "id": "dev-cypress-cache",
+   "title": "Cypress — app binaries",
+   "description": "Cypress app versions downloaded by your projects (~/.cache/Cypress). Old versions are never removed on their own.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/Cypress/*"
+   ],
+   "comeback": "Run: npx cypress install — it downloads the version a project needs.",
+   "source": "https://docs.cypress.io/app/references/advanced-installation#Binary-cache"
+  },
+  {
+   "id": "dev-electron-cache",
+   "title": "Electron — download cache",
+   "description": "Electron releases downloaded when installing Electron apps you are developing (~/.cache/electron).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/electron/*"
+   ],
+   "comeback": "Downloaded again the next time a project installs Electron.",
+   "source": "https://www.electronjs.org/docs/latest/tutorial/installation#cache"
+  },
+  {
+   "id": "dev-yarn-cache",
+   "title": "Yarn — package cache",
+   "description": "Packages Yarn has downloaded (~/.cache/yarn and ~/.yarn/berry/cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/yarn/*",
+    "~/.yarn/berry/cache/*"
+   ],
+   "comeback": "Yarn fetches packages again on the next install.",
+   "source": "https://classic.yarnpkg.com/en/docs/cli/cache"
+  },
+  {
+   "id": "dev-pnpm-store",
+   "title": "pnpm — package store",
+   "description": "pnpm's shared package store (~/.local/share/pnpm/store). Your projects' node_modules folders are hard links into it, so clearing it frees almost nothing until those projects are cleaned too — pnpm's own prune command is the safe way to shrink it, which is why this starts unchecked.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "paths": [
+    "~/.local/share/pnpm/store"
+   ],
+   "comeback": "Run: pnpm store prune — it removes only packages no project uses.",
+   "source": "https://pnpm.io/cli/store"
+  },
+  {
+   "id": "dev-bun-cache",
+   "title": "Bun — install cache",
+   "description": "Packages Bun has downloaded (~/.bun/install/cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.bun/install/cache/*"
+   ],
+   "comeback": "Bun downloads packages again on the next install.",
+   "source": "https://bun.sh/docs/install/cache"
+  },
+  {
+   "id": "dev-deno-cache",
+   "title": "Deno — module cache",
+   "description": "Remote modules and compiled code Deno has cached (~/.cache/deno). Re-fetched when a script needs them.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/deno/*"
+   ],
+   "comeback": "Deno downloads and compiles modules again when a script needs them.",
+   "source": "https://docs.deno.com/runtime/fundamentals/modules/"
+  },
+  {
+   "id": "dev-node-gyp-headers",
+   "title": "node-gyp — headers",
+   "description": "Node.js headers downloaded to compile native add-ons (~/.cache/node-gyp).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/node-gyp/*"
+   ],
+   "comeback": "node-gyp downloads the headers again the next time a native package builds.",
+   "source": "https://github.com/nodejs/node-gyp#options"
+  },
+  {
+   "id": "dev-go-mod-cache",
+   "title": "Go — module cache",
+   "description": "Go's downloaded module cache (~/go/pkg/mod). Moved to Trash as one restorable folder; modules are re-downloaded when needed.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "trashRoots": true,
+   "paths": [
+    "~/go/pkg/mod"
+   ],
+   "comeback": "The go command downloads modules again when a build needs them.",
+   "source": "https://go.dev/ref/mod#module-cache"
+  },
+  {
+   "id": "dev-ccache",
+   "title": "ccache — compiler cache",
+   "description": "Compiled C and C++ objects ccache keeps so rebuilding the same code is instant (~/.cache/ccache, ~/.ccache).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/ccache/*",
+    "~/.ccache/*"
+   ],
+   "comeback": "ccache fills it again as you compile. The first builds afterwards are slower.",
+   "source": "https://ccache.dev/manual/latest.html#config_cache_dir"
+  },
+  {
+   "id": "dev-sccache",
+   "title": "sccache — compiler cache",
+   "description": "Compiled Rust, C and C++ output sccache keeps on disk (~/.cache/sccache). Skipped while the sccache server is running.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "~/.cache/sccache/*"
+   ],
+   "runningApps": [
+    "sccache"
+   ],
+   "comeback": "sccache fills it again as you compile. The first builds afterwards are slower.",
+   "source": "https://github.com/mozilla/sccache/blob/main/docs/Local.md"
+  },
+  {
+   "id": "dev-composer-cache",
+   "title": "Composer — package cache",
+   "description": "PHP packages Composer has downloaded (~/.cache/composer, ~/.composer/cache). Re-downloaded when an install needs them.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/composer/*",
+    "~/.composer/cache/*"
+   ],
+   "comeback": "Composer downloads packages again when an install needs them.",
+   "source": "https://getcomposer.org/doc/03-cli.md#clear-cache-clearcache-cc"
+  },
+  {
+   "id": "dev-nuget-packages",
+   "title": "NuGet — global packages",
+   "description": "Every NuGet package your .NET projects have restored (~/.nuget/packages).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.nuget/packages/*"
+   ],
+   "comeback": "Run: dotnet restore — it downloads the packages a project needs again.",
+   "source": "https://learn.microsoft.com/en-us/nuget/consume-packages/managing-the-global-packages-and-cache-folders"
+  },
+  {
+   "id": "dev-nuget-http-cache",
+   "title": "NuGet — HTTP cache",
+   "description": "Package feeds and downloads NuGet keeps to make restores faster (~/.local/share/NuGet/v3-cache, http-cache).",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.local/share/NuGet/v3-cache/*",
+    "~/.local/share/NuGet/http-cache/*"
+   ],
+   "comeback": "NuGet downloads what it needs again on the next restore.",
+   "source": "https://learn.microsoft.com/en-us/nuget/consume-packages/managing-the-global-packages-and-cache-folders"
+  },
+  {
+   "id": "dev-pub-cache",
+   "title": "Dart / Flutter — pub cache",
+   "description": "Dart and Flutter packages downloaded by pub (~/.pub-cache). Re-downloaded by the next pub get.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.pub-cache/*"
+   ],
+   "comeback": "Run: dart pub get or flutter pub get — they download the packages again.",
+   "source": "https://dart.dev/tools/pub/glossary#system-cache"
+  },
+  {
+   "id": "dev-uv-cache",
+   "title": "uv — package cache",
+   "description": "Packages, wheels and Python builds uv has downloaded (~/.cache/uv). Re-downloaded on the next sync or install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/uv/*"
+   ],
+   "comeback": "uv downloads what it needs again on the next sync or install.",
+   "source": "https://docs.astral.sh/uv/concepts/cache/"
+  },
+  {
+   "id": "dev-poetry-cache",
+   "title": "Poetry — package cache",
+   "description": "Package metadata and downloaded files Poetry keeps between installs (~/.cache/pypoetry). Re-downloaded on the next install.",
+   "category": "Development",
+   "os": [
+    "linux"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "~/.cache/pypoetry/cache/*",
+    "~/.cache/pypoetry/artifacts/*"
+   ],
+   "comeback": "Poetry downloads them again on the next install.",
+   "source": "https://python-poetry.org/docs/configuration/#cache-dir"
+  },
+  {
+   "id": "linux-vscode-caches",
+   "title": "VS Code / Cursor — code caches",
+   "description": "Compiled code cache and copies of extension installers for VS Code and Cursor (~/.config/Code and ~/.config/Cursor: CachedData, CachedExtensionVSIXs, Cache). These folders are not documented by Microsoft, so this starts unchecked.",
+   "category": "Caches",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "paths": [
+    "~/.config/Code/CachedData/*",
+    "~/.config/Code/CachedExtensionVSIXs/*",
+    "~/.config/Code/Cache/*",
+    "~/.config/Cursor/CachedData/*",
+    "~/.config/Cursor/CachedExtensionVSIXs/*",
+    "~/.config/Cursor/Cache/*"
+   ],
+   "comeback": "VS Code and Cursor rebuild their caches as you use them.",
+   "source": "https://code.visualstudio.com/docs/configure/extensions/extension-marketplace#_where-are-extensions-installed"
+  },
+  {
+   "id": "flatpak-unused",
+   "title": "Flatpak — unused runtimes",
+   "description": "Runs 'flatpak uninstall --unused -y' — removes Flatpak runtimes and extensions no installed app uses anymore (they pile up after updates). Apps and their data are never touched; never delete Flatpak folders by hand. Disabled by default: set \"enabled\": true on this rule after reviewing.",
+   "category": "System",
+   "os": [
+    "linux"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "flatpak uninstall --unused -y",
+   "requires": {
+    "binary": "flatpak"
+   },
+   "comeback": "An app that later needs a removed runtime downloads it again on its next launch.",
+   "source": "https://docs.flatpak.org/en/latest/flatpak-command-reference.html#flatpak-uninstall"
+  },
+  {
+   "id": "docker-builder-cache",
+   "title": "Docker — build cache",
+   "description": "Runs 'docker builder prune -f' — removes Docker's build cache only (the layers docker build compiled and stored). Images, containers and volumes are never touched. Disabled by default: set \"enabled\": true on this rule after reviewing.",
+   "category": "Development",
+   "os": [
+    "darwin",
+    "windows",
+    "linux"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "docker builder prune -f",
+   "requires": {
+    "binary": "docker"
+   },
+   "comeback": "Docker rebuilds the cache the next time you build the same images — the first build afterwards is slower.",
+   "source": "https://docs.docker.com/build/cache/#prune"
+  }
+ ]
+}

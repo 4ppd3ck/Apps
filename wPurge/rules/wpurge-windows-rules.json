@@ -1,0 +1,252 @@
+{
+ "version": 1,
+ "note": "Descale rules DB — Windows. Every rule is evaluated against the running OS, arch and machine (vars, requires, running apps) — a rule that does not apply simply reports 'unavailable'. Safety tiers: 'safe' = pre-selected and regenerable content; 'review' = never pre-checked, the user must opt in. Cleaning moves files to ~/.wpurge/trash (restorable via the journal); action 'delete' is permanent; action 'command' runs an explicit shell command and is disabled until you set enabled=true. Optional per-rule fields: source (docs link), comeback (how the content regenerates), minAgeSetting (read a user setting instead of minAgeDays — 'downloads' = the Downloads-age setting).",
+ "vars": [
+  {
+   "name": "localappdata",
+   "env": "LOCALAPPDATA"
+  },
+  {
+   "name": "appdata",
+   "env": "APPDATA"
+  },
+  {
+   "name": "userprofile",
+   "env": "USERPROFILE"
+  },
+  {
+   "name": "windir",
+   "env": "WINDIR",
+   "fallback": {
+    "windows": "C:\\Windows"
+   }
+  }
+ ],
+ "rules": [
+  {
+   "id": "win-user-temp",
+   "title": "User temp files",
+   "description": "%LOCALAPPDATA%\\Temp — leftover installers, log tails and crash scraps. Files locked by running programs simply fail to move and are reported, never forced.",
+   "category": "Caches",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "{localappdata}\\Temp\\*"
+   ]
+  },
+  {
+   "id": "win-crash-dumps",
+   "title": "Crash dumps",
+   "description": "Application crash minidumps in %LOCALAPPDATA%\\CrashDumps. Useful only while a bug is being debugged.",
+   "category": "Logs",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "paths": [
+    "{localappdata}\\CrashDumps\\*"
+   ]
+  },
+  {
+   "id": "win-error-reports",
+   "title": "Windows Error Reporting queue",
+   "description": "Queued and archived WER reports (%LOCALAPPDATA%\\Microsoft\\Windows\\WER). Already-submitted reports are safe to clear.",
+   "category": "Logs",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "paths": [
+    "{localappdata}\\Microsoft\\Windows\\WER\\ReportArchive\\*",
+    "{localappdata}\\Microsoft\\Windows\\WER\\ReportQueue\\*"
+   ]
+  },
+  {
+   "id": "win-shader-cache",
+   "title": "DirectX shader cache",
+   "description": "Compiled shader cache (%LOCALAPPDATA%\\D3DSCache). Rebuilt automatically; games may stutter for a few seconds on first launch afterwards.",
+   "category": "Caches",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "{localappdata}\\D3DSCache\\*"
+   ]
+  },
+  {
+   "id": "win-npm-cache",
+   "title": "npm — package cache",
+   "description": "npm's content-addressed store (%LOCALAPPDATA%\\npm-cache). Re-fetched on the next install.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "{localappdata}\\npm-cache\\*"
+   ]
+  },
+  {
+   "id": "win-pip-cache",
+   "title": "pip — download cache",
+   "description": "Downloaded wheels in %LOCALAPPDATA%\\pip\\Cache. Re-downloaded on the next install.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "{localappdata}\\pip\\Cache\\*"
+   ]
+  },
+  {
+   "id": "win-go-build-cache",
+   "title": "Go — build cache",
+   "description": "Compiled package cache (%LOCALAPPDATA%\\go-build). Regenerated from source on the next build.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "{localappdata}\\go-build\\*"
+   ]
+  },
+  {
+   "id": "win-gradle-cache",
+   "title": "Gradle — caches",
+   "description": "Dependency and build caches in %USERPROFILE%\\.gradle\\caches. Re-downloaded on the next Gradle run.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "{userprofile}\\.gradle\\caches\\*"
+   ]
+  },
+  {
+   "id": "win-maven-cache",
+   "title": "Maven — repository cache",
+   "description": "Downloaded artifacts in %USERPROFILE%\\.m2\\repository. Re-downloaded on the next build.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "{userprofile}\\.m2\\repository\\*"
+   ]
+  },
+  {
+   "id": "win-cargo-cache",
+   "title": "Rust — cargo registry cache",
+   "description": "Downloaded crates and extracted sources (%USERPROFILE%\\.cargo\\registry). Re-downloaded by the next build.",
+   "category": "Development",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "redownload",
+   "paths": [
+    "{userprofile}\\.cargo\\registry\\cache\\*",
+    "{userprofile}\\.cargo\\registry\\src\\*"
+   ]
+  },
+  {
+   "id": "win-thumbnail-cache",
+   "title": "Explorer thumbnail cache",
+   "description": "thumbcache_*.db files Explorer builds for folder previews. They regenerate as you browse; files locked by Explorer are skipped automatically.",
+   "category": "Caches",
+   "os": [
+    "windows"
+   ],
+   "safety": "safe",
+   "regen": "rebuild",
+   "paths": [
+    "{localappdata}\\Microsoft\\Windows\\Explorer\\thumbcache_*.db"
+   ]
+  },
+  {
+   "id": "win-downloads-installers",
+   "title": "Old installers in Downloads",
+   "description": ".exe/.msi/.zip files in Downloads older than the configured age — typically installers already applied. Newer files are never listed. The age (default 30 days) is set under ⚙️ Settings.",
+   "category": "Downloads",
+   "os": [
+    "windows"
+   ],
+   "safety": "review",
+   "minAgeDays": 30,
+   "minAgeSetting": "downloads",
+   "paths": [
+    "{userprofile}\\Downloads\\*.exe",
+    "{userprofile}\\Downloads\\*.msi",
+    "{userprofile}\\Downloads\\*.zip"
+   ]
+  },
+  {
+   "id": "win-update-cache",
+   "title": "Windows Update download cache",
+   "description": "%WINDIR%\\SoftwareDistribution\\Download — already-installed update packages. Needs an elevated Descale; stop the wuauserv service first if files are locked.",
+   "category": "System",
+   "os": [
+    "windows"
+   ],
+   "safety": "review",
+   "requiresAdmin": true,
+   "paths": [
+    "{windir}\\SoftwareDistribution\\Download\\*"
+   ]
+  },
+  {
+   "id": "win-prefetch",
+   "title": "Windows Prefetch",
+   "description": "%WINDIR%\\Prefetch traces. Windows rebuilds them; clearing gives a short-term 'faster first boot' and slightly slower launches until rebuilt. Needs an elevated Descale.",
+   "category": "System",
+   "os": [
+    "windows"
+   ],
+   "safety": "review",
+   "requiresAdmin": true,
+   "paths": [
+    "{windir}\\Prefetch\\*"
+   ]
+  },
+  {
+   "id": "win-delivery-optimization",
+   "title": "Delivery Optimization cache",
+   "description": "Runs the PowerShell cmdlet that clears Windows' peer-to-peer update distribution cache. Disabled by default — set \"enabled\": true after reviewing.",
+   "category": "System",
+   "os": [
+    "windows"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "powershell -NoProfile -Command \"Delete-DeliveryOptimizationCache -Force\"",
+   "requiresAdmin": true
+  },
+  {
+   "id": "win-recycle-bin",
+   "title": "Empty the Recycle Bin",
+   "description": "Runs Clear-RecycleBin -Force — permanent, cannot be undone, and (like on macOS) it must be run alone. Disabled by default.",
+   "category": "Trash",
+   "os": [
+    "windows"
+   ],
+   "safety": "review",
+   "action": "command",
+   "command": "powershell -NoProfile -Command \"Clear-RecycleBin -Force\"",
+   "permanent": true
+  }
+ ]
+}

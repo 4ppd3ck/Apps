@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -43,6 +44,18 @@ type descaleSettings struct {
 	// lives server-side because embedded webviews (AppDeck) may not keep
 	// localStorage between launches, which made the banner reappear.
 	Onboarded *bool `json:"onboarded,omitempty"`
+	// DownloadsMinAgeDays drives every rule tagged minAgeSetting "downloads"
+	// (the per-OS Downloads-installers rule): how old a file must be before
+	// it is offered for cleaning. nil = the rule's own minAgeDays (30).
+	DownloadsMinAgeDays *int `json:"downloadsMinAgeDays,omitempty"`
+	// DisabledExtras lists extra/user rule ids switched OFF under ⚙️
+	// Settings (absent = everything on). A disabled extra is dropped from
+	// scans; a disabled user override falls back to the built-in default.
+	DisabledExtras []string `json:"disabledExtras,omitempty"`
+	// CustomFolders are operator-added folders scanned as review-tier
+	// rules (⚙️ Settings → Folders to scan). Validated at add time against
+	// the guardrails; the engine re-checks every path inside at scan/clean.
+	CustomFolders []string `json:"customFolders,omitempty"`
 }
 
 func settingsPath() string {
@@ -101,6 +114,157 @@ func setGuardrailsEnabled(on bool) {
 	guardLoaded = true
 	guardMu.Unlock()
 	saveSettings(func(s *descaleSettings) { s.Guardrails = &on })
+}
+
+/* ---------- downloads age + extra-rule toggles ---------- */
+
+const (
+	downloadsAgeDefault = 30
+	downloadsAgeMin     = 1
+	downloadsAgeMax     = 3650
+)
+
+var (
+	ageMu        sync.Mutex
+	ageLoaded    bool
+	ageCached    int
+	extrasMu     sync.Mutex
+	extrasLoaded bool
+	extrasCached map[string]bool
+)
+
+// downloadsMinAge is the effective age cutoff for rules tagged
+// minAgeSetting "downloads". Defaults to the rule-era 30 days when the
+// setting has never been touched.
+func downloadsMinAge() int {
+	ageMu.Lock()
+	defer ageMu.Unlock()
+	if !ageLoaded {
+		ageCached = downloadsAgeDefault
+		if s := readSettings().DownloadsMinAgeDays; s != nil && *s >= downloadsAgeMin && *s <= downloadsAgeMax {
+			ageCached = *s
+		}
+		ageLoaded = true
+	}
+	return ageCached
+}
+
+// setDownloadsMinAge stores the age (validated) and updates the cache, so
+// the very next scan uses it.
+func setDownloadsMinAge(days int) {
+	ageMu.Lock()
+	ageCached = days
+	ageLoaded = true
+	ageMu.Unlock()
+	saveSettings(func(s *descaleSettings) { s.DownloadsMinAgeDays = &days })
+}
+
+// disabledExtrasSet is the set of extra/user rule ids currently switched
+// off under ⚙️ Settings. nil = everything on (fresh install default).
+func disabledExtrasSet() map[string]bool {
+	extrasMu.Lock()
+	defer extrasMu.Unlock()
+	if !extrasLoaded {
+		extrasCached = nil
+		if list := readSettings().DisabledExtras; len(list) > 0 {
+			extrasCached = map[string]bool{}
+			for _, id := range list {
+				if id = strings.TrimSpace(id); id != "" {
+					extrasCached[id] = true
+				}
+			}
+		}
+		extrasLoaded = true
+	}
+	return extrasCached
+}
+
+// disabledExtrasList is the persisted spelling of the same set.
+func disabledExtrasList() []string {
+	set := disabledExtrasSet()
+	if len(set) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setDisabledExtras replaces the off-list wholesale (the UI sends the full
+// checked state) and updates the cache for the next scan.
+func setDisabledExtras(ids []string) {
+	var clean []string
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			clean = append(clean, id)
+		}
+	}
+	extrasMu.Lock()
+	if len(clean) == 0 {
+		extrasCached = nil
+	} else {
+		extrasCached = map[string]bool{}
+		for _, id := range clean {
+			extrasCached[id] = true
+		}
+	}
+	extrasLoaded = true
+	extrasMu.Unlock()
+	saveSettings(func(s *descaleSettings) {
+		if len(clean) == 0 {
+			s.DisabledExtras = nil
+		} else {
+			s.DisabledExtras = clean
+		}
+	})
+}
+
+/* ---------- custom folders (folders to scan) ---------- */
+
+const customFoldersMax = 20 // keep a pathological add-list from ruling the scan
+
+var (
+	foldersMu     sync.Mutex
+	foldersLoaded bool
+	foldersCached []string
+)
+
+// customFoldersList returns the operator-added folders (already validated
+// when added; the engine re-checks every path inside at scan/clean time).
+func customFoldersList() []string {
+	foldersMu.Lock()
+	defer foldersMu.Unlock()
+	if !foldersLoaded {
+		foldersCached = nil
+		if list := readSettings().CustomFolders; len(list) > 0 {
+			foldersCached = append([]string(nil), list...)
+		}
+		foldersLoaded = true
+	}
+	return foldersCached
+}
+
+// setCustomFolders replaces the folder list and updates the cache, so the
+// very next scan sees it.
+func setCustomFolders(list []string) {
+	foldersMu.Lock()
+	if len(list) == 0 {
+		foldersCached = nil
+	} else {
+		foldersCached = append([]string(nil), list...)
+	}
+	foldersLoaded = true
+	foldersMu.Unlock()
+	saveSettings(func(s *descaleSettings) {
+		if len(list) == 0 {
+			s.CustomFolders = nil
+		} else {
+			s.CustomFolders = list
+		}
+	})
 }
 
 var (
@@ -183,6 +347,12 @@ func criticalTable() map[string]bool {
 	return critCache
 }
 
+// standardUserFolders is the shared list of the OS's per-user data
+// folders. buildCriticalTable protects them from every implicit scanner;
+// the custom-folder flow (an explicit operator pick) is the one place
+// they may be scanned — see tryAddCustomFolder.
+var standardUserFolders = []string{"Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies", "Videos", "Public"}
+
 // buildCriticalTable lists the protected locations: the leftover scan roots
 // themselves, the OS's system directories, the standard user folders, and
 // Descale's own state. Keys are lowercased exact directory paths — children
@@ -254,7 +424,7 @@ func buildCriticalTable(home string) map[string]bool {
 	}
 	// Standard user folders on every OS: no scanner proposes them today,
 	// but a future one must not be able to either.
-	for _, name := range []string{"Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies", "Videos", "Public"} {
+	for _, name := range standardUserFolders {
 		dirs = append(dirs, filepath.Join(home, name))
 	}
 	// Descale's own journal/trash and the OS trash: the restore path reads

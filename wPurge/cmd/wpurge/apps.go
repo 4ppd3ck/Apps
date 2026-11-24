@@ -170,10 +170,10 @@ type Leftover struct {
 func appDeckAppsDir() string {
 	// Per-OS AppDeck data layouts: the Windows launcher unpacks and imports
 	// into %LOCALAPPDATA%\AppDeck\Apps (LAUNCHER_DATA_DIR overrides it),
-	// macOS uses ~/Library/Application Support/AppDeck/Apps. The Windows
-	// branch previously returned the macOS spelling, so every AppDeck
-	// entry carried a nonexistent path and the fallback uninstaller had
-	// nothing to remove.
+	// macOS uses ~/Library/Application Support/AppDeck/Apps and Linux the
+	// XDG data dir ~/.local/share/AppDeck/Apps. Wrong-OS spellings made
+	// every AppDeck entry carry a nonexistent path and the fallback
+	// uninstaller had nothing to remove.
 	if v := os.Getenv("LAUNCHER_DATA_DIR"); v != "" {
 		return filepath.Join(v, "Apps")
 	}
@@ -181,6 +181,9 @@ func appDeckAppsDir() string {
 		if la := os.Getenv("LOCALAPPDATA"); la != "" {
 			return filepath.Join(la, "AppDeck", "Apps")
 		}
+	}
+	if runtime.GOOS == "linux" {
+		return filepath.Join(homeDir(), ".local", "share", "AppDeck", "Apps")
 	}
 	return filepath.Join(homeDir(), "Library", "Application Support", "AppDeck", "Apps")
 }
@@ -375,8 +378,10 @@ func desktopAppInfo(path, id string) AppInfo {
 	if noDisplay || info.Name == "" {
 		return AppInfo{Path: path, ID: id, Kind: "app"} // hidden entry
 	}
-	if info.Exe != "" && len(runningApps([]string{info.Exe})) > 0 {
-		info.Running = true
+	if info.Exe != "" {
+		if running, ok := runningApps([]string{info.Exe}); ok && len(running) > 0 {
+			info.Running = true
+		}
 	}
 	return info
 }
@@ -401,7 +406,7 @@ func appInfoFor(bundle string) AppInfo {
 	if exe == "" {
 		exe = strings.TrimSuffix(filepath.Base(bundle), ".app")
 	}
-	if len(runningApps([]string{exe})) > 0 {
+	if running, ok := runningApps([]string{exe}); ok && len(running) > 0 {
 		info.Running = true
 	}
 	return out(info)
@@ -1064,16 +1069,20 @@ type StartupItem struct {
 	KeepAlive bool   `json:"keepAlive"`
 	Active    bool   `json:"active"`
 	Scope     string `json:"scope"`          // user | system
-	Kind      string `json:"kind,omitempty"` // launchagent | runkey | startupfolder
+	Kind      string `json:"kind,omitempty"` // launchagent | runkey | startupfolder | autostart
 }
 
-// listStartup dispatches per OS: LaunchAgents on macOS/Linux, Run keys and
-// the Startup folder on Windows.
+// listStartup dispatches per OS: LaunchAgents on macOS, XDG autostart on
+// Linux, Run keys and the Startup folder on Windows.
 func listStartup() []StartupItem {
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		return listStartupWindows()
+	case "linux":
+		return listStartupLinux()
+	default:
+		return listStartupAgents()
 	}
-	return listStartupAgents()
 }
 
 func listStartupAgents() []StartupItem {
@@ -1144,11 +1153,164 @@ func (s *server) handleStartupToggle(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad request body")
 		return
 	}
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		s.startupToggleWindows(w, req.Path, req.Activate)
+	case "linux":
+		s.startupToggleLinux(w, req.Path, req.Activate)
+	default:
+		s.startupToggleAgents(w, req.Path, req.Activate)
+	}
+}
+
+// listStartupLinux reads XDG autostart entries: ~/.config/autostart (user)
+// and /etc/xdg/autostart (system, read-only). A deactivated entry is the
+// file renamed to <name>.desktop.disabled — reversible, no daemon state.
+// Hidden=true entries count as inactive even though their file is in place.
+func listStartupLinux() []StartupItem {
+	home := homeDir()
+	scopes := []struct{ dir, scope string }{
+		{filepath.Join(home, ".config", "autostart"), "user"},
+		{"/etc/xdg/autostart", "system"},
+	}
+	var out []StartupItem
+	for _, sc := range scopes {
+		paths, _ := filepath.Glob(filepath.Join(sc.dir, "*.desktop"))
+		disabled, _ := filepath.Glob(filepath.Join(sc.dir, "*.desktop.disabled"))
+		paths = append(paths, disabled...)
+		sort.Strings(paths)
+		for _, p := range paths {
+			it := StartupItem{
+				Path:   p,
+				Scope:  sc.scope,
+				Active: !strings.HasSuffix(p, ".disabled"),
+				Name:   filepath.Base(p),
+				Kind:   "autostart",
+			}
+			if d, err := readDesktopEntry(p); err == nil {
+				if v, ok := d["Name"]; ok {
+					it.Label = v
+				}
+				if v, ok := d["TryExec"]; ok && v != "" {
+					it.Program = v
+				} else if v, ok := d["Exec"]; ok {
+					it.Program = firstDesktopArg(v)
+				}
+				if _, hidden := d["Hidden"]; hidden && d["Hidden"] == "true" {
+					it.Active = false
+				}
+			}
+			if it.Label == "" {
+				it.Label = strings.TrimSuffix(strings.TrimSuffix(filepath.Base(p), ".disabled"), ".desktop")
+			}
+			out = append(out, it)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Scope != out[j].Scope {
+			return out[i].Scope == "user"
+		}
+		return out[i].Label < out[j].Label
+	})
+	return out
+}
+
+// readDesktopEntry parses the [Desktop Entry] group's simple key=value
+// lines (quotes stripped) — the subset the autostart listing needs.
+func readDesktopEntry(path string) (map[string]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	inEntry := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			inEntry = line == "[Desktop Entry]"
+			continue
+		}
+		if !inEntry {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			v = v[1 : len(v)-1]
+		}
+		out[strings.TrimSpace(k)] = v
+	}
+	return out, nil
+}
+
+// firstDesktopArg pulls the program name out of an Exec line ("vim -g +File
+// file:2:5" → "vim"), stripping field codes like %f/%u/%F.
+func firstDesktopArg(exec string) string {
+	f := strings.Fields(exec)
+	for _, a := range f {
+		if strings.HasPrefix(a, "%") || strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+// startupToggleLinux renames the user autostart entry to/from
+// .desktop.disabled. System entries (/etc/xdg/autostart) are read-only —
+// they need root, and wPurge never runs as root.
+func (s *server) startupToggleLinux(w http.ResponseWriter, path string, activate bool) {
+	var it *StartupItem
+	for _, item := range listStartupLinux() {
+		if item.Path == path {
+			it = &item
+			break
+		}
+	}
+	if it == nil {
+		fail(w, http.StatusBadRequest, "startup item is not in the scanned list")
 		return
 	}
-	s.startupToggleAgents(w, req.Path, req.Activate)
+	if it.Scope != "user" {
+		fail(w, http.StatusForbidden, "system-wide autostart entries (/etc/xdg/autostart) need an administrator — wPurge manages only your own autostart entries (~/.config/autostart)")
+		return
+	}
+	var from, to string
+	if activate {
+		if !strings.HasSuffix(it.Path, ".disabled") {
+			fail(w, http.StatusBadRequest, "item is already active")
+			return
+		}
+		from, to = it.Path, strings.TrimSuffix(it.Path, ".disabled")
+	} else {
+		if strings.HasSuffix(it.Path, ".disabled") {
+			fail(w, http.StatusBadRequest, "item is already deactivated")
+			return
+		}
+		from, to = it.Path, it.Path+".disabled"
+	}
+	if err := os.Rename(from, to); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	entry := JournalEntry{
+		ID:       fmt.Sprintf("e%d", time.Now().UnixNano()),
+		At:       time.Now().UTC().Format(time.RFC3339),
+		Action:   "startup",
+		Name:     it.Label,
+		Commands: []string{fmt.Sprintf("renamed %s → %s", from, to)},
+		Rules:    []string{"autostart"},
+	}
+	entry.Items = []JournalItem{{Path: from, Trash: filepath.Base(to)}}
+	s.saveJournal(entry)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "active": activate,
+		"output": "renamed " + filepath.Base(from) + " → " + filepath.Base(to)})
 }
 
 func (s *server) startupToggleAgents(w http.ResponseWriter, path string, activate bool) {

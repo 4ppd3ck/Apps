@@ -2,6 +2,32 @@ package wtower
 
 import "fmt"
 
+// normalizeWidth accepts panel widths as column spans on the 12-column grid
+// (integers 1–12, decoded from JSON as float64) and maps the legacy named
+// widths saved by older builds, so existing arrangements keep working.
+func normalizeWidth(value any) (int, bool) {
+	switch value := value.(type) {
+	case int:
+		if value >= 1 && value <= 12 {
+			return value, true
+		}
+	case float64:
+		if value >= 1 && value <= 12 && value == float64(int(value)) {
+			return int(value), true
+		}
+	case string:
+		switch value {
+		case "full":
+			return 12, true
+		case "half":
+			return 6, true
+		case "third":
+			return 4, true
+		}
+	}
+	return 0, false
+}
+
 var tableVisibilityDefaults = map[string]bool{
 	"traffic-panel":            true,
 	"traffic-totals-panel":     true,
@@ -38,12 +64,12 @@ func dashboardLayout(cfg *Config) map[string]any {
 	panelLocks := map[string]any{}
 	collapsed := map[string]any{}
 	for _, panel := range dashboardLayoutOrder {
-		widths[panel] = "full"
+		widths[panel] = 12
 		panelLocks[panel] = false
 		collapsed[panel] = false
 	}
-	widths["top-apps-panel"] = "half"
-	widths["connection-summary-panel"] = "half"
+	widths["top-apps-panel"] = 6
+	widths["connection-summary-panel"] = 6
 	locked := false
 	if saved, ok := cfg.Data["dashboard_layout"].(map[string]any); ok {
 		var savedOrder []any
@@ -78,8 +104,8 @@ func dashboardLayout(cfg *Config) map[string]any {
 		if savedWidths, ok := saved["widths"].(map[string]any); ok {
 			for id, width := range savedWidths {
 				if _, valid := tableVisibilityDefaults[id]; valid {
-					if value, ok := width.(string); ok && (value == "full" || value == "half" || value == "third") {
-						widths[id] = value
+					if span, ok := normalizeWidth(width); ok {
+						widths[id] = span
 					}
 				}
 			}
@@ -171,11 +197,11 @@ func saveDashboardLayout(cfg *Config, value any) (map[string]any, error) {
 			}
 			switch key {
 			case "widths":
-				width, ok := item.(string)
-				if !ok || (width != "full" && width != "half" && width != "third") {
+				span, ok := normalizeWidth(item)
+				if !ok {
 					return nil, fmt.Errorf("invalid width for %q", id)
 				}
-				current[id] = width
+				current[id] = span
 			case "heights":
 				height, ok := item.(float64)
 				if !ok || height < 180 || height > 1200 {
@@ -225,16 +251,16 @@ func reportLayout(cfg *Config) map[string]any {
 	panelLocks := map[string]any{}
 	collapsed := map[string]any{}
 	for _, panel := range reportLayoutOrder {
-		widths[panel] = "full"
+		widths[panel] = 12
 		panelLocks[panel] = false
 		collapsed[panel] = false
 	}
 	// the GlassWire-ish defaults: the two small tables sit beside their
 	// donuts at half width, the wide sites table spans the row
-	widths["report-screen-panel"] = "half"
-	widths["report-protos-panel"] = "half"
-	widths["report-usage-panel"] = "half"
-	widths["report-byapp-panel"] = "half"
+	widths["report-screen-panel"] = 6
+	widths["report-protos-panel"] = 6
+	widths["report-usage-panel"] = 6
+	widths["report-byapp-panel"] = 6
 	locked := false
 	if saved, ok := cfg.Data["report_layout"].(map[string]any); ok {
 		var savedOrder []any
@@ -271,8 +297,8 @@ func reportLayout(cfg *Config) map[string]any {
 				if !validReportPanel(id) {
 					continue
 				}
-				if value, ok := width.(string); ok && (value == "full" || value == "half" || value == "third") {
-					widths[id] = value
+				if span, ok := normalizeWidth(width); ok {
+					widths[id] = span
 				}
 			}
 		}
@@ -374,11 +400,11 @@ func saveReportLayout(cfg *Config, value any) (map[string]any, error) {
 			}
 			switch key {
 			case "widths":
-				width, ok := item.(string)
-				if !ok || (width != "full" && width != "half" && width != "third") {
+				span, ok := normalizeWidth(item)
+				if !ok {
 					return nil, fmt.Errorf("invalid width for %q", id)
 				}
-				current[id] = width
+				current[id] = span
 			case "heights":
 				height, ok := item.(float64)
 				if !ok || height < 180 || height > 1200 {

@@ -123,6 +123,16 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.json(w, map[string]any{"exclusions": s.exclusions.List()})
 	case "/api/sensitive":
 		s.json(w, s.engine.SensitiveSnapshot())
+	case "/api/ports":
+		ports := s.engine.PortSnapshot()
+		up, _, _, _, conns := s.monitor.Snapshot()
+		ports.ConnectionsAvailable = up
+		if up {
+			ports.Connections = portConnectionsFromMonitor(conns)
+		} else {
+			ports.Connections = []PortConnection{}
+		}
+		s.json(w, ports)
 	case "/api/permissions/remove":
 		if r.Method != http.MethodPost {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
@@ -307,6 +317,26 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition",
 			"attachment; filename=whawk-alerts-"+time.Now().Format("20060102-150405")+".json")
 		w.Write(raw)
+	case "/api/events":
+		// structured log export: every alert as one JSON line (JSONL/ndjson),
+		// oldest first, ready for jq / SIEMs / scripts. ?since_id=N returns
+		// only newer alerts, so incremental pulls stay cheap.
+		sinceID := int64(0)
+		if v, err := strconv.ParseInt(r.URL.Query().Get("since_id"), 10, 64); err == nil && v > 0 {
+			sinceID = v
+		}
+		alerts := s.store.Alerts(0, "") // newest-first; walk backwards
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			"attachment; filename=whawk-events-"+time.Now().Format("20060102-150405")+".jsonl")
+		enc := json.NewEncoder(w)
+		for i := len(alerts) - 1; i >= 0; i-- {
+			a := alerts[i]
+			if a.ID <= sinceID {
+				continue
+			}
+			_ = enc.Encode(a)
+		}
 	case "/api/stream":
 		s.serveSSE(w, r)
 	default:

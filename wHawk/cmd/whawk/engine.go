@@ -30,6 +30,8 @@ type Engine struct {
 	lastScan  map[string][]Finding // check -> latest findings (all, incl. transient)
 	zombie    map[int]float64
 	sensitive SensitiveSnapshot // latest Live Access scan (served at /api/sensitive)
+	ports     PortScan          // latest local port inventory (served at /api/ports)
+	power     *PowerReader      // battery/low-power state behind the adaptive ticks
 	started   time.Time
 	stopCh    chan struct{}
 }
@@ -42,6 +44,7 @@ func NewEngine(rules *Rules, store *Store, monitor *Monitor, intel *Intel,
 		statuses: map[string]*CheckStatus{},
 		lastScan: map[string][]Finding{},
 		zombie:   map[int]float64{},
+		power:    NewPowerReader(),
 		started:  time.Now(),
 		stopCh:   make(chan struct{}),
 	}
@@ -96,6 +99,14 @@ func (e *Engine) defineChecks() {
 				}
 				return out
 			}},
+		{Check{Name: "ports", Description: "Local TCP listeners and bound UDP ports, with service guidance and exposure risk", Interval: "fast"},
+			func() []Finding {
+				scan := scanLocalPorts()
+				e.mu.Lock()
+				e.ports = scan
+				e.mu.Unlock()
+				return localPortFindings(scan)
+			}},
 		{Check{Name: "mitm", Description: "Gateway MAC change, ARP conflicts/spoofing, DNS resolver change, rebinding probe", Interval: "fast"},
 			func() []Finding { return mitmFindings(e.store, e.rules) }},
 		{Check{Name: "persistence", Description: "New launch agents/daemons, cron, autostart, systemd units, Run keys, startup folders", Interval: "slow"},
@@ -126,25 +137,55 @@ func (e *Engine) defineChecks() {
 // set holds the ordered check list (declared above).
 
 func (e *Engine) Run() {
-	slowTick := time.NewTicker(time.Duration(e.effectiveSlow()) * time.Second)
-	defer slowTick.Stop()
 	fastTick := time.NewTicker(time.Duration(e.effectiveFast()) * time.Second)
 	defer fastTick.Stop()
+	slowTick := time.NewTicker(time.Duration(e.effectiveSlow()) * time.Second)
+	defer slowTick.Stop()
 
 	e.intel.Poll() // prime the known-IP tables before the first scan
 	e.runOnce("fast")
 	e.runOnce("slow")
+	curFactor := e.powerFactorNow()
 	for {
 		select {
 		case <-e.stopCh:
 			return
 		case <-fastTick.C:
 			e.runOnce("fast")
+			// Adaptive ticks: on battery / Low Power Mode the cadence
+			// stretches (rules.fixed_ticks opts out). Power state is re-read
+			// on every fast fire, so plugging in restores full speed within
+			// one interval. Both tickers re-phase together.
+			if f := e.powerFactorNow(); f != curFactor {
+				curFactor = f
+				fastTick.Reset(time.Duration(e.effectiveFast()*f) * time.Second)
+				slowTick.Reset(time.Duration(e.effectiveSlow()*f) * time.Second)
+				e.broadcastPower(f)
+			}
 		case <-slowTick.C:
 			e.intel.Poll() // refresh known-IP tables on the slow cadence
 			e.runOnce("slow")
 		}
 	}
+}
+
+// powerFactorNow is the live scan-interval multiplier for the current power
+// state — 1 when rules.fixed_ticks disables adaptivity (or the reader is
+// absent, e.g. hand-built engines in tests).
+func (e *Engine) powerFactorNow() int {
+	if e.rules.FixedTicks || e.power == nil {
+		return 1
+	}
+	return e.power.Snapshot().Factor
+}
+
+// broadcastPower tells the dashboard the scan cadence changed with power.
+func (e *Engine) broadcastPower(f int) {
+	st := e.power.Snapshot()
+	e.hub.Broadcast(map[string]any{
+		"type": "power", "mode": string(st.Mode), "factor": f,
+		"tick_s": e.effectiveFast() * f, "slow_s": e.effectiveSlow() * f,
+	})
 }
 
 // effectiveFast/effectiveSlow are the tick lengths Run() schedules with —
@@ -229,6 +270,12 @@ func (e *Engine) runOnce(interval string) {
 		}
 		t0 := time.Now()
 		findings := cd.fn()
+		// plain-English layer: badge + one-sentence explanation on every
+		// finding — alerts and notifications inherit both via Record
+		for i := range findings {
+			findings[i].Verdict = verdictFor(findings[i])
+			findings[i].Plain = plainFor(findings[i])
+		}
 		ms := time.Since(t0).Milliseconds()
 
 		e.mu.Lock()
@@ -244,7 +291,8 @@ func (e *Engine) runOnce(interval string) {
 			if f.Title == "Process scan unavailable" || f.Title == "Socket scan unavailable" ||
 				f.Title == "Network baseline unavailable" || f.Title == "Persistence scan unavailable" ||
 				f.Title == "Permission database not readable" || f.Title == "Firewall scan unavailable" ||
-				f.Title == "Sensitive access scan unavailable" {
+				f.Title == "Sensitive access scan unavailable" ||
+				f.Title == "Local port scan unavailable" || f.Title == "Local port scan incomplete" {
 				unavailable = true
 				st.Reason = f.Detail
 			}
@@ -311,6 +359,10 @@ func (e *Engine) dispatch(findings []Finding) {
 func (e *Engine) Status() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// power state behind the adaptive ticks (safe under e.mu: the reader
+	// carries its own lock and never calls back)
+	f := e.powerFactorNow()
+	st := e.power.Snapshot()
 	infos := []*CheckStatus{}
 	for _, cd := range e.set {
 		if st, ok := e.statuses[cd.def.Name]; ok {
@@ -330,10 +382,16 @@ func (e *Engine) Status() map[string]any {
 		"scan":     e.lastScan,
 		"notify":   e.rules.Notify,
 		"wgrid":    e.intel.Summary(),
-		// effective tick lengths, same clamps Run() applies — the dashboard
-		// shows what the scanner really does, not the raw config
-		"tick_s": e.effectiveFast(),
-		"slow_s": e.effectiveSlow(),
+		// effective tick lengths including the power factor — the dashboard
+		// shows what the scanner really does right now, not the raw config
+		"tick_s": e.effectiveFast() * f,
+		"slow_s": e.effectiveSlow() * f,
+		"power": map[string]any{
+			"mode":     string(st.Mode),
+			"factor":   f,
+			"detail":   st.Detail,
+			"adaptive": !e.rules.FixedTicks,
+		},
 	}
 }
 
@@ -385,4 +443,11 @@ func (e *Engine) SensitiveSnapshot() SensitiveSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.sensitive
+}
+
+// PortSnapshot returns the latest local socket inventory.
+func (e *Engine) PortSnapshot() PortScan {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.ports
 }
