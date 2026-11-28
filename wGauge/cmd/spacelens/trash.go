@@ -7,7 +7,6 @@ package main
 // uses the VisualBasic recycle-bin API via PowerShell; Linux uses gio.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -27,15 +26,10 @@ type deleteResult struct {
 }
 
 func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.fail(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
 	var req struct {
 		Paths []string `json:"paths"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		s.fail(w, http.StatusBadRequest, "bad request body")
+	if !s.decodeJSON(w, r, &req) {
 		return
 	}
 	if len(req.Paths) == 0 || len(req.Paths) > maxDeleteBatch {
@@ -64,21 +58,14 @@ func guardTrashPath(p string) error {
 	if p == "" {
 		return errors.New("empty path")
 	}
-	switch runtime.GOOS {
-	case "windows":
-		if len(p) < 3 || p[1] != ':' {
-			return errors.New("absolute path required")
-		}
-		if p == filepath.Dir(p) {
-			return fmt.Errorf("refusing to trash a drive root: %s", p)
-		}
-	default:
-		if !strings.HasPrefix(p, "/") {
-			return errors.New("absolute path required")
-		}
-		if p == "/" {
-			return errors.New("refusing to trash the filesystem root")
-		}
+	// Clean before testing: "//", "/.", "/Users/.." and "C:/" all name a root
+	// yet differ from it as strings, so uncleaned they slip past the checks.
+	p = filepath.Clean(p)
+	if !filepath.IsAbs(p) {
+		return errors.New("absolute path required")
+	}
+	if p == filepath.Dir(p) {
+		return fmt.Errorf("refusing to trash a filesystem or drive root: %s", p)
 	}
 	return nil
 }
@@ -97,7 +84,11 @@ func trashPath(p string) error {
 		if err != nil {
 			return errors.New("no trash tool found — install gio (gvfs)")
 		}
-		return exec.Command(gio, "trash", "--", p).Run()
+		out, err := exec.Command(gio, "trash", "--", p).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gio trash failed: %s", strings.TrimSpace(string(out)))
+		}
+		return nil
 	}
 }
 
@@ -113,6 +104,12 @@ func trashByRename(p string) error {
 		return err
 	}
 	base := filepath.Base(p)
+	// "name.ext" is split so the counter lands before the extension; a
+	// dotfile (".hidden") has none, or it would come back as " (2).hidden".
+	stem, ext := base, ""
+	if i := strings.LastIndexByte(base, '.'); i > 0 {
+		stem, ext = base[:i], base[i:]
+	}
 	dest := filepath.Join(trash, base)
 	for i := 2; ; i++ {
 		if _, err := os.Lstat(dest); err != nil {
@@ -121,8 +118,7 @@ func trashByRename(p string) error {
 		if i > 9999 {
 			return errors.New("no free name in Trash")
 		}
-		ext := filepath.Ext(base)
-		dest = filepath.Join(trash, fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(base, ext), i, ext))
+		dest = filepath.Join(trash, fmt.Sprintf("%s (%d)%s", stem, i, ext))
 	}
 	return os.Rename(p, dest)
 }
@@ -140,7 +136,9 @@ tell application "Finder" to delete f`, esc)
 
 func trashWindows(p string) error {
 	fn := "DeleteFile"
-	if info, err := os.Stat(p); err == nil && info.IsDir() {
+	// Lstat, not Stat: a directory link is recycled as the link itself,
+	// never resolved to (and emptied into) its target
+	if info, err := os.Lstat(p); err == nil && info.IsDir() {
 		fn = "DeleteDirectory"
 	}
 	esc := strings.ReplaceAll(p, "'", "''")

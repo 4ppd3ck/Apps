@@ -207,26 +207,32 @@ func NewStore(dbPath string) (*Store, error) {
 // connection_history (databases created before the site-visit sessions
 // existed). Each lifecycle accumulates the socket's cumulative counters,
 // which is what makes per-visit byte sums exact.
-func migrateConnectionBytes(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(connection_history)")
+// tableHasColumn reports whether the table already has that column
+// (the shared PRAGMA table_info probe behind the migrations).
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
-	hasBytes := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notNull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return err
+			return false, err
 		}
-		if name == "bytes_in" {
-			hasBytes = true
+		if name == column {
+			return true, nil
 		}
 	}
-	if err := rows.Err(); err != nil {
+	return false, rows.Err()
+}
+
+func migrateConnectionBytes(db *sql.DB) error {
+	hasBytes, err := tableHasColumn(db, "connection_history", "bytes_in")
+	if err != nil {
 		return err
 	}
 	if hasBytes {
@@ -245,25 +251,8 @@ func migrateConnectionBytes(db *sql.DB) error {
 // table (databases created before allow rules existed; CREATE TABLE IF NOT
 // EXISTS alone never alters an existing table).
 func migrateBlocksAction(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(blocks)")
+	hasAction, err := tableHasColumn(db, "blocks", "action")
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	hasAction := false
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == "action" {
-			hasAction = true
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if hasAction {
@@ -399,8 +388,8 @@ func (s *Store) Query(category string, since float64, limit int, kinds []string)
 	args = append(args, limit)
 
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	rows, err := s.db.Query(sqlStr, args...)
-	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -458,10 +447,10 @@ func nullAny(v sql.NullString) any {
 // Counts returns {category: {kind: n}} for events newer than since.
 func (s *Store) Counts(since float64) (map[string]map[string]int64, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	rows, err := s.db.Query(
 		`SELECT category, kind, COUNT(*) FROM events WHERE ts > ?`+
 			` GROUP BY category, kind`, since)
-	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -518,6 +507,8 @@ const usageRollupMinDays = 35
 
 // DeleteUsageDailyAll wipes the report rollup (the "delete everything" purge).
 func (s *Store) DeleteUsageDailyAll() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM usage_daily")
 	return err
 }
@@ -532,6 +523,8 @@ func (s *Store) pruneUsageDaily(days int) error {
 	if days < usageRollupMinDays {
 		days = usageRollupMinDays
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec("DELETE FROM usage_daily WHERE day < ?",
 		LocalDay(Now()-float64(days)*86400))
 	return err
@@ -1390,8 +1383,8 @@ func nullStr(v sql.NullString) *string {
 // ListBlocks returns all rules, newest first.
 func (s *Store) ListBlocks() ([]*Block, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	rows, err := s.db.Query("SELECT " + blockCols + " FROM blocks ORDER BY ts DESC")
-	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -1410,8 +1403,8 @@ func (s *Store) ListBlocks() ([]*Block, error) {
 // GetBlock returns one rule or nil.
 func (s *Store) GetBlock(bid int64) (*Block, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	row := s.db.QueryRow("SELECT "+blockCols+" FROM blocks WHERE id=?", bid)
-	s.mu.Unlock()
 	b, err := scanBlock(row.Scan)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1450,8 +1443,8 @@ const dnsRuleCols = `id, ts, type, action, value, detail`
 // ListDNSRules returns all DNS rules, newest first.
 func (s *Store) ListDNSRules() ([]*DNSRule, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	rows, err := s.db.Query("SELECT " + dnsRuleCols + " FROM dns_rules ORDER BY ts DESC")
-	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -1519,31 +1512,7 @@ func (b *EventBus) Publish(ev *Event) *Event {
 	if err := b.store.Insert(ev); err != nil {
 		fmt.Printf("[bus] store error: %v\n", err)
 	}
-	payload, err := json.Marshal(map[string]any{"type": "event", "data": ev})
-	if err != nil {
-		return ev
-	}
-	b.mu.Lock()
-	subs := make([]chan string, 0, len(b.subs))
-	for q := range b.subs {
-		subs = append(subs, q)
-	}
-	b.mu.Unlock()
-	for _, q := range subs {
-		select {
-		case q <- string(payload):
-		default:
-			// drop oldest, keep stream live
-			select {
-			case <-q:
-			default:
-			}
-			select {
-			case q <- string(payload):
-			default:
-			}
-		}
-	}
+	b.PublishRaw(map[string]any{"type": "event", "data": ev})
 	return ev
 }
 

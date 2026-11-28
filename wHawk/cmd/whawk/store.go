@@ -130,31 +130,20 @@ func (s *Store) load() {
 }
 
 func (s *Store) saveAlertsLocked() {
-	raw, err := json.MarshalIndent(s.alerts, "", " ")
-	if err != nil {
-		return
-	}
-	tmp := filepath.Join(s.dir, "alerts.json.tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(s.dir, "alerts.json"))
-	}
+	_ = SaveJSON(filepath.Join(s.dir, "alerts.json"), s.alerts)
 }
 
 func (s *Store) saveBaselineLocked() {
-	raw, err := json.MarshalIndent(s.baseline, "", " ")
-	if err != nil {
-		return
-	}
-	tmp := filepath.Join(s.dir, "baseline.json.tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(s.dir, "baseline.json"))
-	}
+	_ = SaveJSON(filepath.Join(s.dir, "baseline.json"), s.baseline)
 }
 
-// Record converts a finding into (or bumps) an alert. Returns the alert when
+// Record converts a finding into (or bumps) an alert. autoAck stores the
+// alert pre-acked (intel autoack / exclusion scopes): history and counts
+// only, no SSE beep, no notification. Returns a snapshot of the alert when
 // it is new or its notify window elapsed, so the caller can push a desktop
-// notification; the returned bool says whether to re-notify.
-func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
+// notification; the bool says whether to re-notify. The snapshot is a copy
+// — Record keeps mutating the stored row, and callers marshal what they got.
+func (s *Store) Record(f Finding, renotifyAfter time.Duration, autoAck bool) (*Alert, bool) {
 	if f.Fingerprint == "" {
 		return nil, false
 	}
@@ -171,6 +160,9 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 			a.Detail = f.Detail
 			a.Plain = f.Plain
 			a.Evidence = f.Evidence
+			if autoAck {
+				a.Acked = true
+			}
 			// Acked means "seen, stop nudging me": the alert row still counts
 			// occurrences, but desktop/webhook re-notifications stay off until
 			// the row is deleted (a fresh observation then alerts anew).
@@ -180,8 +172,9 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 				s.notifyAt[a.Fingerprint] = now
 			}
 			s.saveAlertsLocked()
-			s.hub.Broadcast(map[string]any{"type": "alert", "alert": a})
-			return a, reNotify
+			snapshot := *a
+			s.hub.Broadcast(map[string]any{"type": "alert", "alert": &snapshot})
+			return &snapshot, reNotify
 		}
 	}
 	a := &Alert{
@@ -197,6 +190,7 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 		Evidence:    f.Evidence,
 		Fingerprint: f.Fingerprint,
 		Count:       1,
+		Acked:       autoAck,
 		NotifiedTs:  now,
 	}
 	s.nextID++
@@ -208,8 +202,10 @@ func (s *Store) Record(f Finding, renotifyAfter time.Duration) (*Alert, bool) {
 		s.alerts = s.alerts[:2000]
 	}
 	s.saveAlertsLocked()
-	s.hub.Broadcast(map[string]any{"type": "alert", "alert": a})
-	return a, true
+	snapshot := *a
+	s.hub.Broadcast(map[string]any{"type": "alert", "alert": &snapshot})
+	// a brand-new unacked alert notifies; an auto-acked one is history-only
+	return &snapshot, !a.Acked
 }
 
 // BaselineKey returns a typed value from baseline.json, creating it if absent.
@@ -252,6 +248,9 @@ func (s *Store) BaselineList() map[string]any {
 	return out
 }
 
+// Alerts returns snapshot copies matching the filters. Copies, not the
+// stored rows: Record bumps Count/Ts/Acked on live alerts while these are
+// marshalled out over HTTP.
 func (s *Store) Alerts(since float64, minSev string) []*Alert {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,7 +262,8 @@ func (s *Store) Alerts(since float64, minSev string) []*Alert {
 		if minSev != "" && !SevGE(a.Severity, minSev) {
 			continue
 		}
-		out = append(out, a)
+		snapshot := *a
+		out = append(out, &snapshot)
 	}
 	return out
 }
@@ -278,21 +278,6 @@ func (s *Store) Ack(id int64, all bool) {
 	}
 	s.saveAlertsLocked()
 	s.hub.Broadcast(map[string]any{"type": "ack"})
-}
-
-// AckByFingerprint pre-acks any alert matching fingerprint (used by the
-// intel "autoack" mode: known-provider alerts stay in history with counts
-// but never notify). Missing matches are fine — Record calls this right
-// after creating or bumping the alert.
-func (s *Store) AckByFingerprint(fingerprint string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, a := range s.alerts {
-		if a.Fingerprint == fingerprint {
-			a.Acked = true
-		}
-	}
-	s.saveAlertsLocked()
 }
 
 // AckExcluded pre-acks every unacked alert the given predicate silences —

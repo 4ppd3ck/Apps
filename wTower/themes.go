@@ -107,8 +107,7 @@ func (c *Config) SetTheme(id string) (Theme, error) {
 	if !ok {
 		return Theme{}, fmt.Errorf("unknown theme %q", id)
 	}
-	c.Data["theme"] = theme.ID
-	if err := c.Save(); err != nil {
+	if err := c.Update(func(data map[string]any) { data["theme"] = theme.ID }); err != nil {
 		return Theme{}, fmt.Errorf("save theme selection: %w", err)
 	}
 	return theme, nil

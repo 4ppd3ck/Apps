@@ -18,12 +18,12 @@ const api = async (path, body) => {
 let tree = null;      // root Node of the last finished scan
 let focus = null;     // node currently in the middle
 let hover = null;     // node under the cursor
-let scanning = false;
 let pollTimer = null;
 let view = 'sun';                 // sun | treemap | bars
 let pendingRoots = [];            // multi-scan list shown as chips
 let lastRoots = [];               // last scanned roots (rescan after trash)
 const selected = new Map();       // path -> display name
+let pendingTrash = [];
 const PICK = '__pick__';          // dropdown sentinel: open the OS picker
 const rootSel = $('#rootSel');
 
@@ -118,12 +118,18 @@ function drawEmptyState(x, y) {
   ctx.fillText('dropdown ends with 📁 Choose folder or volume… for anything custom', x, y + 14);
 }
 
-function drawSun() {
+// size the square canvas for the device pixel ratio; returns its CSS size
+function prepCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const size = canvas.clientWidth || 900;
   canvas.width = size * dpr; canvas.height = size * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, size, size);
+  return size;
+}
+
+function drawSun() {
+  const size = prepCanvas();
   const cx = size / 2, cy = size / 2;
   const rMax = size / 2 - 6;
   const rMin = rMax * 0.22;
@@ -289,7 +295,10 @@ function layoutTreemap(node, x, y, w, h, depth) {
   for (const r of squarifyLayout(items, x, y, w, h)) {
     r.depth = depth;
     tmCells.push(r);
-    if (r.node.isDir && !r.node.residual && depth + 1 < TM_DEPTH && r.w > 8 && r.h > 8) {
+    // subdivide only folders with something to show: recursing into an empty
+    // one would push a second, inset cell for the very same node
+    if (r.node.isDir && !r.node.residual && depth + 1 < TM_DEPTH && r.w > 8 && r.h > 8 &&
+        (r.node.children || []).some(c => c.size > 0)) {
       layoutTreemap(r.node, r.x + 1, r.y + 1, r.w - 2, r.h - 2, depth + 1);
     }
   }
@@ -302,11 +311,7 @@ function clipText(s, maxW) {
 }
 
 function drawTreemap() {
-  const dpr = window.devicePixelRatio || 1;
-  const size = canvas.clientWidth || 900;
-  canvas.width = size * dpr; canvas.height = size * dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, size, size);
+  const size = prepCanvas();
   if (!focus) {
     drawEmptyState(size / 2, size / 2);
     return;
@@ -360,7 +365,7 @@ function renderBarsView() {
       <input type="checkbox" class="pick" data-path="${esc(c.path || '')}" data-name="${esc(c.name)}"
              aria-label="Select ${esc(c.name)}"
              ${c.path && selected.has(c.path) ? 'checked' : ''} ${c.path ? '' : 'disabled title="aggregate of smaller items"'}>
-      <span class="b-name" title="${esc(c.path || c.name)}">${esc(c.name)}</span>
+      <button class="b-name" type="button" title="${esc(c.path || c.name)}">${esc(c.name)}</button>
       <span class="b-track"><span class="b-fill${c.residual ? ' res' : ''}" style="width:${max ? (c.size / max * 100).toFixed(2) : 0}%;${c.residual ? '' : 'background:' + colorFor(c, 1)}"></span></span>
       <span class="b-size">${fmtBytes(c.size)}</span>
     </div>`).join('') : '<p class="muted">No items inside — this is a single file.</p>');
@@ -369,9 +374,9 @@ function renderBarsView() {
 }
 
 function wireBars(host) {
-  host.querySelectorAll('.bar-row').forEach(row => {
-    row.addEventListener('click', (e) => {
-      if (e.target.tagName === 'INPUT') return;
+  host.querySelectorAll('.bar-row .b-name').forEach(button => {
+    button.addEventListener('click', () => {
+      const row = button.closest('.bar-row');
       const c = barsKids[+row.dataset.i];
       if (!c) return;
       if (c.isDir) { focus = c; hover = null; draw(); renderSel(); }
@@ -426,10 +431,29 @@ canvas.addEventListener('click', (e) => {
 
 document.querySelectorAll('#views button').forEach(b =>
   b.addEventListener('click', () => setView(b.dataset.view)));
+$('#views').addEventListener('keydown', (e) => {
+  const tabs = [...$('#views').querySelectorAll('[role="tab"]')];
+  const current = tabs.indexOf(document.activeElement);
+  let next = current;
+  if (e.key === 'ArrowRight') next = (current + 1) % tabs.length;
+  else if (e.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+  else if (e.key === 'Home') next = 0;
+  else if (e.key === 'End') next = tabs.length - 1;
+  else return;
+  e.preventDefault();
+  tabs[next].focus();
+  setView(tabs[next].dataset.view);
+});
 function setView(v) {
   view = v;
-  document.querySelectorAll('#views button').forEach(b =>
-    b.classList.toggle('active', b.dataset.view === v));
+  document.querySelectorAll('#views button').forEach(b => {
+    const active = b.dataset.view === v;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+    b.tabIndex = active ? 0 : -1;
+  });
+  const activeTab = document.querySelector(`#views [data-view="${CSS.escape(v)}"]`);
+  if (activeTab) $('#chartPanel').setAttribute('aria-labelledby', activeTab.id);
   hover = null; $('#tip').hidden = true;
   draw();
 }
@@ -459,6 +483,7 @@ function renderSel() {
       ${n.path ? `<label class="pick-row"><input type="checkbox" class="pick" data-path="${esc(n.path)}" data-name="${esc(n.name)}" ${selected.has(n.path) ? 'checked' : ''}> Select for trash</label>` : ''}
       ${canReveal ? `<div class="actions">
         <button class="btn ghost small" id="revealBtn" title="Open in the OS file manager">📂 Reveal</button>
+        ${n.isDir ? '<button class="btn ghost small" id="cleanBtn" title="Open wPurge\'s Clean view — its guarded cleanup endpoints do the actual work">🧹 Hand to Clean</button>' : ''}
         <button class="btn danger-ghost small" id="trashBtn" title="Move this to the OS Trash — recoverable">🗑 Move to Trash</button>
       </div>` : ''}
     </div>`;
@@ -468,14 +493,13 @@ function renderSel() {
     const target = n.residual ? (n._parent ? n._parent.path : '') : n.path;
     await revealPath(target);
   });
-  const tv = $('#trashBtn');
-  if (tv) tv.addEventListener('click', () => {
-    // single-item delete: reuse the batch confirm dialog + trash flow
-    selected.clear();
-    selected.set(n.path, n.name || n.path);
-    renderDelbar(); syncChecksAll();
-    $('#delBtn').click();
+  const cb = $('#cleanBtn');
+  if (cb) cb.addEventListener('click', async () => {
+    const target = n.residual ? (n._parent ? n._parent.path : '') : n.path;
+    await handToClean(target);
   });
+  const tv = $('#trashBtn');
+  if (tv) tv.addEventListener('click', () => openTrashConfirmation([n.path]));
 }
 
 async function revealPath(p) {
@@ -486,19 +510,32 @@ async function revealPath(p) {
   } catch (e) { toast('Reveal failed: ' + e.message); }
 }
 
+// Cross-app handoff: wPurge (the cleanup app) is found via /api/peer —
+// launcher registry first, WPURGE_URL override, pinned-port fallback — and
+// opened with ?handoff=<path>. Its Clean view reads the parameter and
+// points the operator at the matching guarded cleanup tools; nothing is
+// deleted from here.
+async function handToClean(path) {
+  if (!path) return;
+  try {
+    const d = await api('/api/peer');
+    if (!d.url) { toast('wPurge not found — is it installed?', true); return; }
+    window.open(d.url + '/?handoff=' + encodeURIComponent(path), '_blank');
+    toast('Opened wPurge — pick a matching cleanup rule there');
+  } catch (e) { toast('Handoff failed: ' + e.message); }
+}
+
 function renderBig(list) {
   $('#bigMeta').textContent = list.length ? `top ${list.length}` : '';
-  $('#bigList').innerHTML = list.map((b) => `
-    <div class="big-item" data-path="${esc(b.path)}">
-      <input type="checkbox" class="pick" data-path="${esc(b.path)}" data-name="${esc(b.path.split('/').pop() || b.path)}" ${selected.has(b.path) ? 'checked' : ''} aria-label="Select ${esc(b.path)}">
+  $('#bigList').innerHTML = list.length ? list.map((b) => `
+    <div class="big-item">
+      <input type="checkbox" class="pick" data-path="${esc(b.path)}" data-name="${esc(b.path.split(/[\\/]/).pop() || b.path)}" ${selected.has(b.path) ? 'checked' : ''} aria-label="Select ${esc(b.path)} for Trash">
       <span class="p" title="${esc(b.path)}">${esc(b.path)}</span>
       <span class="s">${fmtBytes(b.size)}</span>
-    </div>`).join('');
-  document.querySelectorAll('.big-item').forEach(el =>
-    el.addEventListener('click', (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      revealPath(el.dataset.path);
-    }));
+      <button class="reveal-small" type="button" aria-label="Reveal ${esc(b.path)} in file manager">Reveal</button>
+    </div>`).join('') : `<p class="muted small">${tree ? 'No files were found in this scan.' : 'Scan a location to see the largest files here.'}</p>`;
+  $('#bigList').querySelectorAll('.reveal-small').forEach((button, i) =>
+    button.addEventListener('click', () => revealPath(list[i].path)));
   bindPicks($('#bigList'));
 }
 
@@ -539,29 +576,43 @@ $('#delClear').addEventListener('click', () => {
 });
 
 $('#delBtn').addEventListener('click', () => {
-  $('#delList').innerHTML = [...selected.keys()].map(p => `<li>${esc(p)}</li>`).join('');
-  $('#delGo').textContent = `Trash ${selected.size} item${selected.size === 1 ? '' : 's'}`;
-  $('#confirmDlg').showModal();
+  openTrashConfirmation([...selected.keys()]);
 });
+
+function openTrashConfirmation(paths) {
+  pendingTrash = [...paths];
+  if (!pendingTrash.length) return;
+  $('#delList').innerHTML = pendingTrash.map(p => `<li>${esc(p)}</li>`).join('');
+  $('#delGo').textContent = `Trash ${pendingTrash.length} item${pendingTrash.length === 1 ? '' : 's'}`;
+  $('#confirmDlg').showModal();
+}
 
 $('#delCancel').addEventListener('click', () => $('#confirmDlg').close());
 
 $('#delGo').addEventListener('click', async () => {
-  const paths = [...selected.keys()];
+  const paths = [...pendingTrash];
+  if (!paths.length) return;
   $('#delGo').disabled = true;
+  $('#delCancel').disabled = true;
   try {
     const r = await api('/api/delete', { paths });
     const results = r.results || [];
     const bad = results.filter(x => !x.ok);
-    if (bad.length) toast(`Trashed ${results.length - bad.length}, failed ${bad.length} — first: ${bad[0].error}`);
+    const trashed = results.filter(x => x.ok).map(x => x.path);
+    for (const path of trashed) selected.delete(path);
+    if (bad.length) toast(`Trashed ${trashed.length}, failed ${bad.length} — first: ${bad[0].error}`);
     else toast(`Moved ${paths.length} item(s) to the OS Trash`);
+    pendingTrash = [];
+    $('#confirmDlg').close();
+    renderDelbar();
+    syncChecksAll();
+    if (trashed.length && lastRoots.length) startScan(lastRoots);
   } catch (e) {
     toast('Delete failed: ' + e.message);
+  } finally {
+    $('#delGo').disabled = false;
+    $('#delCancel').disabled = false;
   }
-  $('#delGo').disabled = false;
-  $('#confirmDlg').close();
-  selected.clear(); renderDelbar();
-  if (lastRoots.length) startScan(lastRoots); // refresh numbers after trash
 });
 
 /* ---------- scan lifecycle ---------- */
@@ -573,6 +624,7 @@ async function loadRoots() {
     rootSel.innerHTML =
       `<optgroup label="Locations">${opts}</optgroup>` +
       `<optgroup label="Custom"><option value="${PICK}">📁 Choose folder or volume…</option></optgroup>`;
+    renderScanScope();
   } catch { /* dropdown optional */ }
 }
 
@@ -583,6 +635,24 @@ function renderChips() {
     `<span class="chip" title="${esc(p)}"><span>${esc(p)}</span><button data-i="${i}" aria-label="Remove ${esc(p)}">×</button></span>`).join('');
   host.querySelectorAll('button').forEach(b =>
     b.addEventListener('click', () => { pendingRoots.splice(+b.dataset.i, 1); renderChips(); }));
+  renderScanScope();
+}
+
+function renderScanScope() {
+  const scope = $('#scanScope');
+  const scanBtn = $('#scanBtn');
+  if (pendingRoots.length) {
+    const count = pendingRoots.length;
+    scope.textContent = `${count} location${count === 1 ? '' : 's'} queued for scanning`;
+    scanBtn.textContent = `Scan ${count} location${count === 1 ? '' : 's'}`;
+  } else if (rootSel.value && rootSel.value !== PICK) {
+    const option = rootSel.selectedOptions[0];
+    scope.textContent = `Scan location: ${option ? option.textContent : rootSel.value}`;
+    scanBtn.textContent = 'Scan';
+  } else {
+    scope.textContent = 'Choose a location to scan.';
+    scanBtn.textContent = 'Scan';
+  }
 }
 
 function addRoots(paths) {
@@ -605,7 +675,7 @@ $('#addBtn').addEventListener('click', () => {
 // paths become chips. Afterwards the dropdown snaps back to the first
 // preset so picking again (single-select on Windows) fires another change.
 rootSel.addEventListener('change', async () => {
-  if (rootSel.value !== PICK) return;
+  if (rootSel.value !== PICK) { renderScanScope(); return; }
   try {
     const d = await api('/api/pick', {});
     const n = addRoots(d.paths || []);
@@ -613,12 +683,12 @@ rootSel.addEventListener('change', async () => {
   } catch (e) { toast('Picker failed: ' + e.message); }
   const first = [...rootSel.options].find(o => o.value !== PICK);
   rootSel.value = first ? first.value : '';
+  renderScanScope();
 });
 
 function startScan(roots) {
   lastRoots = [...roots];
   api('/api/scan', { roots }).then(() => {
-    scanning = true;
     $('#cancelBtn').hidden = false;
     $('#scanBtn').disabled = true;
     if (pollTimer) clearInterval(pollTimer);
@@ -653,9 +723,7 @@ function poll() {
     clearInterval(pollTimer); pollTimer = null;
     $('#cancelBtn').hidden = true;
     $('#scanBtn').disabled = false;
-    if (p.error) { $('#progress').textContent = 'scan failed: ' + p.error; return; }
     if (!p.done) { $('#progress').textContent = ''; return; }
-    scanning = false;
     tree = p.tree;
     const link = (n, parent) => { n._parent = parent; for (const c of (n.children || [])) link(c, n); };
     link(tree, null);
@@ -672,4 +740,5 @@ function poll() {
 (async function init() {
   try { const s = await api('/api/status'); document.querySelectorAll('.ver').forEach(el => el.textContent = 'v' + s.version); } catch { }
   await loadRoots();
+  renderBig([]);
 })();

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,7 +18,7 @@ type checkDef struct {
 }
 
 type Engine struct {
-	rules      *Rules
+	rules      atomic.Pointer[Rules]
 	store      *Store
 	monitor    *Monitor
 	intel      *Intel
@@ -25,6 +26,7 @@ type Engine struct {
 	hub        *Hub
 
 	mu        sync.Mutex
+	scanMu    sync.Mutex // serializes runOnce: the scheduler and a manual trigger must never scan concurrently
 	set       []checkDef
 	statuses  map[string]*CheckStatus
 	lastScan  map[string][]Finding // check -> latest findings (all, incl. transient)
@@ -39,7 +41,7 @@ type Engine struct {
 func NewEngine(rules *Rules, store *Store, monitor *Monitor, intel *Intel,
 	exclusions *Exclusions, hub *Hub) *Engine {
 	e := &Engine{
-		rules: rules, store: store, monitor: monitor, intel: intel,
+		store: store, monitor: monitor, intel: intel,
 		exclusions: exclusions, hub: hub,
 		statuses: map[string]*CheckStatus{},
 		lastScan: map[string][]Finding{},
@@ -48,9 +50,15 @@ func NewEngine(rules *Rules, store *Store, monitor *Monitor, intel *Intel,
 		started:  time.Now(),
 		stopCh:   make(chan struct{}),
 	}
+	e.rules.Store(rules)
 	e.defineChecks()
 	return e
 }
+
+// ruleSet is the live configuration. Reads get a consistent snapshot: the
+// server swaps the pointer atomically on POST /api/rules, never mutating a
+// struct a scan is reading.
+func (e *Engine) ruleSet() *Rules { return e.rules.Load() }
 
 func (e *Engine) defineChecks() {
 	e.set = []checkDef{
@@ -61,7 +69,7 @@ func (e *Engine) defineChecks() {
 					return []Finding{{Check: "processes", Severity: SevInfo,
 						Title: "Process scan unavailable", Detail: FmtErr(err)}}
 				}
-				return procFindings(e.rules, procs, e.zombie, NowF())
+				return procFindings(e.ruleSet(), procs, e.zombie, NowF())
 			}},
 		{Check{Name: "network", Description: "RAT/backdoor listeners, rogue remotes, beacon callbacks (uses wTower)", Interval: "fast"},
 			func() []Finding {
@@ -73,7 +81,7 @@ func (e *Engine) defineChecks() {
 				sortSocks(socks)
 				procs, _ := listProcs()
 				_, lastErr, _, events, conns := e.monitor.Snapshot()
-				out := netFindings(e.rules, socks, procs, conns, NowF())
+				out := netFindings(e.ruleSet(), socks, procs, conns, NowF())
 				out = append(out, e.trackEndpoints(events)...)
 				if !e.monitor.up {
 					out = append(out, Finding{
@@ -85,7 +93,7 @@ func (e *Engine) defineChecks() {
 							"process checks still run.",
 					})
 				}
-				if e.rules.IntelMode() != "off" {
+				if e.ruleSet().IntelMode() != "off" {
 					if up, intelErr, _, _, _ := e.intel.Snapshot(); !up {
 						out = append(out, Finding{
 							Check: "network", Severity: SevInfo,
@@ -108,7 +116,7 @@ func (e *Engine) defineChecks() {
 				return localPortFindings(scan)
 			}},
 		{Check{Name: "mitm", Description: "Gateway MAC change, ARP conflicts/spoofing, DNS resolver change, rebinding probe", Interval: "fast"},
-			func() []Finding { return mitmFindings(e.store, e.rules) }},
+			func() []Finding { return mitmFindings(e.store, e.ruleSet()) }},
 		{Check{Name: "persistence", Description: "New launch agents/daemons, cron, autostart, systemd units, Run keys, startup folders", Interval: "slow"},
 			func() []Finding { return persistFindings(e.store) }},
 		{Check{Name: "firewall", Description: "Firewall state, default policies and per-app allow rules (socketfilterfw / Windows firewall / firewalld / pf)", Interval: "slow"},
@@ -120,16 +128,16 @@ func (e *Engine) defineChecks() {
 					procs = nil
 				}
 				_, _, _, events, conns := e.monitor.Snapshot()
-				return exfilFindings(e.store, e.rules, procs, events, conns, NowF(), e.intel)
+				return exfilFindings(e.store, e.ruleSet(), procs, events, conns, NowF(), e.intel)
 			}},
 		{Check{Name: "sensitive", Description: "Live access watch: apps holding or attempting mic/camera devices, password-manager data or sensitive files (lsof · /proc · TCC · CapabilityAccessManager)", Interval: "fast"},
 			func() []Finding {
-				snap := scanSensitive(e.rules)
+				snap := scanSensitive(e.ruleSet())
 				_, _, _, events, conns := e.monitor.Snapshot()
 				mergeMonitorPrivacy(&snap, events, NowF())
 				snap.Access = e.filterLiveExcluded(snap.Access)
 				e.setSensitive(snap)
-				return sensitiveFindings(e.rules, snap, conns, NowF(), e.intel)
+				return sensitiveFindings(e.ruleSet(), snap, conns, NowF(), e.intel)
 			}},
 	}
 }
@@ -173,7 +181,7 @@ func (e *Engine) Run() {
 // state — 1 when rules.fixed_ticks disables adaptivity (or the reader is
 // absent, e.g. hand-built engines in tests).
 func (e *Engine) powerFactorNow() int {
-	if e.rules.FixedTicks || e.power == nil {
+	if e.ruleSet().FixedTicks || e.power == nil {
 		return 1
 	}
 	return e.power.Snapshot().Factor
@@ -192,7 +200,7 @@ func (e *Engine) broadcastPower(f int) {
 // config values clamped to their minimums. Exposed via Status() so the
 // dashboard shows the real cadence.
 func (e *Engine) effectiveFast() int {
-	s := e.rules.TickSeconds
+	s := e.ruleSet().TickSeconds
 	if s < 5 {
 		s = 5
 	}
@@ -200,7 +208,7 @@ func (e *Engine) effectiveFast() int {
 }
 
 func (e *Engine) effectiveSlow() int {
-	m := e.rules.SlowMinutes
+	m := e.ruleSet().SlowMinutes
 	if m < 1 {
 		m = 1
 	}
@@ -216,14 +224,14 @@ func (e *Engine) pollMonitor() { e.monitor.Poll() }
 func (e *Engine) trackEndpoints(events []MonitorEvent) []Finding {
 	now := NowF()
 	started, _ := e.store.BaselineKey("started_at", now)
-	learnUntil := AnyFloat(started) + float64(e.rules.LearnMinutes)*60
+	learnUntil := AnyFloat(started) + float64(e.ruleSet().LearnMinutes)*60
 	cursorVal, _ := e.store.BaselineKey("last_event_id", int64(0))
 
 	batch := EventsAfterID(events, int64(AnyFloat(cursorVal)))
 	if len(batch) == 0 {
 		return nil
 	}
-	findings, endpoints := TrackEndpoints(e.rules, batch, e.store.Endpoints(),
+	findings, endpoints := TrackEndpoints(e.ruleSet(), batch, e.store.Endpoints(),
 		learnUntil, now, e.intel)
 	e.store.SaveEndpoints(endpoints)
 	maxID := int64(0)
@@ -256,6 +264,11 @@ func (e *Engine) runOnceExport() {
 }
 
 func (e *Engine) runOnce(interval string) {
+	// one scan at a time: the fast/slow scheduler and TriggerManualScan both
+	// land here, and the checks mutate shared state (e.zombie, the endpoint
+	// baseline) that does not tolerate interleaving
+	e.scanMu.Lock()
+	defer e.scanMu.Unlock()
 	e.exclusions.MaybeReload() // on-disk changes (other processes, edits) apply immediately
 	if interval == "fast" {
 		e.pollMonitor()
@@ -323,7 +336,7 @@ func (e *Engine) runOnce(interval string) {
 
 // dispatch turns findings into alerts (deduped) and desktop notifications.
 func (e *Engine) dispatch(findings []Finding) {
-	minSev := e.rules.Notify.MinSeverity
+	minSev := e.ruleSet().Notify.MinSeverity
 	if minSev == "" {
 		minSev = SevMedium
 	}
@@ -331,25 +344,20 @@ func (e *Engine) dispatch(findings []Finding) {
 		if f.Fingerprint == "" {
 			continue
 		}
-		alert, reNotify := e.store.Record(f, 30*time.Minute)
-		// auto-ack exclusions: the alert stays recorded (history, counts)
-		// but lands pre-acked and never notifies — the user's version of
-		// the intel "autoack" treatment below
-		if alert != nil && e.exclusions.ExcludedByAutoAck(f) {
-			e.store.AckByFingerprint(f.Fingerprint)
-			reNotify = false
-		}
-		// intel "autoack" mode: known-provider new-endpoint alerts land
-		// pre-acked (history + counts, never a notification)
-		if alert != nil && FmtAny(f.Evidence["intel_known"]) != "" {
-			e.store.AckByFingerprint(f.Fingerprint)
+		// auto-ack decides INSIDE Record, so the alert is stored, broadcast
+		// and counted pre-acked — an auto-acked alert never triggers the SSE
+		// beep or an acked:false flash on the dashboard
+		autoAck := e.exclusions.ExcludedByAutoAck(f) ||
+			FmtAny(f.Evidence["intel_known"]) != "" // intel "autoack" mode: known providers stay history-only
+		alert, reNotify := e.store.Record(f, 30*time.Minute, autoAck)
+		if autoAck {
 			reNotify = false
 		}
 		if alert != nil && reNotify && SevGE(f.Severity, minSev) && f.Severity != SevInfo {
-			if e.rules.Notify.Desktop {
-				NotifyAlert(alert, e.rules.Notify.Sound)
+			if e.ruleSet().Notify.Desktop {
+				NotifyAlert(alert, e.ruleSet().Notify.Sound)
 			}
-			NotifyWebhook(alert, &e.rules.Notify)
+			NotifyWebhook(alert, &e.ruleSet().Notify)
 		}
 	}
 }
@@ -380,7 +388,7 @@ func (e *Engine) Status() map[string]any {
 		"uptime_s": int(time.Since(e.started).Seconds()),
 		"checks":   infos,
 		"scan":     e.lastScan,
-		"notify":   e.rules.Notify,
+		"notify":   e.ruleSet().Notify,
 		"wgrid":    e.intel.Summary(),
 		// effective tick lengths including the power factor — the dashboard
 		// shows what the scanner really does right now, not the raw config
@@ -390,7 +398,7 @@ func (e *Engine) Status() map[string]any {
 			"mode":     string(st.Mode),
 			"factor":   f,
 			"detail":   st.Detail,
-			"adaptive": !e.rules.FixedTicks,
+			"adaptive": !e.ruleSet().FixedTicks,
 		},
 	}
 }

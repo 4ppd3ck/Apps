@@ -182,25 +182,11 @@ func gwLinux() (GatewayInfo, error) {
 		break
 	}
 	if gw.IP != "" {
-		if e, err := os.ReadFile("/proc/net/arp"); err == nil {
-			for _, line := range strings.Split(string(e), "\n")[1:] {
-				f := strings.Fields(line)
-				if len(f) >= 6 && f[0] == gw.IP && f[3] != "00:00:00:00:00:00" {
-					gw.MAC = strings.ToLower(f[3])
-				}
-			}
-		}
+		gw.MAC = arpLookupLinux(gw.IP)
 		if gw.MAC == "" {
 			// warm the neighbour cache, then re-read
 			_, _ = RunOut(2*time.Second, "ping", "-c", "1", "-W", "1", gw.IP)
-			if e, err := os.ReadFile("/proc/net/arp"); err == nil {
-				for _, line := range strings.Split(string(e), "\n")[1:] {
-					f := strings.Fields(line)
-					if len(f) >= 6 && f[0] == gw.IP && f[3] != "00:00:00:00:00:00" {
-						gw.MAC = strings.ToLower(f[3])
-					}
-				}
-			}
+			gw.MAC = arpLookupLinux(gw.IP)
 		}
 		if gw.MAC == "" {
 			// Same rationale as the BSD side: some routers proxy ARP and age
@@ -211,6 +197,22 @@ func gwLinux() (GatewayInfo, error) {
 		}
 	}
 	return gw, nil
+}
+
+// arpLookupLinux reads ip's MAC from /proc/net/arp ("" before the neighbour
+// cache holds the entry, or when the row is still incomplete).
+func arpLookupLinux(ip string) string {
+	raw, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n")[1:] {
+		f := strings.Fields(line)
+		if len(f) >= 6 && f[0] == ip && f[3] != "00:00:00:00:00:00" {
+			return strings.ToLower(f[3])
+		}
+	}
+	return ""
 }
 
 // ndpGatewayMACLinux finds the IPv6 default gateway's MAC on Linux: first

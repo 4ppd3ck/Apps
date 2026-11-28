@@ -224,15 +224,7 @@ func recordAppDeckUninstalled(id string) {
 		list = append(list, v)
 	}
 	sort.Strings(list)
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, append(data, '\n'), 0o644) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	writeJSONFile(path, list, 0o644)
 }
 
 // appDeckBundleID sniffs the bundle id out of a .app bundle inside an

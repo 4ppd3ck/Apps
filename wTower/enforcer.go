@@ -88,8 +88,10 @@ func ValidIP(ip string) bool {
 // Enforcer applies block rules through the platform firewall.
 type Enforcer struct {
 	Ctx    *Ctx
-	Mode   string // "" | "direct" | "helper"
+	Mode   string // "" | "direct" | "helper" — probe result, written under probeMu
 	Reason string
+
+	probeMu sync.Mutex // guards Mode/Reason: Probe runs on API calls while scans read it
 
 	hvMu              sync.Mutex
 	helperVersion     int
@@ -158,8 +160,7 @@ func (e *Enforcer) savePauseState(paused bool) error {
 	if e.Ctx == nil || e.Ctx.Cfg == nil {
 		return nil
 	}
-	e.Ctx.Cfg.Data["blocking_paused"] = paused
-	return e.Ctx.Cfg.Save()
+	return e.Ctx.Cfg.Update(func(data map[string]any) { data["blocking_paused"] = paused })
 }
 
 // StartupReconcile probes privilege and re-applies stored rules — unless
@@ -240,6 +241,30 @@ func (e *Enforcer) helperSrcPath() string {
 
 // Probe determines the enforcement mode for the running platform.
 func (e *Enforcer) Probe() string {
+	e.probeMu.Lock()
+	defer e.probeMu.Unlock()
+	return e.probeLocked()
+}
+
+// probeOnce probes lazily and returns the current (mode, reason) under the
+// probe lock — the read/write pair Apply and Unapply need.
+func (e *Enforcer) probeOnce() (string, string) {
+	e.probeMu.Lock()
+	defer e.probeMu.Unlock()
+	if e.Mode == "" {
+		e.probeLocked()
+	}
+	return e.Mode, e.Reason
+}
+
+// modeReason returns the probe result without re-probing.
+func (e *Enforcer) modeReason() (string, string) {
+	e.probeMu.Lock()
+	defer e.probeMu.Unlock()
+	return e.Mode, e.Reason
+}
+
+func (e *Enforcer) probeLocked() string {
 	e.Mode, e.Reason = "", "blocking unsupported on this platform"
 	switch runtime.GOOS {
 	case "darwin":
@@ -293,7 +318,8 @@ func (e *Enforcer) helperCmd(args ...string) []string {
 	if runtime.GOOS == "darwin" {
 		helper = HelperMac
 	}
-	useSudo := e.Mode == "helper" || !isElevated()
+	mode, _ := e.modeReason()
+	useSudo := mode == "helper" || !isElevated()
 	if _, err := os.Stat(helper); err != nil {
 		helper = e.helperSrcPath() // root can run the project copy directly
 	}
@@ -371,7 +397,8 @@ func (e *Enforcer) applyAllow(rule *Block) (string, string) {
 		return "unsupported", "windows firewall always applies block rules " +
 			"before allow rules — remove or narrow the block instead"
 	}
-	linuxDirect := runtime.GOOS == "linux" && e.Mode == "direct"
+	mode, _ := e.modeReason()
+	linuxDirect := runtime.GOOS == "linux" && mode == "direct"
 	switch rule.Type {
 	case "app":
 		return "unsupported", "allow rules only make sense as exceptions to " +
@@ -417,7 +444,8 @@ func (e *Enforcer) unapplyAllow(rule *Block) (string, string) {
 	if runtime.GOOS == "windows" {
 		return "removed", "was not enforced on windows"
 	}
-	linuxDirect := runtime.GOOS == "linux" && e.Mode == "direct"
+	mode, _ := e.modeReason()
+	linuxDirect := runtime.GOOS == "linux" && mode == "direct"
 	switch rule.Type {
 	case "app":
 		return "removed", "was not enforced"
@@ -529,11 +557,9 @@ func (e *Enforcer) Apply(rule *Block) (string, string) {
 	if e.Paused() {
 		return "paused", "blocking is paused — click resume to enforce again"
 	}
-	if e.Mode == "" {
-		e.Probe()
-	}
-	if e.Mode == "" {
-		return "queued", e.Reason
+	mode, reason := e.probeOnce()
+	if mode == "" {
+		return "queued", reason
 	}
 	if runtime.GOOS == "windows" {
 		return e.applyWindows(rule)
@@ -566,17 +592,11 @@ func (e *Enforcer) Apply(rule *Block) (string, string) {
 		}
 		rc, out = runCombined(e.helperCmd(args...), 30*time.Second)
 	case rtype == "country":
-		if runtime.GOOS == "windows" {
-			return e.applyWindows(rule) // handled above; unreachable
-		}
 		if runtime.GOOS == "linux" && e.Mode == "direct" {
 			return e.ipsetCIDRRules(rule, true)
 		}
 		return e.countryHelper(rule, true)
 	case rtype == "list" || rtype == "provider":
-		if runtime.GOOS == "windows" {
-			return e.applyWindows(rule) // handled above; unreachable
-		}
 		if runtime.GOOS == "linux" && e.Mode == "direct" {
 			return e.ipsetCIDRRules(rule, true)
 		}
@@ -601,11 +621,9 @@ func (e *Enforcer) Apply(rule *Block) (string, string) {
 
 // Unapply removes one rule's enforcement; returns (status, detail).
 func (e *Enforcer) Unapply(rule *Block) (string, string) {
-	if e.Mode == "" {
-		e.Probe()
-	}
-	if e.Mode == "" {
-		return "queued", e.Reason
+	mode, reason := e.probeOnce()
+	if mode == "" {
+		return "queued", reason
 	}
 	if runtime.GOOS == "windows" {
 		return e.unapplyWindows(rule)
@@ -637,17 +655,11 @@ func (e *Enforcer) Unapply(rule *Block) (string, string) {
 		}
 		rc, out = runCombined(e.helperCmd(args...), 30*time.Second)
 	case rtype == "country":
-		if runtime.GOOS == "windows" {
-			return e.unapplyWindows(rule) // handled above; unreachable
-		}
 		if runtime.GOOS == "linux" && e.Mode == "direct" {
 			return e.ipsetCIDRRules(rule, false)
 		}
 		return e.countryHelper(rule, false)
 	case rtype == "list" || rtype == "provider":
-		if runtime.GOOS == "windows" {
-			return e.unapplyWindows(rule) // handled above; unreachable
-		}
 		if runtime.GOOS == "linux" && e.Mode == "direct" {
 			return e.ipsetCIDRRules(rule, false)
 		}
@@ -1027,22 +1039,12 @@ func (e *Enforcer) cidrHelper(rule *Block, add bool) (string, string) {
 		}
 		return "removed", fmt.Sprintf("blocklist %s removed from the firewall", label)
 	}
-	var cidrs []string
-	switch rule.Type {
-	case "provider":
-		var err error
-		if cidrs, err = e.Ctx.Country.EnsureProvider(rule.Value); err != nil {
-			return "queued", truncate(err.Error(), 200)
-		}
-	default: // list
-		path := e.listPath(rule)
-		var err error
-		if cidrs, err = ParseIPFile(path); err != nil {
-			return "error", truncate("blocklist file: "+err.Error(), 200)
-		}
-		if e.Ctx.Country != nil {
-			go e.Ctx.Country.EnsureListSource(label, path)
-		}
+	cidrs, status, detail := e.cidrsForApply(rule)
+	if status != "" {
+		return status, detail
+	}
+	if rule.Type == "list" && e.Ctx.Country != nil {
+		go e.Ctx.Country.EnsureListSource(label, e.listPath(rule))
 	}
 	if len(cidrs) == 0 {
 		return "error", "rule contained no blockable public ranges"
@@ -1101,8 +1103,18 @@ func (e *Enforcer) brokerApply(rule *Block, add bool) (string, string) {
 			extra = *rule.AppPath
 		}
 	}
+	// the helper parses action|type|value|extra — a field carrying a pipe
+	// or a newline would corrupt the line and inject extra queue entries
+	clean := func(s string) string {
+		s = strings.NewReplacer("|", " ", "\r", " ", "\n", " ").Replace(s)
+		return strings.TrimSpace(s)
+	}
+	typ, value, extra2 := clean(rule.Type), clean(rule.Value), clean(extra)
+	if value == "" {
+		return "error", "rule value is empty after sanitizing"
+	}
 	if err := brokerEnqueue(
-		fmt.Sprintf("%s|%s|%s|%s", action, rule.Type, rule.Value, extra)); err != nil {
+		fmt.Sprintf("%s|%s|%s|%s", action, typ, value, extra2)); err != nil {
 		return "error", err.Error()
 	}
 	if add {

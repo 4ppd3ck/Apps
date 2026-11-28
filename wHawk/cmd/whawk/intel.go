@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -42,17 +43,10 @@ type Intel struct {
 
 func NewIntel(baseURL string) *Intel {
 	return &Intel{
-		baseURL: trimRight(baseURL, "/"),
+		baseURL: strings.TrimRight(baseURL, "/"),
 		hc:      &http.Client{Timeout: 6 * time.Second},
 		nets:    map[string][]*net.IPNet{},
 	}
-}
-
-func trimRight(s, cut string) string {
-	for len(s) > 0 && s[len(s)-len(cut):] == cut {
-		s = s[:len(s)-len(cut)]
-	}
-	return s
 }
 
 // RetryIfDown re-polls after a failed attempt once minGap seconds passed —

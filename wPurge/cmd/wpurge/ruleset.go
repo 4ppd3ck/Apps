@@ -367,16 +367,7 @@ func (s *server) handleUserRulesPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := userRulesPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		fail(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := writeJSONFile(path, json.RawMessage(data), 0o600); err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
 	}

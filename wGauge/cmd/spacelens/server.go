@@ -8,6 +8,7 @@ package main
 // embedded by the root ui package answers, so a lone binary still works.
 import (
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/reveal", s.handleReveal)
 	mux.HandleFunc("POST /api/delete", s.handleDelete)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
+	mux.HandleFunc("GET /api/peer", s.handlePeer)
 	return mux
 }
 
@@ -60,9 +62,20 @@ func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// safeAssetPath reports whether name is a plain slash-separated relative
+// path. ServeMux cleans "/" but not "\" — /css/..%5c..%5cx.js survives it
+// and, once joined on Windows, would climb out of the app folder.
+func safeAssetPath(name string) bool {
+	return fs.ValidPath(name) && !strings.Contains(name, `\`)
+}
+
 // serveFile prefers the app folder's copy (live-editable); otherwise the
 // embedded UI answers, so the binary also works standalone.
 func (s *server) serveFile(w http.ResponseWriter, r *http.Request, name, ctype string) {
+	if !safeAssetPath(name) {
+		http.NotFound(w, r)
+		return
+	}
 	if s.root != "" {
 		if raw, err := os.ReadFile(filepath.Join(s.root, name)); err == nil {
 			w.Header().Set("Content-Type", ctype)
@@ -89,11 +102,21 @@ func (s *server) json(w http.ResponseWriter, v any, code ...int) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json") // before WriteHeader, or it is dropped
 	if len(code) > 0 {
 		w.WriteHeader(code[0])
 	}
-	w.Header().Set("Content-Type", "application/json")
 	w.Write(raw)
+}
+
+// decodeJSON parses one small JSON request body (capped at 1 MiB) and
+// answers the request itself when it does not parse.
+func (s *server) decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
+		s.fail(w, http.StatusBadRequest, "bad request body")
+		return false
+	}
+	return true
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -106,16 +129,11 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.fail(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
 	var req struct {
 		Root  string   `json:"root"`  // single root (backward compatible)
 		Roots []string `json:"roots"` // one or more roots
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		s.fail(w, http.StatusBadRequest, "bad request body")
+	if !s.decodeJSON(w, r, &req) {
 		return
 	}
 	roots := req.Roots
@@ -141,10 +159,6 @@ func (s *server) handlePoll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.fail(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
 	s.scanner.Cancel()
 	s.json(w, map[string]any{"ok": true})
 }
@@ -161,16 +175,19 @@ func (s *server) handleRoots(w http.ResponseWriter, r *http.Request) {
 	if home != "" {
 		roots = append(roots, Root{Path: home, Name: "Home"})
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		roots = append(roots, Root{Path: "/Applications", Name: "Applications"})
-		if entries, err := os.ReadDir("/Volumes"); err == nil {
+	volumes := func(base string) { // every mounted volume under base
+		if entries, err := os.ReadDir(base); err == nil {
 			for _, e := range entries {
 				if e.IsDir() {
-					roots = append(roots, Root{Path: filepath.Join("/Volumes", e.Name()), Name: "Volume: " + e.Name()})
+					roots = append(roots, Root{Path: filepath.Join(base, e.Name()), Name: "Volume: " + e.Name()})
 				}
 			}
 		}
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		roots = append(roots, Root{Path: "/Applications", Name: "Applications"})
+		volumes("/Volumes")
 		roots = append(roots, Root{Path: "/", Name: "Macintosh root /"})
 	case "windows":
 		for c := 'C'; c <= 'Z'; c++ {
@@ -179,7 +196,9 @@ func (s *server) handleRoots(w http.ResponseWriter, r *http.Request) {
 				roots = append(roots, Root{Path: drive, Name: "Drive " + drive})
 			}
 		}
-		roots = append(roots, Root{Path: home + "\\AppData", Name: "AppData"})
+		if home != "" {
+			roots = append(roots, Root{Path: filepath.Join(home, "AppData"), Name: "AppData"})
+		}
 	default: // linux
 		roots = append(roots, Root{Path: "/", Name: "Root /"})
 		roots = append(roots, Root{Path: "/usr", Name: "/usr"})
@@ -187,13 +206,7 @@ func (s *server) handleRoots(w http.ResponseWriter, r *http.Request) {
 			roots = append(roots, Root{Path: filepath.Dir(home), Name: filepath.Dir(home)})
 		}
 		for _, base := range []string{"/media", "/run/media", "/mnt"} {
-			if entries, err := os.ReadDir(base); err == nil {
-				for _, e := range entries {
-					if e.IsDir() {
-						roots = append(roots, Root{Path: filepath.Join(base, e.Name()), Name: "Volume: " + e.Name()})
-					}
-				}
-			}
+			volumes(base)
 		}
 	}
 	s.json(w, map[string]any{"roots": roots, "home": home})
@@ -232,7 +245,6 @@ func resolveRoot() string {
 func main() {
 	host := "127.0.0.1"
 	port := 8767
-	dataDir := "data"
 
 	if v := os.Getenv("APPDECK_HOST"); v != "" {
 		host = v
@@ -256,9 +268,6 @@ func main() {
 		case os.Args[i] == "--host" && i+1 < len(os.Args):
 			host = os.Args[i+1]
 			i++
-		case os.Args[i] == "--data" && i+1 < len(os.Args):
-			dataDir = os.Args[i+1]
-			i++
 		}
 	}
 
@@ -276,5 +285,4 @@ func main() {
 		println("fatal: " + err.Error())
 		os.Exit(1)
 	}
-	_ = dataDir
 }

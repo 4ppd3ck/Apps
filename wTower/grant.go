@@ -26,8 +26,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -243,14 +241,15 @@ func Grant(ctx *Ctx, target, action string) (map[string]any, int) {
 	// reconcile in BOTH directions: after a grant it re-applies the queued
 	// rules; after a revoke it flips still-"enforced" rows back to queued
 	// (Apply reports queued with the current no-privilege reason)
+	mode, reason := enf.modeReason()
 	if _, err := enf.Reconcile(); err != nil {
-		return map[string]any{"ok": true, "mode": mode, "reason": enf.Reason,
+		return map[string]any{"ok": true, "mode": mode, "reason": reason,
 			"warning": verb + ", but re-apply failed: " + err.Error()}, 200
 	}
 	if rules, err := ctx.Store.ListBlocks(); err == nil {
 		applied = len(rules)
 	}
-	payload := map[string]any{"ok": true, "mode": mode, "reason": enf.Reason,
+	payload := map[string]any{"ok": true, "mode": mode, "reason": reason,
 		"applied": applied}
 	if mode == "" && revoke {
 		payload["reason"] = "revoked: rules are queued again until the next grant"
@@ -261,10 +260,3 @@ func Grant(ctx *Ctx, target, action string) (map[string]any, int) {
 // requestIsLoopback reports whether the request arrived over the loopback
 // interface (the local dashboard). Elevated-dialog endpoints must not be
 // reachable from the LAN.
-func requestIsLoopback(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	return host == "127.0.0.1" || host == "::1"
-}

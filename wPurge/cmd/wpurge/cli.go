@@ -104,11 +104,13 @@ Exit codes: 0 success · 1 failure.
 `)
 }
 
-func humanBytes(n int64) string {
+// fmtBytes renders a byte count for the CLI and the dashboard
+// (0 B, 42 KB, 1.5 PB).
+func fmtBytes(n int64) string {
 	if n <= 0 {
 		return "0 B"
 	}
-	units := []string{"B", "KB", "MB", "GB", "TB"}
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
 	i := 0
 	v := float64(n)
 	for v >= 1024 && i < len(units)-1 {
@@ -157,7 +159,7 @@ func cliScan(srv *server, args []string) error {
 	for _, r := range rep.Rules {
 		switch r.Status {
 		case "ok":
-			fmt.Printf("  %9s  %-7s %-24s %s\n", humanBytes(r.SizeBytes), r.Safety, r.ID, r.Title)
+			fmt.Printf("  %9s  %-7s %-24s %s\n", fmtBytes(r.SizeBytes), r.Safety, r.ID, r.Title)
 		case "command":
 			fmt.Printf("  %9s  %-7s %-24s %s (manual command)\n", "-", r.Safety, r.ID, r.Title)
 		default:
@@ -173,7 +175,7 @@ func cliScan(srv *server, args []string) error {
 		}
 	}
 	fmt.Printf("\nTotal reclaimable: %s across %d files (safe tier: %s)\n",
-		humanBytes(rep.TotalBytes), rep.TotalFiles, humanBytes(rep.SafeBytes))
+		fmtBytes(rep.TotalBytes), rep.TotalFiles, fmtBytes(rep.SafeBytes))
 	return nil
 }
 
@@ -208,18 +210,18 @@ func cliClean(srv *server, args []string) error {
 		if plan, ok := result["plan"].([]RuleResult); ok {
 			for _, p := range plan {
 				if p.Status == "ok" {
-					fmt.Printf("  %-24s %9s · %d files · %s\n", p.ID, humanBytes(p.SizeBytes), p.FileCount, p.Title)
+					fmt.Printf("  %-24s %9s · %d files · %s\n", p.ID, fmtBytes(p.SizeBytes), p.FileCount, p.Title)
 				} else {
 					fmt.Printf("  %-24s [%s] %s\n", p.ID, p.Status, p.Title)
 				}
 			}
 		}
-		fmt.Printf("  total: %s\n", humanBytes(toI64(result["totalBytes"])))
+		fmt.Printf("  total: %s\n", fmtBytes(toI64(result["totalBytes"])))
 		return nil
 	}
 	failed := toStrMapList(result["failed"])
 	fmt.Printf("cleaned %d files · %s moved to the trash · %d failed\n",
-		toI(result["files"]), humanBytes(toI64(result["bytes"])), len(failed))
+		toI(result["files"]), fmtBytes(toI64(result["bytes"])), len(failed))
 	if h := toI(result["husks"]); h > 0 {
 		fmt.Printf("removed %d now-empty folder(s)\n", h)
 	}
@@ -291,12 +293,15 @@ func nudgeInstall() error {
 	}
 	exe, _ = filepath.Abs(exe)
 	uid := os.Getuid()
+	// the executable path lands inside XML text — escape it, and make sure
+	// the LaunchAgents folder exists before writing the plist
+	esc := xmlEscape(exe)
 	plist := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>` + nudgeLabel + `</string>
   <key>ProgramArguments</key><array>
-    <string>` + exe + `</string><string>nudge</string><string>--run</string>
+    <string>` + esc + `</string><string>nudge</string><string>--run</string>
   </array>
   <key>StartCalendarInterval</key><dict>
     <key>Weekday</key><integer>1</integer>
@@ -307,6 +312,9 @@ func nudgeInstall() error {
 </dict></plist>
 `
 	p := nudgePlistPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
 	if err := os.WriteFile(p, []byte(plist), 0o644); err != nil {
 		return err
 	}
@@ -353,12 +361,12 @@ func nudgeRun(srv *server) error {
 			threshold = n
 		}
 	}
-	fmt.Printf("safe-tier buildup: %s (threshold %s)\n", humanBytes(total), humanBytes(threshold))
+	fmt.Printf("safe-tier buildup: %s (threshold %s)\n", fmtBytes(total), fmtBytes(threshold))
 	if total < threshold {
 		fmt.Println("below threshold — no notification shown")
 		return nil
 	}
-	msg := fmt.Sprintf("%s of buildup is waiting. Open wPurge to review.", humanBytes(total))
+	msg := fmt.Sprintf("%s of buildup is waiting. Open wPurge to review.", fmtBytes(total))
 	script := `display notification "` + msg + `" with title "💧 wPurge"`
 	if err := exec.Command("osascript", "-e", script).Run(); err != nil {
 		return err
@@ -532,4 +540,11 @@ func toStrMapList(v any) []map[string]string {
 		return l
 	}
 	return nil
+}
+
+// xmlEscape escapes a string for XML text content (a path with & or < would
+// otherwise produce a malformed plist).
+func xmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+	return r.Replace(s)
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // Version mirrors monitor/__init__.py __version__.
@@ -44,9 +45,12 @@ func platformDefaultDirs() []string {
 }
 
 // Config mirrors config.Config: a dynamic dict of settings loaded from
-// config.json over the built-in defaults.
+// config.json over the built-in defaults. HTTP handlers mutate it while
+// GET / and /api/* read it, so every access goes through the RWMutex —
+// read via the Get*/typed accessors, write via Update.
 type Config struct {
 	Path string
+	mu   sync.RWMutex
 	Data map[string]any
 }
 
@@ -86,9 +90,11 @@ func (c *Config) load() {
 			fmt.Printf("[config] ignoring bad config %s: %v\n", c.Path, err)
 		} else {
 			// dict.update(): shallow, top-level replace
+			c.mu.Lock()
 			for k, v := range fileData {
 				c.Data[k] = v
 			}
+			c.mu.Unlock()
 		}
 	}
 	if wd := c.WatchedDirs(); len(wd) == 0 {
@@ -105,6 +111,29 @@ func (c *Config) load() {
 
 // Save writes the config back as pretty-printed JSON.
 func (c *Config) Save() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saveLocked()
+}
+
+// Update mutates the config under the write lock and persists it. On a
+// save failure the in-memory map is restored, so a caller that checks the
+// error keeps a consistent view either way.
+func (c *Config) Update(mut func(map[string]any)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	snapshot := deepCopyMap(c.Data)
+	mut(c.Data)
+	if err := c.saveLocked(); err != nil {
+		c.Data = snapshot
+		return err
+	}
+	return nil
+}
+
+// saveLocked writes atomically (temp + rename): a crash or a concurrent
+// reader must never see a half-written config.json.
+func (c *Config) saveLocked() error {
 	if dir := filepath.Dir(c.Path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -114,17 +143,25 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.Path, b, 0o644)
+	tmp := c.Path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, c.Path)
 }
 
 // Get returns a raw setting (mirrors cfg.get(key)).
 func (c *Config) Get(key string) (any, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	v, ok := c.Data[key]
 	return v, ok
 }
 
 // GetOr returns a raw setting or a default (mirrors cfg.get(key, default)).
 func (c *Config) GetOr(key string, def any) any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.Data[key]; ok && v != nil {
 		return v
 	}
@@ -133,6 +170,8 @@ func (c *Config) GetOr(key string, def any) any {
 
 // GetString returns a setting coerced to string (str(cfg.get(key, def))).
 func (c *Config) GetString(key, def string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.Data[key]; ok && v != nil {
 		return StrOf(v)
 	}
@@ -141,6 +180,8 @@ func (c *Config) GetString(key, def string) string {
 
 // GetBool returns a boolean setting (truthiness like Python).
 func (c *Config) GetBool(key string, def bool) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if v, ok := c.Data[key]; ok {
 		return Truthy(v)
 	}
@@ -158,13 +199,23 @@ func (c *Config) Host() string {
 }
 
 // Port returns the bind port.
-func (c *Config) Port() int { return IntOr(c.Data["port"], 8765) }
+func (c *Config) Port() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return IntOr(c.Data["port"], 8765)
+}
 
 // RetentionDays returns the event retention window in days.
-func (c *Config) RetentionDays() int { return IntOr(c.Data["retention_days"], 7) }
+func (c *Config) RetentionDays() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return IntOr(c.Data["retention_days"], 7)
+}
 
 // WatchedDirs returns the watched directories as strings.
 func (c *Config) WatchedDirs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	var raw []any
 	switch v := c.Data["watched_dirs"].(type) {
 	case []any:
@@ -185,6 +236,8 @@ func (c *Config) WatchedDirs() []string {
 
 // Poll returns one poll interval in seconds (cfg["poll"].get(name, def)).
 func (c *Config) Poll(name string, def float64) float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	poll, ok := c.Data["poll"].(map[string]any)
 	if !ok {
 		return def
@@ -197,10 +250,13 @@ func (c *Config) Poll(name string, def float64) float64 {
 	return def
 }
 
-// CollectorsCfg returns the per-category collector toggles.
+// CollectorsCfg returns a snapshot of the per-category collector toggles
+// (a copy: callers never mutate the live map without Update).
 func (c *Config) CollectorsCfg() map[string]any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if m, ok := c.Data["collectors"].(map[string]any); ok {
-		return m
+		return deepCopyMap(m)
 	}
 	return nil
 }
@@ -208,6 +264,8 @@ func (c *Config) CollectorsCfg() map[string]any {
 // DataDir resolves the data directory (Path(data_dir).expanduser(), made
 // absolute relative to the config file's directory).
 func (c *Config) DataDir() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	dir := StrOf(c.Data["data_dir"])
 	dir = expandUser(dir)
 	if !filepath.IsAbs(dir) {

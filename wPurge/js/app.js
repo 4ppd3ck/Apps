@@ -26,8 +26,15 @@ function fmtBytes(n) {
   return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + u[i];
 }
 
-async function api(path, body) {
-  const opt = body ? { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) } : {};
+// api calls the JSON API: POST with a body by default, or another method
+// when given (api('/api/folders', {path}, 'DELETE')). Errors carry the
+// response payload (step logs ride along).
+async function api(path, body, method) {
+  const opt = { method: method || (body ? 'POST' : 'GET') };
+  if (body) {
+    opt.headers = { 'Content-Type': 'application/json' };
+    opt.body = JSON.stringify(body);
+  }
   const r = await fetch(appResource(path), opt);
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
@@ -1459,21 +1466,26 @@ function applySettings() {
 }
 
 async function openSettings() {
+  let s;
   try {
-    const s = await api('/api/settings');
-    settingsSaved = {
-      days: s.downloadsMinAgeDays || 30,
-      disabled: s.disabledExtras || [],
-    };
-    renderDlAge(settingsSaved.days);
-    renderExtraRules(s.extraRules || []);
-    renderCustomFolders(s.customFolders || []);
-    $('#rulesClearBtn').hidden = !(s.extraRules || []).some(r => r.origin === 'user');
-    $('#rulesImportNote').textContent = (s.extraRules || []).some(r => r.origin === 'user')
-      ? 'Imported rules are in effect. They are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.'
-      : 'No imported ruleset. Imported rules are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.';
-    markSettingsDirty();
-  } catch (e) { toast('Could not load settings: ' + e.message, true); }
+    s = await api('/api/settings');
+  } catch (e) {
+    // a failed load must not open a dialog bound to stale/empty state
+    toast('Could not load settings: ' + e.message, true);
+    return;
+  }
+  settingsSaved = {
+    days: s.downloadsMinAgeDays || 30,
+    disabled: s.disabledExtras || [],
+  };
+  renderDlAge(settingsSaved.days);
+  renderExtraRules(s.extraRules || []);
+  renderCustomFolders(s.customFolders || []);
+  $('#rulesClearBtn').hidden = !(s.extraRules || []).some(r => r.origin === 'user');
+  $('#rulesImportNote').textContent = (s.extraRules || []).some(r => r.origin === 'user')
+    ? 'Imported rules are in effect. They are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.'
+    : 'No imported ruleset. Imported rules are not signature-pinned (you author them) — the guardrails still apply, and a rule id matching a built-in replaces it.';
+  markSettingsDirty();
   $('#settingsDialog').showModal();
 }
 
@@ -1494,13 +1506,7 @@ function renderCustomFolders(folders) {
   box.querySelectorAll('[data-unfolder]').forEach(b =>
     b.addEventListener('click', async () => {
       try {
-        const r = await fetch(appResource('/api/folders'), {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: b.dataset.unfolder }),
-        });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        const data = await api('/api/folders', { path: b.dataset.unfolder }, 'DELETE');
         toast(data.note || 'Removed from the scan — nothing was deleted from disk.');
         openSettings();
         scan();
@@ -1518,9 +1524,7 @@ async function pickCustomFolder() {
   const old = btn.textContent;
   btn.textContent = '…pick in the dialog';
   try {
-    const r = await fetch(appResource('/api/folders/pick'), { method: 'POST' });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    const data = await api('/api/folders/pick', {});
     if (data.cancelled) { toast('No folder chosen.'); return; }
     toast(data.note || 'Folder added — rescanning…');
     openSettings();
@@ -1561,13 +1565,7 @@ async function importRulesFile(file) {
   try { parsed = JSON.parse(text); }
   catch (e) { toast('Not valid JSON: ' + e.message, true); return; }
   try {
-    const r = await fetch(appResource('/api/rules/user'), {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(parsed),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    const data = await api('/api/rules/user', parsed, 'PUT');
     toast(`Imported ${data.count} rule(s) — takes effect on the next scan.`);
     openSettings();
     scan();
@@ -1577,20 +1575,11 @@ async function importRulesFile(file) {
 async function clearImportedRules() {
   if (!confirm('Remove the imported ruleset?\n\nAny rule that replaced a built-in falls back to that built-in; rules you added disappear from scans. This cannot be undone.')) return;
   try {
-    const r = await fetch(appResource('/api/rules/user'), { method: 'DELETE' });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+    await api('/api/rules/user', null, 'DELETE');
     toast('Imported rules cleared — the built-in per-OS set is in effect.');
     openSettings();
     scan();
   } catch (e) { toast(e.message, true); }
-}
-
-/* ---------- trust dialog ---------- */
-
-function initTrust() {
-  $('#trustBtn').addEventListener('click', () => $('#trustDialog').showModal());
-  $('#trustClose').addEventListener('click', () => $('#trustDialog').close());
 }
 
 /* ---------- Excel-style column resize (traces + exclusions) ---------- */

@@ -344,10 +344,3 @@ func runsFromTemp(path string) bool {
 		strings.HasPrefix(ls, "/dev/shm/") ||
 		strings.HasPrefix(ls, "/run/user/")
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

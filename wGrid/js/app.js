@@ -1,7 +1,7 @@
 'use strict';
-/* app.js — wGrid shell: theme toggle + machine line. The feed UI lives in
-   js/feed.js; this file only carries the page furniture the w-family
-   servers share. */
+/* app.js — wGrid shell: theme toggle. The feed UI lives in js/feed.js; the
+   machine line is filled from the same /api/status payload feed.js already
+   fetches, so this file only carries the page furniture. */
 
 const $ = (s) => document.querySelector(s);
 
@@ -17,14 +17,3 @@ try {
   $('#themeBtn').textContent =
     document.documentElement.dataset.theme === 'light' ? '☀️' : '🌙';
 } catch (e) {}
-
-/* ---------- machine line ---------- */
-
-(async () => {
-  try {
-    const r = await fetch('/api/status');
-    const d = await r.json();
-    const nets = d.networks ?? 0;
-    $('#machine').textContent = `${nets} networks · updated ${d.updated_at ? new Date(d.updated_at * 1000).toLocaleTimeString() : 'never'}`;
-  } catch (e) { /* cosmetic */ }
-})();

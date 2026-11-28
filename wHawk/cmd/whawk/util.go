@@ -3,6 +3,7 @@ package main
 // Shared helpers: safe command execution, IP classification, JSON file IO.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,11 +14,17 @@ import (
 )
 
 // RunOut executes a command and returns trimmed stdout; err on failure.
-// A generous-but-bounded timeout keeps a wedged helper from stalling checks.
+// The timeout is enforced with CommandContext so a wedged helper (lsof,
+// osascript, sqlite3, powershell, pfctl) fails the check instead of
+// stalling the scan or the HTTP handler forever.
 func RunOut(timeout time.Duration, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	out, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%s timed out after %s", name, timeout)
+		}
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
@@ -114,19 +121,6 @@ func LoadJSON(path string, v any) error {
 		return err
 	}
 	return json.Unmarshal(raw, v)
-}
-
-func F(size any) string {
-	switch n := size.(type) {
-	case int64:
-		return fmt.Sprintf("%d", n)
-	case int:
-		return fmt.Sprintf("%d", n)
-	case float64:
-		return fmt.Sprintf("%.0f", n)
-	default:
-		return FmtAny(n)
-	}
 }
 
 func AnyBool(v any) bool {

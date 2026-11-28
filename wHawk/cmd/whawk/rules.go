@@ -181,9 +181,22 @@ func LoadRules(dataDir string) *Rules {
 	if overlay.Notify.MinSeverity != "" {
 		r.Notify.MinSeverity = overlay.Notify.MinSeverity
 	}
-	if overlay.Notify.Desktop || overlay.Notify.Sound {
-		r.Notify.Desktop = overlay.Notify.Desktop
-		r.Notify.Sound = overlay.Notify.Sound
+	// explicit false must win: decode the notify block a second time with
+	// pointers so "desktop": false actually turns desktop notifications off
+	// (a plain bool cannot distinguish "absent" from "false")
+	var notifyOverlay struct {
+		Notify struct {
+			Desktop *bool `json:"desktop"`
+			Sound   *bool `json:"sound"`
+		} `json:"notify"`
+	}
+	if json.Unmarshal(raw, &notifyOverlay) == nil {
+		if notifyOverlay.Notify.Desktop != nil {
+			r.Notify.Desktop = *notifyOverlay.Notify.Desktop
+		}
+		if notifyOverlay.Notify.Sound != nil {
+			r.Notify.Sound = *notifyOverlay.Notify.Sound
+		}
 	}
 	if overlay.Notify.WebhookURL != "" {
 		r.Notify.WebhookURL = overlay.Notify.WebhookURL

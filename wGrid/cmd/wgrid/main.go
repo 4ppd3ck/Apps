@@ -98,7 +98,7 @@ func run(args []string) error {
 	mux.HandleFunc("POST /api/sources/delete", srv.handleSourceDelete)
 	mux.HandleFunc("GET /api/wired", srv.handleWired)
 	mux.HandleFunc("GET /api/apps", srv.handleApps)
-	mux.Handle("/", logging(noCache(http.FileServer(http.Dir(root)))))
+	mux.Handle("/", http.FileServer(http.Dir(root)))
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	ln, err := net.Listen("tcp", addr)
@@ -108,7 +108,18 @@ func run(args []string) error {
 	fmt.Printf("📡 wGrid v%s at http://127.0.0.1:%d  (known-IP intel feed — state in %s)\n", appVersion, port, dataDir)
 	handler := hostGuard("127.0.0.1", mux)
 	handler = tokenFence(os.Getenv("APPDECK_TOKEN"), handler)
-	httpSrv := &http.Server{Handler: handler}
+	// one wrapper chain for everything: every response gets the no-cache
+	// header exactly once, and /api/ calls are logged like the static ones
+	handler = logging(noCache(handler))
+	// timeouts: a loopback dashboard has no long-streaming endpoints, but
+	// the default server would let a stuck client hold a connection forever
+	httpSrv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	return httpSrv.Serve(ln)
 }
 
@@ -182,7 +193,6 @@ type statusWriter struct {
 }
 
 func (w *statusWriter) WriteHeader(code int) {
-	w.Header().Set("Cache-Control", "no-cache")
 	if w.status == 0 {
 		w.status = code
 	}

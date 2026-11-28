@@ -8,6 +8,7 @@
 
 const $ = (s) => document.querySelector(s);
 const esc = (t) => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const appApiUrl = (path) => new URL(path.replace(/^\/+/, ''), document.baseURI).toString();
 
 let intelSources = []; // last /api/sources payload
 let intelStatus = null; // last /api/status payload
@@ -29,7 +30,7 @@ function toast(msg, isErr) {
 }
 
 async function getJSON(path) {
-  const r = await fetch(path);
+  const r = await fetch(appApiUrl(path));
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
@@ -67,6 +68,12 @@ function renderIntel() {
   $('#intel-summary').innerHTML =
     `updated ${esc(updated)} · ${provs} providers / ${nets} networks` +
     (errs ? ` · <span style="color:var(--amber)">${errs} source error(s)</span>` : '');
+  // header machine line — same payload, no extra /api/status round-trip
+  const machine = $('#machine');
+  if (machine) {
+    machine.textContent =
+      `${nets} networks · updated ${st.updated_at ? new Date(st.updated_at * 1000).toLocaleTimeString() : 'never'}`;
+  }
 
   $('#tbl-intel-sources').tBodies[0].innerHTML = intelSources.map((s) => {
     const loc = s.type === 'file' ? (s.path || s.url || '')
@@ -166,7 +173,7 @@ async function scanApps() {
       b.addEventListener('click', async () => {
         b.disabled = true;
         try {
-          const res = await fetch('/api/sources/add', {
+          const res = await fetch(appApiUrl('/api/sources/add'), {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: b.dataset.add,
           });
           const out = await res.json().catch(() => ({}));
@@ -174,7 +181,10 @@ async function scanApps() {
           loadIntel();
           setTimeout(loadIntel, 2500);
           setTimeout(scanApps, 4000);
-        } catch (err) { $('#appsMeta').textContent = 'failed: ' + err.message; }
+        } catch (err) {
+          $('#appsMeta').textContent = 'failed: ' + err.message;
+          b.disabled = false; // a failed add must stay clickable
+        }
       }));
     const un = r.unmatched || [];
     $('#apps-unmatched').textContent = un.length

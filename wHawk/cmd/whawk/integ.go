@@ -149,11 +149,16 @@ func (m *Monitor) Poll() {
 	m.events = keep
 }
 
+// Snapshot returns copies of the event ring and connection table: Poll
+// keeps mutating its internal slices (append, re-slice) while consumers
+// walk what this returned.
 func (m *Monitor) Snapshot() (up bool, lastErr string, lastPoll float64,
 	events []MonitorEvent, conns []MonitorConn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.up, m.lastErr, m.lastPoll, m.events, m.conns
+	return m.up, m.lastErr, m.lastPoll,
+		append([]MonitorEvent(nil), m.events...),
+		append([]MonitorConn(nil), m.conns...)
 }
 
 func (m *Monitor) Summary() map[string]any {

@@ -40,7 +40,7 @@ func (h *Hub) Unsubscribe(ch chan []byte) {
 }
 
 func (h *Hub) Broadcast(payload any) {
-	raw, err := jsonMarshal(payload)
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
@@ -53,8 +53,6 @@ func (h *Hub) Broadcast(payload any) {
 		}
 	}
 }
-
-func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 // NotifyWebhook posts an alert out-of-band. Formats:
 //
@@ -75,29 +73,29 @@ func NotifyWebhook(a *Alert, rules *Notify) {
 		format = "json"
 	}
 	var body io.Reader
-	url := rules.WebhookURL
+	postURL := rules.WebhookURL
 	ct := "application/json"
 	switch strings.ToLower(format) {
 	case "ntfy":
 		body = strings.NewReader(fmt.Sprintf("%s\n%s", a.Title, a.Detail))
 		// headers via a custom request below
 	case "telegram":
-		url = strings.TrimRight(rules.WebhookURL, "/") +
-			"?chat_id=" + urlQueryEscape(rules.WebhookChatID)
-		payload, _ := jsonMarshal(map[string]string{
+		postURL = strings.TrimRight(rules.WebhookURL, "/") +
+			"?chat_id=" + url.QueryEscape(rules.WebhookChatID)
+		payload, _ := json.Marshal(map[string]string{
 			"chat_id": rules.WebhookChatID,
 			"text": fmt.Sprintf("🚨 wHawk %s: %s — %s",
 				strings.ToUpper(a.Severity), a.Title, a.Detail),
 		})
 		body = bytes.NewReader(payload)
 	default: // json
-		payload, _ := jsonMarshal(map[string]any{
+		payload, _ := json.Marshal(map[string]any{
 			"severity": a.Severity, "title": a.Title, "detail": a.Detail,
 			"check": a.Check, "ts": a.Ts, "count": a.Count,
 		})
 		body = bytes.NewReader(payload)
 	}
-	req, err := http.NewRequest(http.MethodPost, url, body)
+	req, err := http.NewRequest(http.MethodPost, postURL, body)
 	if err != nil {
 		return
 	}
@@ -134,8 +132,6 @@ func sevPriority(sev string) string {
 		return "low"
 	}
 }
-
-func urlQueryEscape(s string) string { return url.QueryEscape(s) }
 
 // NotifyURL is the dashboard's base URL, set by main once the serve address
 // is known. On macOS, a terminal-notifier notification opens it when clicked

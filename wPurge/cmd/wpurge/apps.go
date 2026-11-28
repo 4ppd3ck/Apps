@@ -281,7 +281,7 @@ func listAppsMac() []AppInfo {
 		sem <- struct{}{}
 		go func(i int, b string) {
 			defer wg.Done()
-			<-sem
+			defer func() { <-sem }()
 			info := appInfoFor(b)
 			info.Scope = "system"
 			sys[i] = info
@@ -346,7 +346,7 @@ func desktopAppInfo(path, id string) AppInfo {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if line == "[Desktop Action" { // an actions-only section
+		if strings.HasPrefix(line, "[Desktop Action") { // an actions-only section
 			break
 		}
 		if !strings.HasPrefix(line, "[") && strings.Contains(line, "=") {
@@ -409,10 +409,8 @@ func appInfoFor(bundle string) AppInfo {
 	if running, ok := runningApps([]string{exe}); ok && len(running) > 0 {
 		info.Running = true
 	}
-	return out(info)
+	return info
 }
-
-func out(a AppInfo) AppInfo { return a }
 
 func dirSize(p string, fi os.FileInfo) int64 {
 	if !fi.IsDir() {
@@ -546,8 +544,11 @@ func appLeftoverCandidatesMac(app AppInfo) []leftoverCand {
 		agents, _ := filepath.Glob(filepath.Join(home, "Library", "LaunchAgents", "*.plist"))
 		for _, a := range agents {
 			if d, err := readPlist(a); err == nil {
-				blob := fmt.Sprint(d["Label"], "|", d["Program"], "|", d["ProgramArguments"])
-				if strings.Contains(blob, id) {
+				// the Label IS the launchd identity: short app ids ("git",
+				// "mail") must not match unrelated agents via a substring
+				// scan of the whole plist
+				label, _ := d["Label"].(string)
+				if label == id || strings.HasPrefix(label, id+".") {
 					cands = append(cands, leftoverCand{a, "launch agent"})
 				}
 			}
@@ -557,14 +558,9 @@ func appLeftoverCandidatesMac(app AppInfo) []leftoverCand {
 }
 
 func appLeftoverCandidatesWindows(app AppInfo) []leftoverCand {
-	local := os.Getenv("LOCALAPPDATA")
-	roaming := os.Getenv("APPDATA")
-	programData := os.Getenv("ProgramData")
+	local, roaming, programData := winAppDataDirs()
 	if local == "" || roaming == "" {
 		return nil // env shape unexpected; propose nothing rather than guess
-	}
-	if programData == "" {
-		programData = `C:\ProgramData`
 	}
 	var cands []leftoverCand
 	for _, n := range appSearchNames(app) {
@@ -1281,19 +1277,10 @@ func (s *server) startupToggleLinux(w http.ResponseWriter, path string, activate
 		fail(w, http.StatusForbidden, "system-wide autostart entries (/etc/xdg/autostart) need an administrator — wPurge manages only your own autostart entries (~/.config/autostart)")
 		return
 	}
-	var from, to string
-	if activate {
-		if !strings.HasSuffix(it.Path, ".disabled") {
-			fail(w, http.StatusBadRequest, "item is already active")
-			return
-		}
-		from, to = it.Path, strings.TrimSuffix(it.Path, ".disabled")
-	} else {
-		if strings.HasSuffix(it.Path, ".disabled") {
-			fail(w, http.StatusBadRequest, "item is already deactivated")
-			return
-		}
-		from, to = it.Path, it.Path+".disabled"
+	from, to, err := disabledToggle(it.Path, activate)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if err := os.Rename(from, to); err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -1516,16 +1503,7 @@ func winReadDeactivated() []deactivatedRun {
 }
 
 func winWriteDeactivated(list []deactivatedRun) {
-	data, err := json.MarshalIndent(list, "", " ")
-	if err != nil {
-		return
-	}
-	p := winStorePath()
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
-	tmp := p + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, p)
-	}
+	_ = writeJSONFile(winStorePath(), list, 0o600)
 }
 
 var winRegValueRe = regexp.MustCompile(`^\s*(\S+)\s+REG_([A-Z_]+)\s+(.*)$`)
@@ -1644,19 +1622,10 @@ func (s *server) startupToggleWindows(w http.ResponseWriter, path string, activa
 			s.journalStartup(name, "reg add "+winRunKeyUser+" /v "+name, nil)
 		}
 	case strings.HasSuffix(path, ".lnk") || strings.HasSuffix(path, ".lnk.disabled"):
-		var from, to string
-		if activate {
-			if !strings.HasSuffix(path, ".disabled") {
-				fail(w, http.StatusBadRequest, "item is already active")
-				return
-			}
-			from, to = path, strings.TrimSuffix(path, ".disabled")
-		} else {
-			if strings.HasSuffix(path, ".disabled") {
-				fail(w, http.StatusBadRequest, "item is already deactivated")
-				return
-			}
-			from, to = path, path+".disabled"
+		from, to, err := disabledToggle(path, activate)
+		if err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		if err := os.Rename(from, to); err != nil {
 			fail(w, http.StatusInternalServerError, err.Error())
@@ -1857,4 +1826,32 @@ func (s *server) uninstallWindows(w http.ResponseWriter, path string, confirm bo
 		"logPath": logPath,
 		"note":    "Uninstaller launched — after it finishes, rescan this app's vendor folders for leftovers.",
 	})
+}
+
+// winAppDataDirs is the shared Windows data-root triple the scanners, the
+// critical table and the reveal guard walk: %LOCALAPPDATA%, %APPDATA% and
+// %ProgramData% (the stock location when the env var is missing).
+func winAppDataDirs() (local, roaming, programData string) {
+	local = os.Getenv("LOCALAPPDATA")
+	roaming = os.Getenv("APPDATA")
+	programData = os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
+	}
+	return local, roaming, programData
+}
+
+// disabledToggle computes the rename for a ".disabled"-suffixed startup
+// item, refusing nonsensical directions.
+func disabledToggle(path string, activate bool) (from, to string, err error) {
+	if activate {
+		if !strings.HasSuffix(path, ".disabled") {
+			return "", "", errors.New("item is already active")
+		}
+		return path, strings.TrimSuffix(path, ".disabled"), nil
+	}
+	if strings.HasSuffix(path, ".disabled") {
+		return "", "", errors.New("item is already deactivated")
+	}
+	return path, path + ".disabled", nil
 }

@@ -272,14 +272,7 @@ func (e *Exclusions) RemoveTarget(app, target string) bool {
 }
 
 func (e *Exclusions) saveLocked() {
-	raw, err := json.MarshalIndent(e.list, "", " ")
-	if err != nil {
-		return
-	}
-	tmp := filepath.Join(e.dir, "exclusions.json.tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(e.dir, "exclusions.json"))
-	}
+	_ = SaveJSON(filepath.Join(e.dir, "exclusions.json"), e.list)
 }
 
 // Excludes reports whether app matches any exclusion with the scope set.

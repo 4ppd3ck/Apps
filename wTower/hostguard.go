@@ -10,11 +10,14 @@ package wtower
 //     without reading the reply. Browsers mark such requests Sec-Fetch-Site:
 //     cross-site (or send a foreign/null Origin); non-GET requests carrying
 //     those markers are rejected. Non-browser clients (curl, the peer Go
-//     apps) send neither header and pass untouched.
-//   - token fence: when the launcher injected APPDECK_TOKEN, state-changing
-//     /api/ requests (every POST — theme, layout, retention, blocks, grants,
-//     data deletion) from non-loopback callers must carry it as
-//     X-AppDeck-Token. Loopback (the operator's own machine) is exempt.
+//     apps) send neither header and pass untouched. The Origin check is the
+//     stricter of the two: unlike Host it is attacker-chosen, so it must name
+//     loopback (or the bind host / the addressed host:port) — not just any IP.
+//   - token fence: when the launcher injected APPDECK_TOKEN, /api/ requests
+//     from non-loopback callers must carry it as X-AppDeck-Token (constant-
+//     time compare). Defense in depth — the server binds 127.0.0.1, so today
+//     no non-loopback caller can even connect; the fence is here for the day
+//     the bind widens. Loopback (the operator's own machine) is exempt.
 import (
 	"crypto/subtle"
 	"net"
@@ -36,7 +39,7 @@ func hostGuard(bindHost string, next http.Handler) http.Handler {
 				return
 			}
 			if org := r.Header.Get("Origin"); org != "" &&
-				(org == "null" || !hostAllowed(urlHost(org), bindHost)) {
+				(org == "null" || !originAllowed(urlHost(org), r.Host, bindHost)) {
 				reject(w, "rejected: cross-origin request to a loopback API (Origin guard)\n")
 				return
 			}
@@ -52,9 +55,10 @@ func reject(w http.ResponseWriter, msg string) {
 }
 
 // tokenFence enforces the launcher's non-loopback token rule: when
-// APPDECK_TOKEN is set, non-GET /api/ requests (all the mutating endpoints)
-// from non-loopback callers must carry it as X-AppDeck-Token (constant-time
-// compare). Loopback callers — the local browser, sibling apps — are exempt.
+// APPDECK_TOKEN is set, state-changing /api/ requests (every POST) from
+// non-loopback callers must carry it as X-AppDeck-Token (constant-time
+// compare). GETs stay LAN-open — wHawk polls /api/networks — and loopback
+// callers are always exempt; OPTIONS carries no data and passes.
 func tokenFence(token string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if token != "" && r.Method != http.MethodGet && r.Method != http.MethodHead &&
@@ -85,20 +89,43 @@ func urlHost(origin string) string {
 	return u.Host
 }
 
+// hostAllowed names the hosts a request may be addressed to: localhost, a
+// loopback address, the configured bind host, or any IP literal.
 func hostAllowed(hostPort, bindHost string) bool {
 	if hostPort == "" { // HTTP/1.0 request: no Host to rebind
 		return true
 	}
+	host := hostname(hostPort)
+	return localHost(host, bindHost) ||
+		net.ParseIP(host) != nil // any IP literal; a domain cannot be rebound into one
+}
+
+// originAllowed is the Origin test, stricter than hostAllowed: "some IP
+// literal" must not be enough, or a page on http://192.168.1.50 could POST
+// here whenever Sec-Fetch-Site is absent. The page must sit on loopback or
+// the bind host, or on the very host:port it posts to (the app's own UI on
+// a widened bind).
+func originAllowed(originHost, reqHost, bindHost string) bool {
+	return strings.EqualFold(originHost, reqHost) || localHost(hostname(originHost), bindHost)
+}
+
+func hostname(hostPort string) string {
 	host := hostPort
 	if h, _, err := net.SplitHostPort(hostPort); err == nil {
 		host = h
 	}
-	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+}
+
+// localHost: localhost, a loopback address, or the bind host — on any port,
+// since sibling apps relay from other loopback ports.
+func localHost(host, bindHost string) bool {
 	if host == "" || strings.EqualFold(host, "localhost") ||
 		(bindHost != "" && strings.EqualFold(host, bindHost)) {
 		return true
 	}
-	return net.ParseIP(host) != nil // any IP literal; a domain cannot be rebound into one
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // hostOf extracts the host part of a host:port listen address ("" on parse

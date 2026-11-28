@@ -123,8 +123,9 @@ func main() {
 	NotifyURL = "http://" + addr + "/"
 	srv := &Server{
 		engine: engine, store: store, monitor: monitor,
-		rules: rules, hub: hub, dataDir: dataDir, exclusions: exclusions,
+		hub: hub, dataDir: dataDir, exclusions: exclusions,
 	}
+	srv.rules.Store(rules)
 	fmt.Printf("  serving  : http://%s  (started %s)\n", addr, time.Now().Format("15:04:05"))
 	if err := http.ListenAndServe(addr, hostGuard(*host, srv.routes())); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)

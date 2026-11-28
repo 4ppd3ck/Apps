@@ -21,6 +21,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -461,14 +462,17 @@ func resolveVars(db *RulesDB) map[string]string {
 			}
 		}
 		if v.Exec != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			var cmd *exec.Cmd
 			if runtime.GOOS == "windows" {
-				cmd = exec.Command("cmd", "/c", v.Exec)
+				cmd = exec.CommandContext(ctx, "cmd", "/c", v.Exec)
 			} else {
-				cmd = exec.Command("sh", "-c", v.Exec)
+				cmd = exec.CommandContext(ctx, "sh", "-c", v.Exec)
 			}
 			cmd.Env = append(os.Environ(), "LC_ALL=C")
-			if out, err := cmd.Output(); err == nil {
+			out, err := cmd.Output()
+			cancel()
+			if err == nil {
 				if val := strings.TrimSpace(string(out)); val != "" && !strings.Contains(val, "\n") {
 					vars[v.Name] = val
 					continue
@@ -864,6 +868,14 @@ func collect(r *Rule, vars map[string]string, home string) (*collected, error) {
 					}
 					return nil
 				}
+				// the protected-path guard applies at every depth, not just
+				// to the top-level glob match
+				if reason := criticalReason(path); reason != "" {
+					if d.IsDir() {
+						return fs.SkipDir
+					}
+					return nil
+				}
 				if d.IsDir() {
 					return nil
 				}
@@ -1100,7 +1112,7 @@ func (s *server) handleScan(w http.ResponseWriter, r *http.Request) {
 			sem <- struct{}{}
 			go func(i int) {
 				defer wg.Done()
-				<-sem
+				defer func() { <-sem }()
 				res := scanRule(&db.Rules[i], vars, home)
 				s.scanMu.Lock()
 				s.scanResults[i] = res
@@ -1310,6 +1322,7 @@ func (s *server) cleanRules(ids []string, confirm bool) (map[string]any, error) 
 				log.addf("ok — output: %s", truncateStr(out, 200))
 			}
 			entry.Commands = append(entry.Commands, line+": "+out)
+			entry.Rules = append(entry.Rules, rule.ID)
 			// journal checkpoint: commands are part of the restorable record
 			s.saveJournal(entry)
 		default:
@@ -1568,18 +1581,50 @@ func failWithLog(w http.ResponseWriter, code int, msg string, steps []StepLog) {
 	writeJSON(w, code, map[string]any{"error": msg, "log": steps})
 }
 
-// fmtBytes renders a byte count the way the dashboard does (0 B, 42 KB, …).
-func fmtBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
+// writeJSONFile marshals v and lands it at path via a temp file + rename.
+// Every state file (settings, exclusions, rules, the journal, …) goes
+// through this one implementation.
+func writeJSONFile(path string, v any, perm os.FileMode) error {
+	data, err := json.MarshalIndent(v, "", " ")
+	if err != nil {
+		return err
 	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// movePath renames from→to; across volumes (the Trash may live on another
+// one) rename fails, so fall back to copy + delete.
+func movePath(from, to string) error {
+	if err := os.Rename(from, to); err == nil {
+		return nil
+	}
+	if _, statErr := os.Lstat(from); statErr != nil {
+		return statErr // source vanished mid-move: report that, not a copy error
+	}
+	if err := copyTree(from, to); err != nil {
+		return err
+	}
+	return os.RemoveAll(from)
 }
 
 // truncateStr caps a command-output line for the step log.
@@ -1774,32 +1819,28 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 				// under ~/.descale/husks) and put the trashed original back
 				// in its place, so a restore never loses either copy.
 				husk := filepath.Join(homeDir(), ".wpurge", "husks",
-					fmt.Sprintf("%s-%s", time.Now().Format("20060102-150405"), filepath.Base(item.Path)))
+					fmt.Sprintf("%s-%09d-%s", time.Now().Format("20060102-150405"), time.Now().UnixNano()%1e9, filepath.Base(item.Path)))
 				if err := os.MkdirAll(filepath.Dir(husk), 0o755); err != nil {
 					skipped++
 					continue
 				}
-				if err := os.Rename(item.Path, husk); err != nil {
+				if err := movePath(item.Path, husk); err != nil {
 					skipped++
 					continue
 				}
 			}
 			_ = os.MkdirAll(filepath.Dir(item.Path), 0o755)
-			if err := os.Rename(filepath.Join(trashFilesDir(), item.Trash), item.Path); err != nil {
+			if err := movePath(filepath.Join(trashFilesDir(), item.Trash), item.Path); err != nil {
 				failed++
 				continue
 			}
 			removeTrashInfo(trashDir, item.Trash)
 			restored++
 		}
-		entries[i].Restored = true
-		if data, err := json.MarshalIndent(entries, "", " "); err == nil {
-			path := s.journalPath()
-			tmp := path + ".tmp"
-			if os.WriteFile(tmp, data, 0o600) == nil {
-				_ = os.Rename(tmp, path)
-			}
-		}
+		// only a fully successful restore counts as restored: a partial one
+		// must stay restorable in the journal
+		entries[i].Restored = failed == 0 && restored > 0
+		_ = writeJSONFile(s.journalPath(), entries, 0o600)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restored": restored, "skipped": skipped, "failed": failed})
 		return
 	}

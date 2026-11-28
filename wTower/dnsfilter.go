@@ -30,6 +30,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -127,7 +128,7 @@ const (
 	dnsLogCap    = 500  // recent queries kept in memory
 	dnsAnswerCap = 8192 // resolved-IP -> name entries kept in memory
 
-	dnsProviderTTL   = 5 * time.Minute // provider rule re-sync cadence
+	dnsProviderTTL = 5 * time.Minute // provider rule re-sync cadence
 	dnsCanaryFails = 3               // consecutive canary failures → auto-revert
 
 	// dnsCanaryNames rotates per probe: any single fixed name can be
@@ -207,8 +208,7 @@ func (d *DNSShield) migrateCustomList() {
 	if d.ctx.Cfg.GetBool("dns_custom_imported", false) {
 		return
 	}
-	d.ctx.Cfg.Data["dns_custom_imported"] = true
-	d.ctx.Cfg.Save()
+	_ = d.ctx.Cfg.Update(func(data map[string]any) { data["dns_custom_imported"] = true })
 	imported := 0
 	for _, dom := range readCustomListFile(d.listsDir()) {
 		if _, err := d.ctx.Store.AddDNSRule("domain", "block", dom, nil); err == nil {
@@ -236,8 +236,7 @@ func (d *DNSShield) SetLogEnabled(enabled bool) {
 	d.answers = nil
 	d.logMu.Unlock()
 	if d.ctx != nil && d.ctx.Cfg != nil {
-		d.ctx.Cfg.Data["dns_log"] = enabled
-		d.ctx.Cfg.Save()
+		_ = d.ctx.Cfg.Update(func(data map[string]any) { data["dns_log"] = enabled })
 	}
 }
 
@@ -357,7 +356,7 @@ func (d *DNSShield) Start() error {
 	d.lastErr = ""
 	d.running = true
 	d.stop = make(chan struct{})
-	d.refreshUpstreams()
+	d.refreshUpstreamsLocked(tcpPort) // d.mu is held: selfPort would deadlock on its RLock
 	d.wg.Add(3)
 	go d.serveUDP()
 	go d.serveTCP()
@@ -585,11 +584,15 @@ func (d *DNSShield) serveUDP() {
 		}
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
+		// tracked like the TCP conns: Stop must wait for in-flight answers
+		// before it nils the conn they write to
+		d.wg.Add(1)
 		go d.handleUDP(pkt, addr)
 	}
 }
 
 func (d *DNSShield) handleUDP(pkt []byte, addr *net.UDPAddr) {
+	defer d.wg.Done()
 	resp := d.handleMessage(pkt, false)
 	if resp == nil {
 		return
@@ -629,7 +632,7 @@ func (d *DNSShield) handleTCPConn(conn net.Conn) {
 	r := bufio.NewReader(conn)
 	lenBuf := make([]byte, 2)
 	for {
-		if _, err := readFull(r, lenBuf); err != nil {
+		if _, err := io.ReadFull(r, lenBuf); err != nil {
 			return
 		}
 		n := int(binary.BigEndian.Uint16(lenBuf))
@@ -637,7 +640,7 @@ func (d *DNSShield) handleTCPConn(conn net.Conn) {
 			return
 		}
 		msg := make([]byte, n)
-		if _, err := readFull(r, msg); err != nil {
+		if _, err := io.ReadFull(r, msg); err != nil {
 			return
 		}
 		resp := d.handleMessage(msg, true)
@@ -651,18 +654,6 @@ func (d *DNSShield) handleTCPConn(conn net.Conn) {
 			return
 		}
 	}
-}
-
-func readFull(r *bufio.Reader, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := r.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
-	}
-	return total, nil
 }
 
 // dnsQuery is a parsed query: everything the shield needs to decide and to
@@ -784,7 +775,15 @@ func localResponse(q dnsQuery, rcode int) []byte {
 // local resolver on another port (a second filter, a dnsmasq…) but never
 // the shield's own socket, which is the one loop that must not happen.
 // Public resolvers are the last resort.
+// refreshUpstreams re-reads the configured upstream list (called unlocked,
+// from housekeeping).
 func (d *DNSShield) refreshUpstreams() {
+	d.refreshUpstreamsLocked(d.selfPort())
+}
+
+// refreshUpstreamsLocked is the body; Start passes the just-bound port
+// directly because it already holds d.mu.
+func (d *DNSShield) refreshUpstreamsLocked(shieldPort int) {
 	var ups []string
 	if v := strings.TrimSpace(d.ctx.GetString("dns_upstreams", "")); v != "" {
 		for _, part := range strings.Split(v, ",") {
@@ -801,7 +800,7 @@ func (d *DNSShield) refreshUpstreams() {
 			if ip == nil || ip.IsUnspecified() {
 				continue
 			}
-			if ip.IsLoopback() && port == strconv.Itoa(d.selfPort()) {
+			if ip.IsLoopback() && port == strconv.Itoa(shieldPort) {
 				continue // relaying to ourselves: an infinite loop
 			}
 			ups = append(ups, net.JoinHostPort(host, port))
@@ -825,9 +824,13 @@ func (d *DNSShield) refreshUpstreams() {
 }
 
 // selfPort is the bound shield port (the configured default before Start).
+// Start writes d.port under d.mu, so reads take it too.
 func (d *DNSShield) selfPort() int {
-	if d.port != 0 {
-		return d.port
+	d.mu.RLock()
+	port := d.port
+	d.mu.RUnlock()
+	if port != 0 {
+		return port
 	}
 	return d.configuredPort()
 }
@@ -921,7 +924,7 @@ func tcpRoundTrip(up string, query []byte) ([]byte, bool) {
 	// the first buffered past the length prefix
 	r := bufio.NewReader(c)
 	lenBuf := make([]byte, 2)
-	if _, err := readFull(r, lenBuf); err != nil {
+	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		return nil, false
 	}
 	n := int(binary.BigEndian.Uint16(lenBuf))
@@ -929,7 +932,7 @@ func tcpRoundTrip(up string, query []byte) ([]byte, bool) {
 		return nil, false
 	}
 	buf := make([]byte, n)
-	if _, err := readFull(r, buf); err != nil {
+	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, false
 	}
 	return buf, true
@@ -1149,10 +1152,13 @@ func (d *DNSShield) RouteSystem(enable bool) error {
 			"the shield binds port 53 directly, then point the system DNS at "+
 			"127.0.0.1", PlatformString())
 	}
-	if d.port != 0 && d.port != dnsShieldPort {
+	d.mu.RLock()
+	port := d.port
+	d.mu.RUnlock()
+	if port != 0 && port != dnsShieldPort {
 		return fmt.Errorf("the pf redirect targets the default port %d, but the "+
 			"shield is listening on %d — set dns_port back to %d first",
-			dnsShieldPort, d.port, dnsShieldPort)
+			dnsShieldPort, port, dnsShieldPort)
 	}
 	if !enable {
 		return d.routeOff()
@@ -1258,8 +1264,7 @@ func (d *DNSShield) SetRouteMode(mode string) {
 	d.routeMode = mode
 	d.mu.Unlock()
 	if d.ctx != nil && d.ctx.Cfg != nil {
-		d.ctx.Cfg.Data["dns_route_mode"] = mode
-		d.ctx.Cfg.Save()
+		_ = d.ctx.Cfg.Update(func(data map[string]any) { data["dns_route_mode"] = mode })
 	}
 }
 
@@ -1776,25 +1781,4 @@ func readCustomListFile(dir string) []string {
 		}
 	}
 	return out
-}
-
-// appendCustomLine appends one domain to custom.txt, creating the file with
-// a small header on first use. (Legacy path, kept for downgrades.)
-func (d *DNSShield) appendCustomLine(dom string) error {
-	dir := d.listsDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, customListName+".txt")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if info, err := f.Stat(); err == nil && info.Size() == 0 {
-		f.WriteString("# one domain per line — added by the dashboard's " +
-			"block-domain button\n")
-	}
-	_, err = f.WriteString(dom + "\n")
-	return err
 }

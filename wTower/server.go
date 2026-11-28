@@ -260,8 +260,7 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"error": "unknown gauge style"})
 			return
 		}
-		ctx.Cfg.Data["gauge_style"] = style
-		if err := ctx.Cfg.Save(); err != nil {
+		if err := ctx.Cfg.Update(func(data map[string]any) { data["gauge_style"] = style }); err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
@@ -304,8 +303,7 @@ func doPost(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"error": "unknown view"})
 			return
 		}
-		ctx.Cfg.Data["view"] = view
-		if err := ctx.Cfg.Save(); err != nil {
+		if err := ctx.Cfg.Update(func(data map[string]any) { data["view"] = view }); err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
@@ -1023,8 +1021,7 @@ func postRetention(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 			"(0 disables automatic purging)"})
 		return
 	}
-	ctx.Cfg.Data["retention_days"] = days
-	if err := ctx.Cfg.Save(); err != nil {
+	if err := ctx.Cfg.Update(func(data map[string]any) { data["retention_days"] = days }); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
@@ -1052,14 +1049,17 @@ func ToggleCollectors(ctx *Ctx, target string, enabled bool) map[string]any {
 			c.SetStatus("disabled", "turned off from dashboard")
 		}
 		// persist per category (categories map 1:1 to collectors here)
-		cols := ctx.Cfg.CollectorsCfg()
-		if cols == nil {
-			cols = map[string]any{}
-			ctx.Cfg.Data["collectors"] = cols
+		if err := ctx.Cfg.Update(func(data map[string]any) {
+			cols, ok := data["collectors"].(map[string]any)
+			if !ok {
+				cols = map[string]any{}
+				data["collectors"] = cols
+			}
+			cols[c.Category()] = enabled
+		}); err != nil {
+			return map[string]any{"ok": false, "error": err.Error(), "target": target, "enabled": enabled}
 		}
-		cols[c.Category()] = enabled
 	}
-	ctx.Cfg.Save()
 	return map[string]any{
 		"ok":         true,
 		"target":     target,
@@ -1072,7 +1072,7 @@ func ToggleCollectors(ctx *Ctx, target string, enabled bool) map[string]any {
 // ("block" enforcement or "files" tracing) -- loopback only, since it pops
 // the platform's elevation dialog on the console session.
 func postGrant(ctx *Ctx, w http.ResponseWriter, r *http.Request, target string) {
-	if !requestIsLoopback(r) {
+	if !fromLoopback(r) {
 		writeJSON(w, 403, map[string]any{"error": "loopback only"})
 		return
 	}
@@ -1139,7 +1139,7 @@ func postBlocks(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		// country block or a bad list can cut the machine's own
 		// connectivity), then restore with resume. Loopback only — a LAN
 		// caller must not be able to disarm the firewall.
-		if !requestIsLoopback(r) {
+		if !fromLoopback(r) {
 			writeJSON(w, 403, map[string]any{"error": "pause/resume is a local-machine action"})
 			return
 		}
@@ -1456,7 +1456,7 @@ func postDNS(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 	case "route":
 		// the toggle invokes the privileged helper — a LAN caller must not
 		// reach it (same rule as the elevation dialogs)
-		if !requestIsLoopback(r) {
+		if !fromLoopback(r) {
 			writeJSON(w, 403, map[string]any{"error": "system DNS routing is a local-machine action"})
 			return
 		}

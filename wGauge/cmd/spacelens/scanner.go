@@ -58,7 +58,6 @@ type Progress struct {
 	Started   float64   `json:"started"`
 	ElapsedS  float64   `json:"elapsedS"`
 	Done      bool      `json:"done"`
-	Error     string    `json:"error,omitempty"`
 	Tree      *Node     `json:"tree,omitempty"`
 	Biggest   []Biggest `json:"biggest,omitempty"`
 	DurationS float64   `json:"durationS,omitempty"`
@@ -138,7 +137,7 @@ func (s *Scanner) Cancel() { s.cancel.Store(true) }
 
 // walkDir walks one subtree serially, returning the subtree node. Parent
 // directories are assembled bottom-up from the returned children.
-func (s *Scanner) walkDir(dir string, depth int) *Node {
+func (s *Scanner) walkDir(dir string) *Node {
 	if s.cancel.Load() {
 		return nil
 	}
@@ -174,16 +173,16 @@ func (s *Scanner) walkDir(dir string, depth int) *Node {
 			node.Files++
 			continue
 		}
-			if info.IsDir() {
-				// tolerate unreadable subtrees, skip pseudo-filesystems
-				if skipDir(p) {
-					continue
-				}
-				child := s.walkDir(p, depth+1)
-				if child == nil {
-					return node // canceled mid-walk
-				}
-				node.Size += child.Size
+		if info.IsDir() {
+			// tolerate unreadable subtrees, skip pseudo-filesystems
+			if skipDir(p) {
+				continue
+			}
+			child := s.walkDir(p)
+			if child == nil {
+				return node // canceled mid-walk
+			}
+			node.Size += child.Size
 			node.Files += child.Files
 			node.Dirs += child.Dirs + 1
 			node.Errs += child.Errs
@@ -195,9 +194,7 @@ func (s *Scanner) walkDir(dir string, depth int) *Node {
 		s.bytes.Add(sz)
 		node.Size += sz
 		node.Files++
-		if info.Mode()&os.ModeSymlink == 0 {
-			s.noteBig(p, sz)
-		}
+		s.noteBig(p, sz) // symlinks returned above, so this is a plain file
 		node.Children = append(node.Children, &Node{Path: p, Name: e.Name(), Size: sz, Files: 1})
 	}
 	return node
@@ -255,14 +252,14 @@ func (s *Scanner) Start(roots []string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("a scan is already running")
 	}
+	// every reset happens under s.mu, so a poll never observes the new scan
+	// as Running with the previous scan's counters, tree or biggest list
 	s.running = true
 	s.root = cleaned[0]
 	s.roots = cleaned
 	s.started = time.Now()
 	s.duration = 0
 	s.tree = nil
-	s.mu.Unlock()
-
 	s.cancel.Store(false)
 	s.files.Store(0)
 	s.dirs.Store(0)
@@ -272,6 +269,7 @@ func (s *Scanner) Start(roots []string) error {
 	s.muBig.Lock()
 	s.biggest = nil
 	s.muBig.Unlock()
+	s.mu.Unlock()
 
 	go func() {
 		var tree *Node
@@ -310,16 +308,19 @@ func (s *Scanner) scanMulti(roots []string) *Node {
 // scan runs the concurrent pass: the root's direct entries are split among
 // workers, each subtree walked serially; the root node is assembled after.
 func (s *Scanner) scan(root string) *Node {
+	s.dirs.Add(1) // the root is walked too, like every dir in walkDir
+	rootNode := &Node{Path: root, Name: root, IsDir: true}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		s.errs.Add(1)
+		rootNode.Errs++
 	}
-	rootNode := &Node{Path: root, Name: root, IsDir: true}
 	type result struct {
 		idx  int
 		node *Node
 	}
 	var wg sync.WaitGroup
+	var rootErrs atomic.Int64 // root-level failures, folded in once the workers are done
 	results := make([]result, 0, len(entries))
 	ch := make(chan result, len(entries)+8)
 	workers := runtime.GOMAXPROCS(0)
@@ -353,6 +354,7 @@ func (s *Scanner) scan(root string) *Node {
 				info, err := e.Info()
 				if err != nil {
 					s.errs.Add(1)
+					rootErrs.Add(1)
 					continue
 				}
 				p := filepath.Join(root, e.Name())
@@ -369,7 +371,7 @@ func (s *Scanner) scan(root string) *Node {
 				if skipDir(p) {
 					continue
 				}
-				if n := s.walkDir(p, 1); n != nil {
+				if n := s.walkDir(p); n != nil {
 					ch <- result{i, n}
 				}
 			}
@@ -391,6 +393,7 @@ func (s *Scanner) scan(root string) *Node {
 		rootNode.Errs += r.node.Errs
 		rootNode.Children = append(rootNode.Children, r.node)
 	}
+	rootNode.Errs += rootErrs.Load()
 	prune(rootNode)
 	return rootNode
 }

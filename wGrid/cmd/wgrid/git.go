@@ -13,10 +13,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
 const gitTimeout = 60 * time.Second
+
+// repoLocks guards one clone directory at a time: a Refresh runs a
+// goroutine per source, and two sources can share a repo (same name+url,
+// different list file) — clone/fetch/reset/RemoveAll must not interleave.
+var (
+	repoLocksMu sync.Mutex
+	repoLocks   = map[string]*sync.Mutex{}
+)
+
+func lockRepo(slug string) func() {
+	repoLocksMu.Lock()
+	mu := repoLocks[slug]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		repoLocks[slug] = mu
+	}
+	repoLocksMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
 
 func gitAvailable() bool {
 	_, err := exec.LookPath("git")
@@ -42,11 +63,26 @@ func repoSlug(s Source) string {
 }
 
 func within(root, p string) bool {
+	// both sides resolved: a symlink inside the cloned repo must not make a
+	// lexical walk look contained while it reads through to somewhere else
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolvedRoot
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	} else if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		// the list file may not exist yet (fetch just failed, say): resolving
+		// the parent still catches symlinked directories along the path
+		p = filepath.Join(resolvedDir, filepath.Base(p))
+	} else {
+		return false
+	}
 	rel, err := filepath.Rel(root, p)
 	if err != nil {
 		return false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	// "." is the root itself — a directory, never a readable list file
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // gitRepoFile ensures the shallow clone of s.URL exists and is current, then
@@ -65,17 +101,24 @@ func gitRepoFile(s Source, reposDir string) ([]byte, error) {
 		return nil, err
 	}
 	repo := filepath.Join(reposDir, repoSlug(s))
+	unlock := lockRepo(filepath.Base(repo))
+	defer unlock()
 	if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
-		args := []string{"clone", "--depth", "1", "--quiet"}
-		if s.Branch != "" {
-			args = append(args, "--branch", s.Branch, "--single-branch")
+		cloneArgs := func(shallow bool) []string {
+			args := []string{"clone", "--quiet"}
+			if shallow {
+				args = append(args, "--depth", "1")
+			}
+			if s.Branch != "" {
+				args = append(args, "--branch", s.Branch, "--single-branch")
+			}
+			return append(args, s.URL, repo)
 		}
-		args = append(args, s.URL, repo)
-		if out, err := runGit(args, s.URL); err != nil {
+		if out, err := runGit(cloneArgs(true), s.URL); err != nil {
 			os.RemoveAll(repo) // a partial clone must not poison the next attempt
 			// Some transports (plain local paths, restricted hosts) refuse
-			// shallow clones — retry once with full history.
-			if out2, err2 := runGit([]string{"clone", "--quiet", s.URL, repo}, s.URL); err2 != nil {
+			// shallow clones — retry once with full history, same branch.
+			if out2, err2 := runGit(cloneArgs(false), s.URL); err2 != nil {
 				os.RemoveAll(repo)
 				return nil, fmt.Errorf("clone %s: %s: %s", s.URL, err2, tailOut(out2))
 			}

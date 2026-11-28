@@ -96,14 +96,7 @@ func readSettings() descaleSettings {
 func saveSettings(mut func(*descaleSettings)) {
 	s := readSettings()
 	mut(&s)
-	if data, err := json.MarshalIndent(s, "", " "); err == nil {
-		p := settingsPath()
-		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		tmp := p + ".tmp"
-		if os.WriteFile(tmp, data, 0o600) == nil {
-			_ = os.Rename(tmp, p)
-		}
-	}
+	_ = writeJSONFile(settingsPath(), s, 0o600)
 }
 
 // setGuardrailsEnabled flips the toggle immediately and persists it, so
@@ -363,12 +356,7 @@ func buildCriticalTable(home string) map[string]bool {
 	var dirs []string
 	switch runtime.GOOS {
 	case "windows":
-		local := os.Getenv("LOCALAPPDATA")
-		roaming := os.Getenv("APPDATA")
-		pd := os.Getenv("ProgramData")
-		if pd == "" {
-			pd = `C:\ProgramData`
-		}
+		local, roaming, pd := winAppDataDirs()
 		windir := os.Getenv("SystemRoot")
 		if windir == "" {
 			windir = `C:\Windows`

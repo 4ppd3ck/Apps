@@ -304,8 +304,7 @@ func SaveReportSections(cfg *Config, sections map[string]any) map[string]bool {
 			clean[k] = Truthy(v)
 		}
 	}
-	cfg.Data["report_sections"] = clean
-	_ = cfg.Save()
+	_ = cfg.Update(func(data map[string]any) { data["report_sections"] = clean })
 	return ReportSections(cfg)
 }
 

@@ -374,40 +374,29 @@ function renderAlerts() {
       await api("/api/alerts", { method: "DELETE", body: JSON.stringify({ id: Number(b.dataset.id) }) });
       loadAlerts();
     }));
+  // toggleExclusion flips one exclusion scope for an app (watchdog silence
+  // or auto-ack); both alert-row buttons share it
+  const toggleExclusion = async (b, field, what) => {
+    const app = b.dataset.app;
+    const on = !!(exclusionFor(app)?.[field]);
+    try {
+      const d = await api("/api/exclusions", {
+        method: "POST",
+        body: JSON.stringify({ app, field, value: !on }),
+      });
+      exclusions = d.exclusions || [];
+      renderAlerts(); // button flips to its new state
+      loadAlerts();   // silencing applies server-side — refresh the rows
+    } catch (e) {
+      alert(`Could not save ${what}: ` + e.message);
+    }
+  };
   document.querySelectorAll(".alert button.excl").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const app = b.dataset.app;
-      const on = !!(exclusionFor(app)?.watchdog);
-      try {
-        const d = await api("/api/exclusions", {
-          method: "POST",
-          body: JSON.stringify({ app, field: "watchdog", value: !on }),
-        });
-        exclusions = d.exclusions || [];
-        renderAlerts(); // button flips to its new state
-        loadAlerts();   // excluded apps stop alerting server-side — refresh rows
-      } catch (e) {
-        alert("Could not save exclusion: " + e.message);
-      }
-    }));
+    b.addEventListener("click", () => toggleExclusion(b, "watchdog", "exclusion")));
   // auto-ack: future alerts from this app are recorded pre-acked — history
   // and hit counts only, never a popup; existing unacked rows are acked too
   document.querySelectorAll(".alert button.aack").forEach((b) =>
-    b.addEventListener("click", async () => {
-      const app = b.dataset.app;
-      const on = !!(exclusionFor(app)?.auto_ack);
-      try {
-        const d = await api("/api/exclusions", {
-          method: "POST",
-          body: JSON.stringify({ app, field: "auto_ack", value: !on }),
-        });
-        exclusions = d.exclusions || [];
-        renderAlerts();
-        loadAlerts();
-      } catch (e) {
-        alert("Could not save auto-ack: " + e.message);
-      }
-    }));
+    b.addEventListener("click", () => toggleExclusion(b, "auto_ack", "auto-ack")));
   // the AppScope bridge: queue a block rule for the alert's remote IP in
   // the running monitor (it validates again; its Grant flow enforces it)
   document.querySelectorAll(".alert button.asblock").forEach((b) =>
@@ -742,6 +731,10 @@ function renderSensitive() {
   }
   const kindSel = $("#sensitiveKind").value;
   const appSel = $("#sensitiveApp").value;
+  const query = $("#sensitiveSearch").value.trim().toLowerCase();
+  const kind = $("#sensitiveKind").value;
+  const app = $("#sensitiveApp").value;
+  const liveOnly = $("#sensitiveLiveOnly").checked;
   const apps = [...new Set(access.map((a) => a.app))].sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }));
   // rebuild the app dropdown each refresh, keeping the current selection
@@ -763,10 +756,6 @@ function renderSensitive() {
   $("#sensitiveNotes").innerHTML = notes
     .map((n) => `<div class="permission-warning">${esc(n)}</div>`).join("");
 
-  const query = $("#sensitiveSearch").value.trim().toLowerCase();
-  const kind = $("#sensitiveKind").value;
-  const app = $("#sensitiveApp").value;
-  const liveOnly = $("#sensitiveLiveOnly").checked;
   $("#clearSensitiveFilters").disabled = !(query || kind || app || liveOnly);
   const rows = access.filter((a) =>
     (!kind || a.kind === kind) &&

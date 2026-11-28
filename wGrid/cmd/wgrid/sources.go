@@ -147,12 +147,29 @@ func validateSource(s Source) error {
 	return nil
 }
 
+// normalizeSource trims every free-text field so a pasted URL with a
+// trailing space or a name with surrounding whitespace is stored the way
+// it is validated and deduped.
+func normalizeSource(s Source) Source {
+	s.Name = strings.TrimSpace(s.Name)
+	s.URL = strings.TrimSpace(s.URL)
+	s.Path = strings.TrimSpace(s.Path)
+	s.Branch = strings.TrimSpace(s.Branch)
+	s.CSVColumn = strings.TrimSpace(s.CSVColumn)
+	return s
+}
+
 // AddSource validates a source, persists it to sources.json, then activates
-// it in memory. Callers kick off a Refresh afterwards.
-func (it *IntelFeed) AddSource(s Source) error {
+// it in memory. Callers kick off a Refresh afterwards. mutMu serializes the
+// whole check-persist-activate flow: two concurrent adds must not both pass
+// the duplicate test or interleave their sources.json rewrites.
+func (it *IntelFeed) AddSource(src Source) error {
+	s := normalizeSource(src)
 	if err := validateSource(s); err != nil {
 		return err
 	}
+	it.mutMu.Lock()
+	defer it.mutMu.Unlock()
 	it.mu.Lock()
 	for _, e := range it.sources {
 		if sameSource(e, s) {
@@ -177,7 +194,10 @@ func (it *IntelFeed) AddSource(s Source) error {
 // RemoveSource drops a source from memory and sources.json. If no remaining
 // source feeds that provider name, the fetched provider is removed from the
 // cache so lookups stop matching immediately.
-func (it *IntelFeed) RemoveSource(s Source) error {
+func (it *IntelFeed) RemoveSource(src Source) error {
+	s := normalizeSource(src)
+	it.mutMu.Lock()
+	defer it.mutMu.Unlock()
 	it.mu.Lock()
 	kept := make([]Source, 0, len(it.sources))
 	removed := false
@@ -226,11 +246,12 @@ func (it *IntelFeed) RemoveSource(s Source) error {
 	return nil
 }
 
-// persistSourceChange rewrites sources.json, honouring the shape already on
-// disk (legacy arrays stay arrays; object form keeps its replace flag; a
-// fresh managed file is object form with replace=false). Deleted defaults
-// are recorded in the object form's "removed" list so they stay gone across
-// restarts while remaining code-owned.
+// persistSourceChange rewrites sources.json. The object form keeps its
+// replace flag; a legacy hand-written array file is migrated once into
+// {replace:true, sources:<effective list>} so add/remove keeps working.
+// Deleted defaults are recorded in the object form's "removed" list so they
+// stay gone across restarts while remaining code-owned. The caller holds
+// mutMu.
 func (it *IntelFeed) persistSourceChange(add *Source, remove Source) error {
 	raw, _ := os.ReadFile(it.sourcesPath())
 	obj := parseSourcesFile(raw)
@@ -290,16 +311,11 @@ func (it *IntelFeed) persistSourceChange(add *Source, remove Source) error {
 			}
 		}
 	}
-	var out []byte
-	var err error
-	if obj.legacy {
-		out, err = json.MarshalIndent(obj.Sources, "", "  ")
-	} else {
-		out, err = json.MarshalIndent(obj, "", "  ")
-	}
+	// Object form from here on: the legacy case above already materialised
+	// into {replace:true, sources:<effective list>} — a one-time migration.
+	out, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
 		return err
 	}
-	writeFileAtomic(it.dataDir, "sources.json", out)
-	return nil
+	return writeFileAtomic(it.dataDir, "sources.json", out)
 }

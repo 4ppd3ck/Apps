@@ -60,8 +60,8 @@ const (
 	countryFetchTimeout   = 10 * time.Second
 	countryRefreshTimeout = 120 * time.Second // git-based feeds can be slow
 	ownCountryTTL         = time.Hour
-	wgridProbeTimeout   = 2 * time.Second
-	wgridRelocateGap    = 15 * time.Second // min spacing between relocations
+	wgridProbeTimeout     = 2 * time.Second
+	wgridRelocateGap      = 15 * time.Second // min spacing between relocations
 	// maxRemoteIPChars is the conservative netsh command-line budget for one
 	// rule's remoteip= list (Windows CL size is ~32k; 400 IPv4 CIDRs land
 	// far below both that and the firewall's per-rule entry limit).
@@ -515,10 +515,6 @@ func (cs *CountrySource) probeWGrid(base string) bool {
 		return false
 	}
 	return payload.Providers != nil
-}
-
-func (cs *CountrySource) cachePath(cc string) string {
-	return filepath.Join(cs.dir, cc+".json")
 }
 
 func (cs *CountrySource) load() {

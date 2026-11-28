@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 )
@@ -275,8 +274,4 @@ func firstLine(s string, max int) string {
 		out = out[:max] + "…"
 	}
 	return out
-}
-
-func sortItems(items []PersistItem) {
-	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
 }

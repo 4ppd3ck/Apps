@@ -431,8 +431,12 @@ func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
 		d[1] += dOut
 		n.destPending[dkey] = d
 	}
-	flushDest := n.store != nil && len(n.destPending) > 0 &&
+	// one due decision, taken before either flush resets lastDestFlush —
+	// computing it again after flushDest set lastDestFlush=now would starve
+	// flushApp on every interval
+	destDue := n.store != nil && len(n.destPending) > 0 &&
 		now-n.lastDestFlush >= destFlushInterval
+	flushDest := destDue
 	var batch []DestinationDelta
 	if flushDest {
 		batch = make([]DestinationDelta, 0, len(n.destPending))
@@ -443,10 +447,8 @@ func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
 			})
 		}
 		n.destPending = map[string][2]int64{}
-		n.lastDestFlush = now
 	}
-	flushApp := n.store != nil && len(n.appPending) > 0 &&
-		now-n.lastDestFlush >= destFlushInterval
+	flushApp := n.store != nil && len(n.appPending) > 0 && destDue
 	var appBatch []DestinationDelta
 	if flushApp {
 		appBatch = make([]DestinationDelta, 0, len(n.appPending))
@@ -456,6 +458,9 @@ func (n *NetState) UpdateConnBytes(counters map[string][2]int64) {
 			})
 		}
 		n.appPending = map[string][2]int64{}
+	}
+	if flushDest {
+		n.lastDestFlush = now
 	}
 	namer := n.usageNamer
 	n.mu.Unlock()

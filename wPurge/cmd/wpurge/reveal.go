@@ -25,7 +25,8 @@ import (
 func revealAllowed(p string) bool {
 	roots := []string{homeDir()}
 	if runtime.GOOS == "windows" {
-		roots = append(roots, os.Getenv("LOCALAPPDATA"), os.Getenv("APPDATA"), os.Getenv("ProgramData"))
+		local, roaming, pd := winAppDataDirs()
+		roots = append(roots, local, roaming, pd)
 	}
 	lp := strings.ToLower(filepath.Clean(p))
 	for _, root := range roots {

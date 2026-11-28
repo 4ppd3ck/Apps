@@ -74,14 +74,8 @@ func (s *server) handleApps(w http.ResponseWriter, r *http.Request) {
 
 // handleSourceAdd adds + persists an intel source, then refreshes.
 func (s *server) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
-	body, ok := readBody(w, r)
-	if !ok {
-		return
-	}
-	raw, _ := json.Marshal(body)
 	var src Source
-	if err := json.Unmarshal(raw, &src); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "invalid JSON body"})
+	if !decodeBody(w, r, &src) {
 		return
 	}
 	if err := s.feed.AddSource(src); err != nil {
@@ -94,14 +88,8 @@ func (s *server) handleSourceAdd(w http.ResponseWriter, r *http.Request) {
 
 // handleSourceDelete removes an intel source.
 func (s *server) handleSourceDelete(w http.ResponseWriter, r *http.Request) {
-	body, ok := readBody(w, r)
-	if !ok {
-		return
-	}
-	raw, _ := json.Marshal(body)
 	var src Source
-	if err := json.Unmarshal(raw, &src); err != nil {
-		writeJSON(w, 400, map[string]any{"error": "invalid JSON body"})
+	if !decodeBody(w, r, &src) {
 		return
 	}
 	if err := s.feed.RemoveSource(src); err != nil {
@@ -111,12 +99,11 @@ func (s *server) handleSourceDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "removed"})
 }
 
-// readBody decodes the request's JSON object body (1 MiB cap).
-func readBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	var body map[string]any
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+// decodeBody decodes the request's JSON body (1 MiB cap) straight into v.
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad request body"})
-		return nil, false
+		return false
 	}
-	return body, true
+	return true
 }

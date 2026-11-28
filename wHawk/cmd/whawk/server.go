@@ -8,11 +8,10 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,7 +22,7 @@ type Server struct {
 	engine     *Engine
 	store      *Store
 	monitor    *Monitor
-	rules      *Rules
+	rules      atomic.Pointer[Rules]
 	hub        *Hub
 	dataDir    string
 	exclusions *Exclusions
@@ -71,7 +70,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.json(w, s.exclusions.filterPermissionInventory(permissionInventory()))
 	case "/api/exclusions":
 		if r.Method == http.MethodPost {
-			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			var req struct {
 				App    string `json:"app"`
 				Target string `json:"target"`
@@ -79,7 +77,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 				Value  bool   `json:"value"`
 				Remove bool   `json:"remove"`
 			}
-			if err := json.Unmarshal(body, &req); err != nil || req.App == "" {
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.App == "" {
 				s.json(w, map[string]any{"error": "app is required"}, 400)
 				return
 			}
@@ -138,13 +136,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
 			Client, Service string
 			Override        bool
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		if !s.readJSON(w, r, &req) {
 			return
 		}
 		if req.Client == "" || req.Service == "" {
@@ -162,13 +158,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
 			Path     string
 			Override bool
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		if !s.readJSON(w, r, &req) {
 			return
 		}
 		if req.Path == "" {
@@ -186,13 +180,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
 			Action, Dir, Path string
 			Override          bool
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		if !s.readJSON(w, r, &req) {
 			return
 		}
 		if req.Action == "" || req.Path == "" {
@@ -210,13 +202,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		s.json(w, map[string]any{"ok": true, "message": msg})
 	case "/api/alerts":
 		if r.Method == http.MethodDelete {
-			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			var req struct {
 				ID       int64 `json:"id"`
 				AllAcked bool  `json:"allAcked"`
 			}
-			if err := json.Unmarshal(body, &req); err != nil {
-				s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+			if !s.readJSON(w, r, &req) {
 				return
 			}
 			removed := s.store.Delete(req.ID, req.AllAcked)
@@ -233,34 +223,32 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
 			ID  int64 `json:"id"`
 			All bool  `json:"all"`
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		if !s.readJSON(w, r, &req) {
 			return
 		}
 		s.store.Ack(req.ID, req.All)
 		s.json(w, map[string]any{"ok": true})
 	case "/api/rules":
 		if r.Method == http.MethodPost {
-			body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			var overlay Rules
-			if err := json.Unmarshal(body, &overlay); err != nil {
-				s.json(w, map[string]any{"error": FmtErr(err)}, 400)
+			if !s.readJSON(w, r, &overlay) {
 				return
 			}
 			if err := SaveJSON(s.dataDir+"/rules.user.json", &overlay); err != nil {
 				s.json(w, map[string]any{"error": FmtErr(err)}, 500)
 				return
 			}
-			*s.rules = *LoadRules(s.dataDir)
-			s.json(w, map[string]any{"ok": true, "rules": s.rules})
+			// atomic swap: scans keep running against the old snapshot while
+			// LoadRules reads the file, then every reader sees the new set
+			s.rules.Store(LoadRules(s.dataDir))
+			s.json(w, map[string]any{"ok": true, "rules": s.rules.Load()})
 			return
 		}
-		s.json(w, s.rules)
+		s.json(w, s.rules.Load())
 	case "/api/baseline":
 		if r.Method == http.MethodPost {
 			s.store.BaselineReset()
@@ -281,12 +269,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 			s.json(w, map[string]any{"error": "POST required"}, 405)
 			return
 		}
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		var req struct {
 			IP string `json:"ip"`
 		}
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		if !s.readJSON(w, r, &req) {
 			return
 		}
 		ip := strings.TrimSpace(req.IP)
@@ -354,16 +340,28 @@ func (s *Server) apiStatus() map[string]any {
 	return status
 }
 
+// readJSON decodes a small JSON request body into v (1 MiB cap) and answers
+// the request itself when it does not parse; false means "response sent".
+func (s *Server) readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
+		s.json(w, map[string]any{"error": "invalid JSON body"}, 400)
+		return false
+	}
+	return true
+}
+
 func (s *Server) json(w http.ResponseWriter, v any, code ...int) {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		http.Error(w, FmtErr(err), 500)
 		return
 	}
+	// before WriteHeader: after it, net/http silently drops the header and
+	// error bodies go out as text/plain
+	w.Header().Set("Content-Type", "application/json")
 	if len(code) > 0 {
 		w.WriteHeader(code[0])
 	}
-	w.Header().Set("Content-Type", "application/json")
 	w.Write(raw)
 }
 
@@ -396,14 +394,4 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-}
-
-// sortedKeys is only used by tests / debugging output.
-func sortedKeys[V any](m map[string]V) []string {
-	out := []string{}
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

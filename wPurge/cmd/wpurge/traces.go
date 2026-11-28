@@ -327,14 +327,9 @@ func traceLocationsMac(ids map[string]bool) []Trace {
 }
 
 func traceLocationsWindows(ids map[string]bool) []Trace {
-	local := os.Getenv("LOCALAPPDATA")
-	roaming := os.Getenv("APPDATA")
+	local, roaming, pd := winAppDataDirs()
 	if local == "" || roaming == "" {
 		return nil
-	}
-	pd := os.Getenv("ProgramData")
-	if pd == "" {
-		pd = `C:\ProgramData`
 	}
 	var out []Trace
 	for _, loc := range []struct{ root, kind string }{
@@ -571,17 +566,5 @@ func (s *server) handleTracesExclusionsRemove(w http.ResponseWriter, r *http.Req
 }
 
 func writeExclusions(list []string) error {
-	data, err := json.MarshalIndent(list, "", " ")
-	if err != nil {
-		return err
-	}
-	p := exclusionsPath()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
-	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, p)
+	return writeJSONFile(exclusionsPath(), list, 0o600)
 }

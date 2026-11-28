@@ -123,8 +123,14 @@ func (e *Enforcer) cidrWindows(rule *Block, add bool) (string, string) {
 	value := rule.Value
 	if rtype == "country" {
 		value = strings.ToUpper(strings.TrimSpace(value))
-	} else if rtype == "list" {
+	} else {
+		// list AND provider values land in broker file names ("provider-
+		// <value>.cidr") and netsh rule names — sanitize like every other
+		// label, or "a|b", "..\" and friends break both
 		value = SanitizeLabel(value)
+	}
+	if value == "" {
+		return "error", "rule value is empty after sanitizing"
 	}
 	if !add {
 		if e.Mode == "helper" {

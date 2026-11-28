@@ -182,7 +182,9 @@ type IntelFeed struct {
 	hc      *http.Client
 	dataDir string
 	refresh time.Duration
-	lastTry float64
+
+	refreshMu sync.Mutex // serializes Refresh: its read-modify-write of the cache is not reentrant
+	mutMu     sync.Mutex // serializes AddSource/RemoveSource around their sources.json rewrite
 }
 
 func NewIntelFeed(dataDir string, refresh time.Duration) *IntelFeed {
@@ -225,8 +227,9 @@ func (it *IntelFeed) needRefresh() bool {
 // fail keeps its previous networks. Sources reporting 304 Not Modified
 // count as healthy (their data is unchanged).
 func (it *IntelFeed) Refresh() {
+	it.refreshMu.Lock() // one refresh at a time — concurrent runs would race on it.cache.ETags
+	defer it.refreshMu.Unlock()
 	it.mu.Lock()
-	it.lastTry = Now()
 	sources := append([]Source(nil), it.sources...)
 	prev := make(map[string]Provider, len(it.cache.Providers))
 	for _, p := range it.cache.Providers {
@@ -378,7 +381,9 @@ func (it *IntelFeed) rebuildNetsLocked() {
 	it.nets = nets
 }
 
-// Lookup reports the provider whose range contains ip, if any.
+// Lookup reports the provider whose range contains ip, if any. Overlapping
+// providers resolve deterministically: the most specific network wins
+// (longest prefix; ties go to the alphabetically first name).
 func (it *IntelFeed) Lookup(ipStr string) (string, bool) {
 	ip := net.ParseIP(strings.TrimSpace(ipStr))
 	if ip == nil {
@@ -386,14 +391,22 @@ func (it *IntelFeed) Lookup(ipStr string) (string, bool) {
 	}
 	it.mu.Lock()
 	defer it.mu.Unlock()
+	best, bestName := -1, ""
 	for name, nets := range it.nets {
 		for _, n := range nets {
-			if n.Contains(ip) {
-				return name, true
+			if !n.Contains(ip) {
+				continue
+			}
+			ones, _ := n.Mask.Size()
+			if ones > best || (ones == best && (bestName == "" || name < bestName)) {
+				best, bestName = ones, name
 			}
 		}
 	}
-	return "", false
+	if best < 0 {
+		return "", false
+	}
+	return bestName, true
 }
 
 func (it *IntelFeed) Cache() Cache {
@@ -547,12 +560,9 @@ func (it *IntelFeed) fetchHTTP(s Source) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	cidrs, err := ParseFeedColumn(s.Format, raw, s.CSVColumn)
+	cidrs, err := parseSource(s, raw) // validates the format and the empty-feed case
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", s.URL, err)
-	}
-	if len(cidrs) == 0 {
-		return nil, fmt.Errorf("%s: feed contained no networks", s.URL)
+		return nil, err
 	}
 
 	nc := Cond{ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}
@@ -587,13 +597,9 @@ func withRequestGUID(u string) string {
 	return u + sep + "clientrequestid=" + guid
 }
 
-// ParseFeed extracts CIDR strings from a supported feed format.
-func ParseFeed(format string, raw []byte) ([]string, error) {
-	return ParseFeedColumn(format, raw, "")
-}
-
-// ParseFeedColumn is ParseFeed with an optional csv column selector
-// (header name or 1-based index).
+// ParseFeedColumn extracts CIDR strings from a supported feed format;
+// column optionally selects the csv network column (header name or
+// 1-based index).
 func ParseFeedColumn(format string, raw []byte, column string) ([]string, error) {
 	switch format {
 	case "goog":
@@ -820,14 +826,28 @@ func parseCSV(raw []byte, column string) ([]string, error) {
 // ------------------------------------------------------- cache persistence --
 // JSON cache persistence (stdlib only) — mirrors wHawk's store.go style.
 
-// writeFileAtomic writes dir/name via a .tmp + rename so readers never see a
-// torn file.
-func writeFileAtomic(dir, name string, raw []byte) {
-	_ = os.MkdirAll(dir, 0o755)
-	tmp := filepath.Join(dir, name+".tmp")
-	if os.WriteFile(tmp, raw, 0o644) == nil {
-		_ = os.Rename(tmp, filepath.Join(dir, name))
+// writeFileAtomic writes dir/name via a random temp file + rename so
+// readers never see a torn file and concurrent writers never collide on
+// one .tmp path. The error is returned — persistence failures must reach
+// the API caller, not vanish.
+func writeFileAtomic(dir, name string, raw []byte) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
+	tmp, err := os.CreateTemp(dir, name+".tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, filepath.Join(dir, name))
 }
 
 // loadCache reads data/cache.json; true when a usable cache existed.
@@ -848,11 +868,24 @@ func (it *IntelFeed) loadCache() bool {
 
 func (it *IntelFeed) saveCache() {
 	it.mu.Lock()
-	c := it.cache
+	c := Cache{
+		Providers: append([]Provider(nil), it.cache.Providers...),
+		Errors:    make(map[string]string, len(it.cache.Errors)),
+		UpdatedAt: it.cache.UpdatedAt,
+		ETags:     make(map[string]Cond, len(it.cache.ETags)),
+	}
+	for k, v := range it.cache.Errors {
+		c.Errors[k] = v
+	}
+	// deep-copy ETags: a concurrent fetchHTTP mutates the real map, and c is
+	// marshalled below outside the lock
+	for k, v := range it.cache.ETags {
+		c.ETags[k] = v
+	}
 	it.mu.Unlock()
 	raw, err := json.MarshalIndent(c, "", " ")
 	if err != nil {
 		return
 	}
-	writeFileAtomic(it.dataDir, "cache.json", raw)
+	_ = writeFileAtomic(it.dataDir, "cache.json", raw)
 }

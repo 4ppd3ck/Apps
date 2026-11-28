@@ -46,16 +46,22 @@ func tccIdentValid(s string) bool {
 // to the OS itself; wHawk refuses remediation actions against them.
 var systemPathPrefixes = []string{"/System", "/usr", "/bin", "/sbin", "/private/var/db"}
 
-// systemPathProtected reports whether path is inside (or equals) one of the
-// system-owned locations.
-func systemPathProtected(path string) bool {
+// dirPrefixProtected reports whether path is inside (or equals) one of the
+// protected prefixes — the shared check behind the macOS and Linux guards.
+func dirPrefixProtected(path string, prefixes []string) bool {
 	clean := filepath.Clean(path)
-	for _, p := range systemPathPrefixes {
+	for _, p := range prefixes {
 		if clean == p || strings.HasPrefix(clean, p+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// systemPathProtected reports whether path is inside (or equals) one of the
+// system-owned macOS locations.
+func systemPathProtected(path string) bool {
+	return dirPrefixProtected(path, systemPathPrefixes)
 }
 
 // tccClientProtected blocks removal of Apple's own TCC grants: deleting
@@ -292,14 +298,27 @@ func daemonLabel(path string) string {
 	return strings.TrimSpace(out)
 }
 
+// safeShellPath validates a path destined for a double-quoted sh -c word.
+// Inside double quotes a backslash escapes the closing quote (so "…\" lets
+// everything after it run as shell), and $ and backticks start expansion —
+// all four must go, as must control characters and the traversal "..".
+func safeShellPath(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if strings.ContainsAny(clean, "\"`$\\") || strings.Contains(clean, "..") ||
+		strings.ContainsAny(clean, "\n\r\t;|&") {
+		return "", fmt.Errorf("invalid path %q", path)
+	}
+	return clean, nil
+}
+
 // daemonRemoveCommand builds the shell command that unloads (if the path is
 // a launchd plist) and deletes a third-party daemon/agent/helper file.
 // Split out for tests; user input only ever lands in the quoted path.
 // override skips the com.apple.* filename guardrail.
 func daemonRemoveCommand(path string, override bool) (string, error) {
-	clean := filepath.Clean(path)
-	if strings.ContainsAny(clean, "\"`$") || strings.Contains(clean, "..") {
-		return "", fmt.Errorf("invalid path %q", path)
+	clean, err := safeShellPath(path)
+	if err != nil {
+		return "", err
 	}
 	if !override && strings.HasPrefix(filepath.Base(clean), "com.apple.") {
 		return "", fmt.Errorf("%s is part of macOS (com.apple.*) and cannot be removed "+
@@ -383,13 +402,7 @@ var linuxSystemPrefixes = []string{
 // linuxPathProtected reports whether path is inside (or equals) one of the
 // OS-owned Linux locations.
 func linuxPathProtected(path string) bool {
-	clean := filepath.Clean(path)
-	for _, p := range linuxSystemPrefixes {
-		if clean == p || strings.HasPrefix(clean, p+"/") {
-			return true
-		}
-	}
-	return false
+	return dirPrefixProtected(path, linuxSystemPrefixes)
 }
 
 // osCriticalUnitPrefixes are distro-managed unit-name prefixes; removing
@@ -402,9 +415,9 @@ var osCriticalUnitPrefixes = []string{"systemd-", "dbus-", "user@"}
 // user input only ever lands in the quoted path. override skips the
 // OS-path and distro-unit guardrails.
 func daemonRemoveLinuxCommand(path string, override bool) (string, error) {
-	clean := filepath.Clean(path)
-	if strings.ContainsAny(clean, "\"`$") || strings.Contains(clean, "..") {
-		return "", fmt.Errorf("invalid path %q", path)
+	clean, err := safeShellPath(path)
+	if err != nil {
+		return "", err
 	}
 	if !override && linuxPathProtected(clean) {
 		return "", fmt.Errorf("%s is part of the OS and cannot be removed "+

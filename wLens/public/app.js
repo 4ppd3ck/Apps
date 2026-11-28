@@ -164,8 +164,12 @@ function setSaveMode(m) {
   if (m === 'folder' && !saveFolder) pickFolder();
 }
 
+function appApiUrl(path) {
+  return new URL(path.replace(/^\/+/, ''), document.baseURI).toString();
+}
+
 async function apiJSON(url, opts) {
-  const res = await fetch(url, opts);
+  const res = await fetch(appApiUrl(url), opts);
   let data = null;
   try { data = await res.json(); } catch {}
   if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
@@ -374,7 +378,7 @@ async function run({ push = true } = {}) {
   params.set('page', String(state.page));
   let data;
   try {
-    const res = await fetch(`/api/search?${params}`, { signal });
+    const res = await fetch(appApiUrl(`/api/search?${params}`), { signal });
     data = await res.json();
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   } catch (err) {
@@ -537,9 +541,9 @@ els.results.addEventListener('click', (e) => {
 function trackClick(repo, action, href) {
   const payload = JSON.stringify({ type: 'click', repo, action, query: lastQuery });
   try {
-    navigator.sendBeacon('/api/track', new Blob([payload], { type: 'application/json' }));
+    navigator.sendBeacon(appApiUrl('/api/track'), new Blob([payload], { type: 'application/json' }));
   } catch {
-    fetch('/api/track', { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+    fetch(appApiUrl('/api/track'), { method: 'POST', body: payload, keepalive: true }).catch(() => {});
   }
 }
 
@@ -968,7 +972,7 @@ function waitInstallDone(jobId) {
 async function loadTrending() {
   let d;
   try {
-    const res = await fetch('/api/trending');
+    const res = await fetch(appApiUrl('/api/trending'));
     d = await res.json();
   } catch {
     return;

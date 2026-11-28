@@ -16,10 +16,6 @@ import (
 )
 
 func (s *server) handlePick(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.fail(w, http.StatusMethodNotAllowed, "POST required")
-		return
-	}
 	paths, err := pickFolders()
 	if err != nil {
 		s.fail(w, http.StatusInternalServerError, err.Error())
@@ -71,32 +67,31 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
 
 func pickLinux() ([]string, error) {
 	if z, err := exec.LookPath("zenity"); err == nil {
-		out, err := exec.Command(z, "--file-selection", "--directory", "--multiple",
-			"--separator=\n", "--title", "Choose folders or volumes to scan").Output()
-		if err != nil {
-			if len(out) == 0 {
-				return nil, nil // dialog canceled
-			}
-			return nil, fmt.Errorf("folder picker failed: %v", err)
-		}
-		return splitPaths(out), nil
+		return runPicker(exec.Command(z, "--file-selection", "--directory", "--multiple",
+			"--separator=\n", "--title", "Choose folders or volumes to scan"))
 	}
 	if k, err := exec.LookPath("kdialog"); err == nil {
 		start := "/"
 		if home, e := os.UserHomeDir(); e == nil && home != "" {
 			start = home
 		}
-		out, err := exec.Command(k, "--getexistingdirectory", start,
-			"--title", "Choose a folder to scan").Output()
-		if err != nil {
-			if len(out) == 0 {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("folder picker failed: %v", err)
-		}
-		return splitPaths(out), nil
+		return runPicker(exec.Command(k, "--getexistingdirectory", start,
+			"--title", "Choose a folder to scan"))
 	}
 	return nil, errors.New("no folder picker found — install zenity or kdialog to choose folders")
+}
+
+// runPicker runs a dialog and splits its output; no output means it was
+// dismissed rather than failed.
+func runPicker(cmd *exec.Cmd) ([]string, error) {
+	out, err := cmd.Output()
+	if err != nil {
+		if len(out) == 0 {
+			return nil, nil // dialog canceled
+		}
+		return nil, fmt.Errorf("folder picker failed: %v", err)
+	}
+	return splitPaths(out), nil
 }
 
 func splitPaths(out []byte) []string {

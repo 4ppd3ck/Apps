@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,12 +74,55 @@ func dnsIdentity(r *DNSRule) string {
 	return strings.Join([]string{r.Type, r.Action, r.Value}, "|")
 }
 
+// validateImportedBlock re-checks an imported rule with the same guardrails
+// the dashboard's add form enforces: no loopback targets, sane ports,
+// normalized country codes. An import file is data, never trusted.
+func validateImportedBlock(b *Block) error {
+	switch b.Type {
+	case "ip":
+		if !ValidIP(b.Value) {
+			return fmt.Errorf("invalid IPv4 %q", b.Value)
+		}
+		if b.Action != "allow" && (strings.HasPrefix(b.Value, "127.") || b.Value == "::1") {
+			return fmt.Errorf("refusing to block the loopback address")
+		}
+	case "connection":
+		ip, port, found := strings.Cut(b.Value, ":")
+		if !found || !ValidIP(ip) || !allDigits(port) {
+			return fmt.Errorf("connection rule %q is not ip:port", b.Value)
+		}
+		if n, _ := strconv.Atoi(port); n < 1 || n > 65535 {
+			return fmt.Errorf("connection rule %q has an out-of-range port", b.Value)
+		}
+	case "country":
+		if NormalizeCC(b.Value) == "" {
+			return fmt.Errorf("invalid country code %q", b.Value)
+		}
+		b.Value = NormalizeCC(b.Value)
+	case "provider":
+		if strings.TrimSpace(b.Value) == "" || len(b.Value) > 80 {
+			return fmt.Errorf("provider rules name a WGrid list, %q is not one", b.Value)
+		}
+	case "app":
+		if b.AppPath == nil || *b.AppPath == "" {
+			return fmt.Errorf("app rules carry the executable path")
+		}
+	case "list":
+		if strings.TrimSpace(b.Value) == "" || b.AppPath == nil || *b.AppPath == "" {
+			return fmt.Errorf("list rules name a blocklist file")
+		}
+	default:
+		return fmt.Errorf("unknown type %q", b.Type)
+	}
+	return nil
+}
+
 // postRulesImport merges (or with ?replace=1, replaces) the imported rule
 // set into the live store. Existing rules the document also carries are
 // skipped, so re-importing an edited file never duplicates rows.
 func postRulesImport(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 	var in RuleExport
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "invalid JSON: " + err.Error()})
 		return
 	}
@@ -97,6 +141,9 @@ func postRulesImport(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 	if replace {
 		if cur, err := ctx.Store.ListBlocks(); err == nil {
 			for _, b := range cur {
+				// lift the rule out of pf / the application firewall BEFORE
+				// the row is gone, or its enforcement is orphaned there
+				ctx.Enforcer.Unapply(b)
 				ctx.Store.RemoveBlock(b.ID) // best effort; identity map above is stale-safe
 			}
 			existing = map[string]bool{}
@@ -113,8 +160,8 @@ func postRulesImport(ctx *Ctx, w http.ResponseWriter, r *http.Request) {
 		if b.Action != "allow" {
 			b.Action = "block" // normalized like the REST add path
 		}
-		if strings.TrimSpace(b.Value) == "" {
-			badBlocks = append(badBlocks, "empty value")
+		if err := validateImportedBlock(b); err != nil {
+			badBlocks = append(badBlocks, err.Error())
 			continue
 		}
 		id := blockIdentity(b)

@@ -126,13 +126,6 @@ func GetPassUser() string {
 	return "?"
 }
 
-func currentUser() string {
-	if u, err := user.Current(); err == nil {
-		return u.Username
-	}
-	return "?"
-}
-
 // ------------------------------------------------------------ services ----
 
 var services = map[int]string{

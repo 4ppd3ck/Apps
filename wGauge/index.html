@@ -18,20 +18,22 @@
       <button id="addBtn" class="btn ghost" title="Add this location to the multi-scan list">＋ Add</button>
       <button id="scanBtn" class="btn">Scan</button>
       <button id="cancelBtn" class="btn ghost" hidden>Stop</button>
-      <span id="progress" class="progress muted"></span>
+      <span id="progress" class="progress muted" aria-live="polite"></span>
     </div>
+    <p id="scanScope" class="scan-scope muted" aria-live="polite"></p>
     <div id="chips" class="chips" hidden></div>
   </header>
 
   <main class="main">
     <section class="chart-wrap">
       <div id="views" class="views" role="tablist" aria-label="Chart view">
-        <button class="btn ghost active" data-view="sun" role="tab">☀ Sunburst</button>
-        <button class="btn ghost" data-view="treemap" role="tab">▦ Treemap</button>
-        <button class="btn ghost" data-view="bars" role="tab">≡ Bars</button>
+        <button id="sunTab" class="btn ghost active" data-view="sun" role="tab" aria-controls="chartPanel" aria-selected="true" tabindex="0">☀ Sunburst</button>
+        <button id="treemapTab" class="btn ghost" data-view="treemap" role="tab" aria-controls="chartPanel" aria-selected="false" tabindex="-1">▦ Treemap</button>
+        <button id="barsTab" class="btn ghost" data-view="bars" role="tab" aria-controls="chartPanel" aria-selected="false" tabindex="-1">≡ Bars</button>
       </div>
-      <div class="chart-area">
-        <canvas id="sun" width="900" height="900"></canvas>
+      <p class="chart-hint" id="chartHint">Select a folder to zoom in · click the center or a breadcrumb to go back · hover for sizes. For keyboard navigation, switch to Bars.</p>
+      <div class="chart-area" role="tabpanel" id="chartPanel" tabindex="0" aria-labelledby="sunTab">
+        <canvas id="sun" width="900" height="900" aria-label="Interactive disk usage chart. Switch to Bars for keyboard-accessible navigation."></canvas>
         <div id="bars" class="bars" hidden></div>
         <div id="center" class="center" hidden>
           <div id="centerName" class="center-name"></div>
@@ -45,7 +47,7 @@
     <aside class="side">
       <div class="crumbs" id="crumbs"></div>
       <div class="sel" id="sel">
-        <p class="muted" id="selEmpty">Scan a folder, then click any segment to zoom in; click the middle to go back up.</p>
+        <p class="muted" id="selEmpty">Choose a location and scan to see folder sizes, navigate into large folders, and reveal or safely trash items.</p>
       </div>
       <h3>Biggest files <span class="muted small" id="bigMeta"></span></h3>
       <div id="bigList" class="big-list"></div>
@@ -58,8 +60,8 @@
     <button id="delClear" class="btn ghost">Clear</button>
   </div>
 
-  <dialog id="confirmDlg" class="dlg">
-    <h3>Move to Trash?</h3>
+  <dialog id="confirmDlg" class="dlg" aria-labelledby="confirmTitle">
+    <h3 id="confirmTitle">Move to Trash?</h3>
     <p class="muted small">Items go to the OS Trash / Recycle Bin — recoverable, never permanently deleted here.</p>
     <ul id="delList" class="del-list mono"></ul>
     <div class="dlg-actions">

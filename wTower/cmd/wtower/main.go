@@ -49,11 +49,18 @@ func main() {
 	}
 
 	cfg := wtower.LoadConfig(*configPath)
-	if *host != "" {
-		cfg.Data["host"] = *host
-	}
-	if *port != 0 {
-		cfg.Data["port"] = *port
+	if *host != "" || *port != 0 {
+		hostFlag, portFlag := *host, *port
+		if err := cfg.Update(func(data map[string]any) {
+			if hostFlag != "" {
+				data["host"] = hostFlag
+			}
+			if portFlag != 0 {
+				data["port"] = portFlag
+			}
+		}); err != nil {
+			fmt.Printf("[config] %v\n", err)
+		}
 	}
 
 	store, err := wtower.NewStore(filepath.Join(cfg.DataDir(), "wtower.db"))

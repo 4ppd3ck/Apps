@@ -57,21 +57,79 @@ var dashboardLayoutOrder = []string{
 	"system-panel", "blocks-panel", "dns-panel",
 }
 
-func dashboardLayout(cfg *Config) map[string]any {
-	order := append([]string(nil), dashboardLayoutOrder...)
+// reportLayoutOrder whitelists the arrangementable Report view panels (the
+// usage-report controls panel is fixed at full width and not rearrangeable).
+var reportLayoutOrder = []string{
+	"report-screen-panel", "report-protos-panel", "report-sites-panel",
+	"report-usage-panel", "report-byapp-panel",
+}
+
+func validReportPanel(id string) bool {
+	for _, known := range reportLayoutOrder {
+		if known == id {
+			return true
+		}
+	}
+	return false
+}
+
+// panelLayoutSpec pins one layout family to its config key, panel order,
+// whitelist and the per-panel defaults the shipped arrangement ships with.
+type panelLayoutSpec struct {
+	key     string
+	order   []string
+	valid   func(string) bool
+	widths  map[string]any // panel -> non-default width
+	heights map[string]any // panel -> non-default height
+}
+
+var dashboardLayoutSpec = panelLayoutSpec{
+	key:   "dashboard_layout",
+	order: dashboardLayoutOrder,
+	valid: func(id string) bool { _, ok := tableVisibilityDefaults[id]; return ok },
+	widths: map[string]any{
+		"top-apps-panel": 6, "connection-summary-panel": 6,
+	},
+	heights: map[string]any{
+		"connection-summary-panel": 461,
+	},
+}
+
+var reportLayoutSpec = panelLayoutSpec{
+	key:   "report_layout",
+	order: reportLayoutOrder,
+	valid: validReportPanel,
+	// the GlassWire-ish defaults: the small tables sit beside their donuts
+	// at half width, the wide sites table spans the row
+	widths: map[string]any{
+		"report-screen-panel": 6, "report-protos-panel": 6,
+		"report-usage-panel": 6, "report-byapp-panel": 6,
+	},
+}
+
+// panelLayout returns one layout family: the shipped arrangement with
+// whatever the saved config validly overrides. Unknown ids and out-of-range
+// values from hand-edited configs are ignored, never rejected.
+func panelLayout(cfg *Config, spec panelLayoutSpec) map[string]any {
+	order := append([]string(nil), spec.order...)
 	widths := map[string]any{}
-	heights := map[string]any{"connection-summary-panel": 461}
+	heights := map[string]any{}
 	panelLocks := map[string]any{}
 	collapsed := map[string]any{}
-	for _, panel := range dashboardLayoutOrder {
+	for _, panel := range spec.order {
 		widths[panel] = 12
 		panelLocks[panel] = false
 		collapsed[panel] = false
 	}
-	widths["top-apps-panel"] = 6
-	widths["connection-summary-panel"] = 6
+	for id, w := range spec.widths {
+		widths[id] = w
+	}
+	for id, h := range spec.heights {
+		heights[id] = h
+	}
 	locked := false
-	if saved, ok := cfg.Data["dashboard_layout"].(map[string]any); ok {
+	savedAny, _ := cfg.Get(spec.key)
+	if saved, ok := savedAny.(map[string]any); ok {
 		var savedOrder []any
 		switch values := saved["order"].(type) {
 		case []any:
@@ -89,7 +147,7 @@ func dashboardLayout(cfg *Config) map[string]any {
 				if !ok {
 					continue
 				}
-				if _, valid := tableVisibilityDefaults[id]; valid && !seen[id] {
+				if spec.valid(id) && !seen[id] {
 					ordered = append(ordered, id)
 					seen[id] = true
 				}
@@ -103,7 +161,7 @@ func dashboardLayout(cfg *Config) map[string]any {
 		}
 		if savedWidths, ok := saved["widths"].(map[string]any); ok {
 			for id, width := range savedWidths {
-				if _, valid := tableVisibilityDefaults[id]; valid {
+				if spec.valid(id) {
 					if span, ok := normalizeWidth(width); ok {
 						widths[id] = span
 					}
@@ -112,7 +170,7 @@ func dashboardLayout(cfg *Config) map[string]any {
 		}
 		if savedHeights, ok := saved["heights"].(map[string]any); ok {
 			for id, height := range savedHeights {
-				if _, valid := tableVisibilityDefaults[id]; !valid {
+				if !spec.valid(id) {
 					continue
 				}
 				if value, ok := height.(float64); ok && value >= 180 && value <= 1200 {
@@ -122,7 +180,7 @@ func dashboardLayout(cfg *Config) map[string]any {
 		}
 		if savedLocks, ok := saved["panel_locks"].(map[string]any); ok {
 			for id, value := range savedLocks {
-				if _, valid := tableVisibilityDefaults[id]; valid {
+				if spec.valid(id) {
 					if isLocked, ok := value.(bool); ok {
 						panelLocks[id] = isLocked
 					}
@@ -131,7 +189,7 @@ func dashboardLayout(cfg *Config) map[string]any {
 		}
 		if savedCollapsed, ok := saved["collapsed"].(map[string]any); ok {
 			for id, value := range savedCollapsed {
-				if _, valid := tableVisibilityDefaults[id]; valid {
+				if spec.valid(id) {
 					if isCollapsed, ok := value.(bool); ok {
 						collapsed[id] = isCollapsed
 					}
@@ -148,296 +206,99 @@ func dashboardLayout(cfg *Config) map[string]any {
 	}
 }
 
+// savePanelLayout validates one layout family against its whitelist and
+// persists it. Update restores the previous config when the save fails, so
+// the caller only has to surface the error.
+func savePanelLayout(cfg *Config, spec panelLayoutSpec, value any) (map[string]any, error) {
+	input, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("layout must be an object")
+	}
+	layout := panelLayout(cfg, spec)
+	if rawOrder, exists := input["order"]; exists {
+		items, ok := rawOrder.([]any)
+		if !ok {
+			return nil, fmt.Errorf("layout order must be an array")
+		}
+		seen := map[string]bool{}
+		order := make([]string, 0, len(spec.order))
+		for _, item := range items {
+			id, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("layout order entries must be strings")
+			}
+			if !spec.valid(id) {
+				return nil, fmt.Errorf("unknown panel %q", id)
+			}
+			if !seen[id] {
+				order = append(order, id)
+				seen[id] = true
+			}
+		}
+		for _, id := range spec.order {
+			if !seen[id] {
+				order = append(order, id)
+			}
+		}
+		layout["order"] = order
+	}
+	for _, key := range []string{"widths", "heights", "panel_locks", "collapsed"} {
+		raw, exists := input[key]
+		if !exists {
+			continue
+		}
+		values, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("layout %s must be an object", key)
+		}
+		current := layout[key].(map[string]any)
+		for id, item := range values {
+			if !spec.valid(id) {
+				return nil, fmt.Errorf("unknown panel %q", id)
+			}
+			switch key {
+			case "widths":
+				span, ok := normalizeWidth(item)
+				if !ok {
+					return nil, fmt.Errorf("invalid width for %q", id)
+				}
+				current[id] = span
+			case "heights":
+				height, ok := item.(float64)
+				if !ok || height < 180 || height > 1200 {
+					return nil, fmt.Errorf("invalid height for %q", id)
+				}
+				current[id] = height
+			case "panel_locks", "collapsed":
+				flag, ok := item.(bool)
+				if !ok {
+					return nil, fmt.Errorf("invalid %s state for %q", key, id)
+				}
+				current[id] = flag
+			}
+		}
+	}
+	if rawLocked, exists := input["locked"]; exists {
+		locked, ok := rawLocked.(bool)
+		if !ok {
+			return nil, fmt.Errorf("layout lock must be boolean")
+		}
+		layout["locked"] = locked
+	}
+	if err := cfg.Update(func(data map[string]any) { data[spec.key] = layout }); err != nil {
+		return nil, fmt.Errorf("save %s: %w", spec.key, err)
+	}
+	return layout, nil
+}
+
+// named wrappers keep the four historical entry points the server calls.
+func dashboardLayout(cfg *Config) map[string]any { return panelLayout(cfg, dashboardLayoutSpec) }
 func saveDashboardLayout(cfg *Config, value any) (map[string]any, error) {
-	input, ok := value.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("layout must be an object")
-	}
-	layout := dashboardLayout(cfg)
-	if rawOrder, exists := input["order"]; exists {
-		items, ok := rawOrder.([]any)
-		if !ok {
-			return nil, fmt.Errorf("layout order must be an array")
-		}
-		seen := map[string]bool{}
-		order := make([]string, 0, len(tableVisibilityDefaults))
-		for _, item := range items {
-			id, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("layout order entries must be strings")
-			}
-			if _, valid := tableVisibilityDefaults[id]; !valid {
-				return nil, fmt.Errorf("unknown panel %q", id)
-			}
-			if !seen[id] {
-				order = append(order, id)
-				seen[id] = true
-			}
-		}
-		for _, id := range dashboardLayoutOrder {
-			if !seen[id] {
-				order = append(order, id)
-			}
-		}
-		layout["order"] = order
-	}
-	for _, key := range []string{"widths", "heights", "panel_locks", "collapsed"} {
-		raw, exists := input[key]
-		if !exists {
-			continue
-		}
-		values, ok := raw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("layout %s must be an object", key)
-		}
-		current := layout[key].(map[string]any)
-		for id, item := range values {
-			if _, valid := tableVisibilityDefaults[id]; !valid {
-				return nil, fmt.Errorf("unknown panel %q", id)
-			}
-			switch key {
-			case "widths":
-				span, ok := normalizeWidth(item)
-				if !ok {
-					return nil, fmt.Errorf("invalid width for %q", id)
-				}
-				current[id] = span
-			case "heights":
-				height, ok := item.(float64)
-				if !ok || height < 180 || height > 1200 {
-					return nil, fmt.Errorf("invalid height for %q", id)
-				}
-				current[id] = height
-			case "panel_locks", "collapsed":
-				flag, ok := item.(bool)
-				if !ok {
-					return nil, fmt.Errorf("invalid %s state for %q", key, id)
-				}
-				current[id] = flag
-			}
-		}
-	}
-	if rawLocked, exists := input["locked"]; exists {
-		locked, ok := rawLocked.(bool)
-		if !ok {
-			return nil, fmt.Errorf("layout lock must be boolean")
-		}
-		layout["locked"] = locked
-	}
-	previous, hadPrevious := cfg.Data["dashboard_layout"]
-	cfg.Data["dashboard_layout"] = layout
-	if err := cfg.Save(); err != nil {
-		if hadPrevious {
-			cfg.Data["dashboard_layout"] = previous
-		} else {
-			delete(cfg.Data, "dashboard_layout")
-		}
-		return nil, fmt.Errorf("save dashboard layout: %w", err)
-	}
-	return layout, nil
+	return savePanelLayout(cfg, dashboardLayoutSpec, value)
 }
-
-// reportLayoutOrder whitelists the arrangementable Report view panels (the
-// usage-report controls panel is fixed at full width and not rearrangeable).
-var reportLayoutOrder = []string{
-	"report-screen-panel", "report-protos-panel", "report-sites-panel",
-	"report-usage-panel", "report-byapp-panel",
-}
-
-func reportLayout(cfg *Config) map[string]any {
-	order := append([]string(nil), reportLayoutOrder...)
-	widths := map[string]any{}
-	heights := map[string]any{}
-	panelLocks := map[string]any{}
-	collapsed := map[string]any{}
-	for _, panel := range reportLayoutOrder {
-		widths[panel] = 12
-		panelLocks[panel] = false
-		collapsed[panel] = false
-	}
-	// the GlassWire-ish defaults: the two small tables sit beside their
-	// donuts at half width, the wide sites table spans the row
-	widths["report-screen-panel"] = 6
-	widths["report-protos-panel"] = 6
-	widths["report-usage-panel"] = 6
-	widths["report-byapp-panel"] = 6
-	locked := false
-	if saved, ok := cfg.Data["report_layout"].(map[string]any); ok {
-		var savedOrder []any
-		switch values := saved["order"].(type) {
-		case []any:
-			savedOrder = values
-		case []string:
-			for _, id := range values {
-				savedOrder = append(savedOrder, id)
-			}
-		}
-		if savedOrder != nil {
-			seen := map[string]bool{}
-			ordered := make([]string, 0, len(order))
-			for _, item := range savedOrder {
-				id, ok := item.(string)
-				if !ok {
-					continue
-				}
-				if validReportPanel(id) && !seen[id] {
-					ordered = append(ordered, id)
-					seen[id] = true
-				}
-			}
-			for _, id := range order {
-				if !seen[id] {
-					ordered = append(ordered, id)
-				}
-			}
-			order = ordered
-		}
-		if savedWidths, ok := saved["widths"].(map[string]any); ok {
-			for id, width := range savedWidths {
-				if !validReportPanel(id) {
-					continue
-				}
-				if span, ok := normalizeWidth(width); ok {
-					widths[id] = span
-				}
-			}
-		}
-		if savedHeights, ok := saved["heights"].(map[string]any); ok {
-			for id, height := range savedHeights {
-				if !validReportPanel(id) {
-					continue
-				}
-				if value, ok := height.(float64); ok && value >= 180 && value <= 1200 {
-					heights[id] = value
-				}
-			}
-		}
-		if savedLocks, ok := saved["panel_locks"].(map[string]any); ok {
-			for id, value := range savedLocks {
-				if !validReportPanel(id) {
-					continue
-				}
-				if isLocked, ok := value.(bool); ok {
-					panelLocks[id] = isLocked
-				}
-			}
-		}
-		if savedCollapsed, ok := saved["collapsed"].(map[string]any); ok {
-			for id, value := range savedCollapsed {
-				if !validReportPanel(id) {
-					continue
-				}
-				if isCollapsed, ok := value.(bool); ok {
-					collapsed[id] = isCollapsed
-				}
-			}
-		}
-		if value, ok := saved["locked"].(bool); ok {
-			locked = value
-		}
-	}
-	return map[string]any{
-		"order": order, "widths": widths, "heights": heights,
-		"locked": locked, "panel_locks": panelLocks, "collapsed": collapsed,
-	}
-}
-
-func validReportPanel(id string) bool {
-	for _, known := range reportLayoutOrder {
-		if known == id {
-			return true
-		}
-	}
-	return false
-}
-
+func reportLayout(cfg *Config) map[string]any { return panelLayout(cfg, reportLayoutSpec) }
 func saveReportLayout(cfg *Config, value any) (map[string]any, error) {
-	input, ok := value.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("layout must be an object")
-	}
-	layout := reportLayout(cfg)
-	if rawOrder, exists := input["order"]; exists {
-		items, ok := rawOrder.([]any)
-		if !ok {
-			return nil, fmt.Errorf("layout order must be an array")
-		}
-		seen := map[string]bool{}
-		order := make([]string, 0, len(reportLayoutOrder))
-		for _, item := range items {
-			id, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("layout order entries must be strings")
-			}
-			if !validReportPanel(id) {
-				return nil, fmt.Errorf("unknown report panel %q", id)
-			}
-			if !seen[id] {
-				order = append(order, id)
-				seen[id] = true
-			}
-		}
-		for _, id := range reportLayoutOrder {
-			if !seen[id] {
-				order = append(order, id)
-			}
-		}
-		layout["order"] = order
-	}
-	for _, key := range []string{"widths", "heights", "panel_locks", "collapsed"} {
-		raw, exists := input[key]
-		if !exists {
-			continue
-		}
-		values, ok := raw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("layout %s must be an object", key)
-		}
-		current := layout[key].(map[string]any)
-		for id, item := range values {
-			if !validReportPanel(id) {
-				return nil, fmt.Errorf("unknown report panel %q", id)
-			}
-			switch key {
-			case "widths":
-				span, ok := normalizeWidth(item)
-				if !ok {
-					return nil, fmt.Errorf("invalid width for %q", id)
-				}
-				current[id] = span
-			case "heights":
-				height, ok := item.(float64)
-				if !ok || height < 180 || height > 1200 {
-					return nil, fmt.Errorf("invalid height for %q", id)
-				}
-				current[id] = height
-			case "panel_locks", "collapsed":
-				flag, ok := item.(bool)
-				if !ok {
-					return nil, fmt.Errorf("invalid %s state for %q", key, id)
-				}
-				current[id] = flag
-			}
-		}
-	}
-	if rawLocked, exists := input["locked"]; exists {
-		locked, ok := rawLocked.(bool)
-		if !ok {
-			return nil, fmt.Errorf("layout lock must be boolean")
-		}
-		layout["locked"] = locked
-	}
-	previous, hadPrevious := cfg.Data["report_layout"]
-	cfg.Data["report_layout"] = layout
-	if err := cfg.Save(); err != nil {
-		if hadPrevious {
-			cfg.Data["report_layout"] = previous
-		} else {
-			delete(cfg.Data, "report_layout")
-		}
-		return nil, fmt.Errorf("save report layout: %w", err)
-	}
-	return layout, nil
+	return savePanelLayout(cfg, reportLayoutSpec, value)
 }
 
 func tableVisibility(cfg *Config) map[string]bool {
@@ -445,7 +306,8 @@ func tableVisibility(cfg *Config) map[string]bool {
 	for key, value := range tableVisibilityDefaults {
 		visibility[key] = value
 	}
-	saved, ok := cfg.Data["table_visibility"].(map[string]any)
+	savedAny, _ := cfg.Get("table_visibility")
+	saved, ok := savedAny.(map[string]any)
 	if !ok {
 		return visibility
 	}
@@ -480,14 +342,7 @@ func saveTableVisibility(cfg *Config, value any) (map[string]bool, error) {
 	for key, visible := range visibility {
 		saved[key] = visible
 	}
-	previous, hadPrevious := cfg.Data["table_visibility"]
-	cfg.Data["table_visibility"] = saved
-	if err := cfg.Save(); err != nil {
-		if hadPrevious {
-			cfg.Data["table_visibility"] = previous
-		} else {
-			delete(cfg.Data, "table_visibility")
-		}
+	if err := cfg.Update(func(data map[string]any) { data["table_visibility"] = saved }); err != nil {
 		return nil, fmt.Errorf("save table visibility: %w", err)
 	}
 	return visibility, nil
